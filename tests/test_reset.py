@@ -93,3 +93,60 @@ def test_reset_nonexistent(mock_root, tmp_path):
     with patch("kento.reset.LXC_BASE", tmp_path):
         with pytest.raises(SystemExit):
             reset("nonexistent")
+
+
+# --- PVE mode tests ---
+
+
+def _mock_pve_run_stopped(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "pct" in args and "status" in args:
+        result.stdout = "status: stopped"
+    elif "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+def _mock_pve_run_running(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "pct" in args and "status" in args:
+        result.stdout = "status: running"
+    return result
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_clears_upper_and_work(mock_root, mock_layers, mock_run,
+                                          tmp_path):
+    lxc_dir = tmp_path / "100"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    upper = lxc_dir / "upper"
+    upper.mkdir()
+    (upper / "somefile").write_text("data")
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.LXC_BASE", tmp_path):
+        reset("100")
+
+    assert upper.is_dir()
+    assert not (upper / "somefile").exists()
+    assert (lxc_dir / "kento-layers").read_text().strip() == "/new/upper:/new/lower"
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_pve_run_running)
+@patch("kento.reset.require_root")
+def test_reset_pve_refuses_running(mock_root, mock_run, tmp_path):
+    lxc_dir = tmp_path / "100"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+
+    with patch("kento.reset.LXC_BASE", tmp_path):
+        with pytest.raises(SystemExit):
+            reset("100")

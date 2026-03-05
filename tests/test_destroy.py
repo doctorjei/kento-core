@@ -9,11 +9,12 @@ import pytest
 from kento.destroy import destroy
 
 
-def _make_container(tmp_path, name="test", state_dir=None):
+def _make_container(tmp_path, name="test", state_dir=None, mode="lxc"):
     """Create a minimal container directory for testing."""
     lxc_dir = tmp_path / name
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text(mode + "\n")
     (lxc_dir / "rootfs").mkdir()
     sd = state_dir or lxc_dir
     (lxc_dir / "kento-state").write_text(str(sd) + "\n")
@@ -91,3 +92,71 @@ def test_destroy_non_kento_container(mock_root, tmp_path):
     with patch("kento.destroy.LXC_BASE", tmp_path):
         with pytest.raises(SystemExit):
             destroy("test")
+
+
+# --- PVE mode tests ---
+
+
+def _mock_pve_run_stopped(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "pct" in args and "status" in args:
+        result.stdout = "status: stopped"
+    elif "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+def _mock_pve_run_running(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "pct" in args and "status" in args:
+        result.stdout = "status: running"
+    elif "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_pve_removes_directory(mock_root, mock_run, tmp_path):
+    lxc_dir = _make_container(tmp_path, name="100", mode="pve")
+
+    with patch("kento.destroy.LXC_BASE", tmp_path), \
+         patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
+         patch("kento.pve.socket.gethostname", return_value="node1"):
+        destroy("100")
+
+    assert not lxc_dir.exists()
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_running)
+@patch("kento.destroy.require_root")
+def test_destroy_pve_stops_running_container(mock_root, mock_run, tmp_path):
+    _make_container(tmp_path, name="100", mode="pve")
+
+    with patch("kento.destroy.LXC_BASE", tmp_path), \
+         patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
+         patch("kento.pve.socket.gethostname", return_value="node1"):
+        destroy("100")
+
+    stop_calls = [c for c in mock_run.call_args_list
+                  if "pct" in c[0][0] and "stop" in c[0][0]]
+    assert len(stop_calls) == 1
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_pve_deletes_pve_config(mock_root, mock_run, tmp_path):
+    _make_container(tmp_path, name="100", mode="pve")
+    # Create a fake PVE config
+    pve = tmp_path / "pve"
+    conf_dir = pve / "nodes" / "node1" / "lxc"
+    conf_dir.mkdir(parents=True)
+    conf = conf_dir / "100.conf"
+    conf.write_text("arch: amd64\n")
+
+    with patch("kento.destroy.LXC_BASE", tmp_path), \
+         patch("kento.pve.PVE_DIR", pve), \
+         patch("kento.pve.socket.gethostname", return_value="node1"):
+        destroy("100")
+
+    assert not conf.exists()

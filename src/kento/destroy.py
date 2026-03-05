@@ -22,18 +22,34 @@ def destroy(name: str) -> None:
               file=sys.stderr)
         sys.exit(1)
 
+    # Detect mode (default lxc for containers created before mode tracking)
+    mode_file = lxc_dir / "kento-mode"
+    mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
+
     # Read state dir before we delete anything
     state_file = lxc_dir / "kento-state"
     state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else lxc_dir
 
     # Stop if running
-    result = subprocess.run(
-        ["lxc-info", "-n", name, "-sH"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0 and "RUNNING" in result.stdout:
+    if mode == "pve":
+        result = subprocess.run(
+            ["pct", "status", name],
+            capture_output=True, text=True,
+        )
+        running = result.returncode == 0 and "running" in result.stdout
+    else:
+        result = subprocess.run(
+            ["lxc-info", "-n", name, "-sH"],
+            capture_output=True, text=True,
+        )
+        running = result.returncode == 0 and "RUNNING" in result.stdout
+
+    if running:
         print("Stopping container...")
-        subprocess.run(["lxc-stop", "-n", name], check=True)
+        if mode == "pve":
+            subprocess.run(["pct", "stop", name], check=True)
+        else:
+            subprocess.run(["lxc-stop", "-n", name], check=True)
 
     # Unmount rootfs if mounted
     rootfs = lxc_dir / "rootfs"
@@ -54,4 +70,10 @@ def destroy(name: str) -> None:
         shutil.rmtree(state_dir)
 
     shutil.rmtree(lxc_dir)
+
+    # Clean up PVE config if applicable
+    if mode == "pve":
+        from kento.pve import delete_pve_config
+        delete_pve_config(int(name))
+
     print(f"Container destroyed: {name}")

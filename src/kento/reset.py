@@ -24,13 +24,27 @@ def reset(name: str) -> None:
               file=sys.stderr)
         sys.exit(1)
 
+    # Detect mode (default lxc for containers created before mode tracking)
+    mode_file = lxc_dir / "kento-mode"
+    mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
+
     # Refuse if running
-    result = subprocess.run(
-        ["lxc-info", "-n", name, "-sH"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0 and "RUNNING" in result.stdout:
-        print(f"Error: container is running. Stop it first: lxc-stop -n {name}",
+    if mode == "pve":
+        result = subprocess.run(
+            ["pct", "status", name],
+            capture_output=True, text=True,
+        )
+        running = result.returncode == 0 and "running" in result.stdout
+    else:
+        result = subprocess.run(
+            ["lxc-info", "-n", name, "-sH"],
+            capture_output=True, text=True,
+        )
+        running = result.returncode == 0 and "RUNNING" in result.stdout
+
+    if running:
+        stop_hint = f"pct stop {name}" if mode == "pve" else f"lxc-stop -n {name}"
+        print(f"Error: container is running. Stop it first: {stop_hint}",
               file=sys.stderr)
         sys.exit(1)
 

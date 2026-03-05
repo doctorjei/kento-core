@@ -8,7 +8,7 @@ import pytest
 
 from kento.pve import (
     is_pve, _used_vmids, next_vmid, validate_vmid,
-    generate_pve_config, write_pve_config,
+    generate_pve_config, write_pve_config, delete_pve_config,
 )
 from kento import detect_mode
 
@@ -205,3 +205,25 @@ class TestWritePveConfig:
             write_pve_config(200, "test\n")
 
         assert (pve / "nodes" / "node1" / "lxc" / "200.conf").is_file()
+
+
+class TestDeletePveConfig:
+    def test_deletes_config(self, tmp_path):
+        pve = tmp_path / "pve"
+        conf_dir = pve / "nodes" / "mynode" / "lxc"
+        conf_dir.mkdir(parents=True)
+        conf = conf_dir / "100.conf"
+        conf.write_text("arch: amd64\n")
+
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.socket.gethostname", return_value="mynode"):
+            delete_pve_config(100)
+
+        assert not conf.exists()
+
+    def test_missing_config_is_noop(self, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.socket.gethostname", return_value="mynode"):
+            delete_pve_config(999)  # should not raise

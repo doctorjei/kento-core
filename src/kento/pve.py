@@ -81,6 +81,16 @@ def write_pve_config(vmid: int, content: str) -> Path:
     return conf_path
 
 
+def delete_pve_config(vmid: int) -> None:
+    """Delete a PVE config from /etc/pve/nodes/<node>/lxc/<VMID>.conf.
+
+    No error if the file doesn't exist (idempotent).
+    """
+    node = socket.gethostname()
+    conf_path = PVE_DIR / "nodes" / node / "lxc" / f"{vmid}.conf"
+    conf_path.unlink(missing_ok=True)
+
+
 def generate_pve_config(name: str, vmid: int, lxc_dir: Path, *,
                         bridge: str = "vmbr0", memory: int = 512,
                         cores: int = 1, nesting: bool = True) -> str:
