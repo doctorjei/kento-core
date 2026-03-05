@@ -1,0 +1,35 @@
+"""Resolve OCI image layer paths via podman."""
+
+import subprocess
+import sys
+
+
+def resolve_layers(image: str) -> str:
+    """Return colon-separated lowerdir string for an OCI image.
+
+    Queries podman for the image's GraphDriver layer paths.
+    Upper layer comes first (topmost), matching overlayfs lowerdir order.
+    """
+    result = subprocess.run(
+        ["podman", "image", "exists", image],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print(f"Error: image not found: {image}", file=sys.stderr)
+        sys.exit(1)
+
+    upper = subprocess.run(
+        ["podman", "image", "inspect", image,
+         "--format", "{{.GraphDriver.Data.UpperDir}}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    lower = subprocess.run(
+        ["podman", "image", "inspect", image,
+         "--format", "{{.GraphDriver.Data.LowerDir}}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    if lower and lower != "<no value>":
+        return f"{upper}:{lower}"
+    return upper
