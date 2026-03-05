@@ -50,7 +50,8 @@ class TestCreate:
     @patch("kento.create.require_root")
     def test_creates_directory_structure(self, mock_root, mock_layers,
                                          mock_run, tmp_path):
-        with patch("kento.create.LXC_BASE", tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("test", "myimage:latest")
 
         lxc_dir = tmp_path / "test"
@@ -61,13 +62,33 @@ class TestCreate:
         assert (lxc_dir / "kento-hook").is_file()
         assert (lxc_dir / "kento-image").read_text().strip() == "myimage:latest"
         assert (lxc_dir / "kento-layers").read_text().strip() == "/a:/b"
+        assert (lxc_dir / "kento-state").is_file()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_sudo_upper_in_separate_dir(self, mock_root, mock_layers,
+                                         mock_run, tmp_path):
+        state = tmp_path / "user-state" / "test"
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=state):
+            create("test", "myimage:latest")
+
+        lxc_dir = tmp_path / "test"
+        assert (state / "upper").is_dir()
+        assert (state / "work").is_dir()
+        assert (lxc_dir / "kento-state").read_text().strip() == str(state)
+        # Hook should reference the state dir for upper/work
+        hook = (lxc_dir / "kento-hook").read_text()
+        assert str(state) in hook
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_refuses_existing_container(self, mock_root, mock_layers,
                                          mock_run, tmp_path):
-        with patch("kento.create.LXC_BASE", tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("test", "myimage:latest")
             with pytest.raises(SystemExit):
                 create("test", "myimage:latest")
@@ -77,7 +98,8 @@ class TestCreate:
     @patch("kento.create.require_root")
     def test_start_calls_lxc_start(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
-        with patch("kento.create.LXC_BASE", tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("test", "myimage:latest", start=True)
 
         mock_run.assert_called_once_with(

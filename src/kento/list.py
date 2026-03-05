@@ -1,6 +1,7 @@
 """List kento-managed LXC containers."""
 
 import subprocess
+from pathlib import Path
 
 from kento import LXC_BASE
 
@@ -23,7 +24,9 @@ def list_containers() -> None:
         )
         status = "running" if result.returncode == 0 and "RUNNING" in result.stdout else "stopped"
 
-        upper_dir = lxc_dir / "upper"
+        state_file = lxc_dir / "kento-state"
+        state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else lxc_dir
+        upper_dir = state_dir / "upper"
         if upper_dir.is_dir():
             du = subprocess.run(
                 ["du", "-sh", str(upper_dir)],

@@ -2,30 +2,49 @@
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 import pytest
 
 from kento.destroy import destroy
 
 
-@patch("kento.destroy.subprocess.run")
-@patch("kento.destroy.require_root")
-def test_destroy_removes_directory(mock_root, mock_run, tmp_path):
-    lxc_dir = tmp_path / "test"
+def _make_container(tmp_path, name="test", state_dir=None):
+    """Create a minimal container directory for testing."""
+    lxc_dir = tmp_path / name
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
     (lxc_dir / "rootfs").mkdir()
+    sd = state_dir or lxc_dir
+    (lxc_dir / "kento-state").write_text(str(sd) + "\n")
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "upper").mkdir(exist_ok=True)
+    (sd / "work").mkdir(exist_ok=True)
+    return lxc_dir
 
-    def side_effect(args, **kwargs):
-        result = subprocess.CompletedProcess(args, 0)
-        if "lxc-info" in args:
-            result.stdout = "STOPPED"
-        elif "mountpoint" in args:
-            result.returncode = 1
-        return result
 
-    mock_run.side_effect = side_effect
+def _mock_run_stopped(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "lxc-info" in args:
+        result.stdout = "STOPPED"
+    elif "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+def _mock_run_running(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "lxc-info" in args:
+        result.stdout = "RUNNING"
+    elif "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_removes_directory(mock_root, mock_run, tmp_path):
+    lxc_dir = _make_container(tmp_path)
 
     with patch("kento.destroy.LXC_BASE", tmp_path):
         destroy("test")
@@ -33,29 +52,29 @@ def test_destroy_removes_directory(mock_root, mock_run, tmp_path):
     assert not lxc_dir.exists()
 
 
-@patch("kento.destroy.subprocess.run")
+@patch("kento.destroy.subprocess.run", side_effect=_mock_run_running)
 @patch("kento.destroy.require_root")
 def test_destroy_stops_running_container(mock_root, mock_run, tmp_path):
-    lxc_dir = tmp_path / "test"
-    lxc_dir.mkdir()
-    (lxc_dir / "kento-image").write_text("myimage:latest\n")
-    (lxc_dir / "rootfs").mkdir()
-
-    def side_effect(args, **kwargs):
-        result = subprocess.CompletedProcess(args, 0)
-        if "lxc-info" in args:
-            result.stdout = "RUNNING"
-        elif "mountpoint" in args:
-            result.returncode = 1
-        return result
-
-    mock_run.side_effect = side_effect
+    _make_container(tmp_path)
 
     with patch("kento.destroy.LXC_BASE", tmp_path):
         destroy("test")
 
     stop_calls = [c for c in mock_run.call_args_list if "lxc-stop" in c[0][0]]
     assert len(stop_calls) == 1
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_removes_separate_state_dir(mock_root, mock_run, tmp_path):
+    state = tmp_path / "user-state" / "test"
+    lxc_dir = _make_container(tmp_path, state_dir=state)
+
+    with patch("kento.destroy.LXC_BASE", tmp_path):
+        destroy("test")
+
+    assert not lxc_dir.exists()
+    assert not state.exists()
 
 
 @patch("kento.destroy.require_root")

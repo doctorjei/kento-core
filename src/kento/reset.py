@@ -3,6 +3,7 @@
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from kento import LXC_BASE, require_root
 from kento.hook import write_hook
@@ -33,6 +34,10 @@ def reset(name: str) -> None:
               file=sys.stderr)
         sys.exit(1)
 
+    # Read state dir
+    state_file = lxc_dir / "kento-state"
+    state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else lxc_dir
+
     # Unmount rootfs if mounted
     rootfs = lxc_dir / "rootfs"
     if subprocess.run(["mountpoint", "-q", str(rootfs)],
@@ -40,20 +45,20 @@ def reset(name: str) -> None:
         subprocess.run(["umount", str(rootfs)])
 
     # Clear writable layer
-    upper = lxc_dir / "upper"
-    work = lxc_dir / "work"
+    upper = state_dir / "upper"
+    work = state_dir / "work"
     if upper.exists():
         shutil.rmtree(upper)
     if work.exists():
         shutil.rmtree(work)
-    upper.mkdir()
-    work.mkdir()
+    upper.mkdir(parents=True)
+    work.mkdir(parents=True)
 
     # Re-resolve layers from image and regenerate hook
     image = (lxc_dir / "kento-image").read_text().strip()
     layers = resolve_layers(image)
     (lxc_dir / "kento-layers").write_text(layers + "\n")
-    write_hook(lxc_dir, layers, name)
+    write_hook(lxc_dir, layers, name, state_dir)
 
     print(f"Container reset: {name}")
     print("  Writable layer cleared, layers re-resolved from image.")

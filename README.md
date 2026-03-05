@@ -41,7 +41,7 @@ pip install .
 
 ## Usage
 
-All commands except `list` require root.
+All commands require root (run with `sudo`).
 
 ### Create a container
 
@@ -51,15 +51,16 @@ sudo kento create mybox --image myimage:latest
 
 Options:
 
-```
---bridge NAME        Network bridge (default: lxcbr0)
---memory MB          Memory limit (default: no limit)
---cores N            CPU cores (default: no limit)
---nesting/--no-nesting  LXC nesting (default: on)
---start              Start container after creation
-```
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--image IMAGE` | (required) | OCI image name |
+| `--bridge NAME` | `lxcbr0` | Network bridge |
+| `--memory MB` | no limit | Memory limit in MB |
+| `--cores N` | no limit | CPU core count |
+| `--nesting / --no-nesting` | on | Enable LXC nesting |
+| `--start` | off | Start container after creation |
 
-### Start / stop
+### Start / stop / attach
 
 Kento creates standard LXC containers. Use LXC tools directly:
 
@@ -84,7 +85,8 @@ sudo kento reset mybox
 ```
 
 Clears the writable layer and re-resolves image layers from podman.
-The container must be stopped first.
+The container must be stopped first. Use this after pulling an updated
+image to pick up the new layers.
 
 ### Destroy a container
 
@@ -93,7 +95,29 @@ sudo kento destroy mybox
 ```
 
 Stops the container if running, unmounts the rootfs, and removes
-everything.
+everything including the writable layer.
+
+## Writable layer storage
+
+When you run kento via `sudo`, the writable layer (upper/work) is
+stored in your home directory, separate from the LXC container config:
+
+```
+~/.local/share/kento/<name>/
+├── upper/          # All container writes land here
+└── work/           # Overlayfs internal workdir
+```
+
+When run as root directly (not via sudo), the writable layer is stored
+alongside the container in `/var/lib/lxc/<name>/`.
+
+This means:
+- Each user's container changes are isolated in their home directory
+- Cleanup is straightforward: `kento destroy` removes both locations,
+  or you can manually delete `~/.local/share/kento/` to wipe all
+  writable state
+- `kento reset` clears the writable layer without destroying the
+  container
 
 ## Runtime layout
 
@@ -103,7 +127,10 @@ everything.
 ├── kento-hook      # Mount hook script (generated, per-container)
 ├── kento-image     # OCI image name
 ├── kento-layers    # Pre-resolved layer paths
-├── rootfs/         # Overlayfs mount point
+├── kento-state     # Path to writable layer directory
+└── rootfs/         # Overlayfs mount point
+
+~/.local/share/kento/<name>/    (when run via sudo)
 ├── upper/          # Writable layer
 └── work/           # Overlayfs workdir
 ```
@@ -119,6 +146,9 @@ still exist at start time and gives an actionable error if they don't:
 Error: layer path missing: /var/lib/containers/storage/overlay/.../diff
 Image may have changed. Run: kento reset mybox
 ```
+
+When run via sudo, kento queries the invoking user's podman store
+(not root's), so your images don't need to be in the root store.
 
 ## License
 

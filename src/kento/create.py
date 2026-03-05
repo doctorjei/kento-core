@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kento import LXC_BASE, require_root
+from kento import LXC_BASE, require_root, upper_base
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
@@ -60,17 +60,20 @@ def create(name: str, image: str, *, bridge: str = "lxcbr0",
               file=sys.stderr)
         sys.exit(1)
 
-    # Create directory structure
+    # Create directory structure — upper/work may be outside lxc_dir for sudo users
+    state_dir = upper_base(name)
     (lxc_dir / "rootfs").mkdir(parents=True)
-    (lxc_dir / "upper").mkdir()
-    (lxc_dir / "work").mkdir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "upper").mkdir(exist_ok=True)
+    (state_dir / "work").mkdir(exist_ok=True)
 
-    # Write image reference and layer paths
+    # Write image reference, layer paths, and state dir location
     (lxc_dir / "kento-image").write_text(image + "\n")
     (lxc_dir / "kento-layers").write_text(layers + "\n")
+    (lxc_dir / "kento-state").write_text(str(state_dir) + "\n")
 
     # Generate hook and config
-    write_hook(lxc_dir, layers, name)
+    write_hook(lxc_dir, layers, name, state_dir)
     (lxc_dir / "config").write_text(
         generate_config(name, lxc_dir, bridge=bridge, memory=memory,
                         cores=cores, nesting=nesting)

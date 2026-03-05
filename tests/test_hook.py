@@ -12,6 +12,19 @@ def test_generate_hook_contains_paths():
     assert 'NAME="test"' in script
 
 
+def test_generate_hook_default_state_dir():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert 'STATE_DIR="/var/lib/lxc/test"' in script
+
+
+def test_generate_hook_custom_state_dir():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test",
+                           state_dir=Path("/home/alice/.local/share/kento/test"))
+    assert 'STATE_DIR="/home/alice/.local/share/kento/test"' in script
+    assert "$STATE_DIR/upper" in script
+    assert "$STATE_DIR/work" in script
+
+
 def test_generate_hook_has_mount_workaround():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     assert "LIBMOUNT_FORCE_MOUNT2=always" in script
