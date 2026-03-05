@@ -20,7 +20,7 @@ LAYERS="{layers}"
 HOOK_TYPE="${{LXC_HOOK_TYPE:-$3}}"
 
 case "$HOOK_TYPE" in
-    pre-start)
+    pre-start|pre-mount)
         # Validate layer paths still exist (image may have changed)
         IFS=:
         for dir in $LAYERS; do
@@ -32,11 +32,16 @@ case "$HOOK_TYPE" in
         done
         unset IFS
 
-        mkdir -p "$STATE_DIR/upper" "$STATE_DIR/work" "$LXC_DIR/rootfs"
+        # pre-mount (PVE): mount at lxc.rootfs.path source so LXC picks it up
+        # pre-start (plain LXC): mount at $LXC_DIR/rootfs directly
+        # Both use $LXC_ROOTFS_PATH when available, else $LXC_DIR/rootfs
+        ROOTFS="${{LXC_ROOTFS_PATH:-$LXC_DIR/rootfs}}"
+
+        mkdir -p "$STATE_DIR/upper" "$STATE_DIR/work" "$ROOTFS"
         export LIBMOUNT_FORCE_MOUNT2=always
         mount -t overlay overlay \\
             -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \\
-            "$LXC_DIR/rootfs"
+            "$ROOTFS"
         ;;
     post-stop)
         mountpoint -q "$LXC_DIR/rootfs" 2>/dev/null && umount "$LXC_DIR/rootfs" || true

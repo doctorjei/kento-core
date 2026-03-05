@@ -16,6 +16,14 @@ def require_root() -> None:
         sys.exit(1)
 
 
+def detect_mode(force: str | None = None) -> str:
+    """Return 'pve' or 'lxc' based on environment or explicit override."""
+    if force:
+        return force
+    from kento.pve import is_pve
+    return "pve" if is_pve() else "lxc"
+
+
 def upper_base(name: str) -> Path:
     """Return the base directory for a container's upper and work dirs.
 

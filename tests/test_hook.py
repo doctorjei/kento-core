@@ -37,15 +37,21 @@ def test_generate_hook_validates_layers():
     assert "kento reset $NAME" in script
 
 
-def test_generate_hook_has_pre_start_and_post_stop():
+def test_generate_hook_has_pre_start_pre_mount_and_post_stop():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a", "test")
-    assert "pre-start)" in script
+    assert "pre-start|pre-mount)" in script
     assert "post-stop)" in script
 
 
 def test_generate_hook_is_posix_sh():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a", "test")
     assert script.startswith("#!/bin/sh\n")
+
+
+def test_generate_hook_uses_lxc_rootfs_path():
+    script = generate_hook(Path("/var/lib/lxc/100"), "/a:/b", "test")
+    assert "LXC_ROOTFS_PATH" in script
+    assert 'ROOTFS="${LXC_ROOTFS_PATH:-$LXC_DIR/rootfs}"' in script
 
 
 def test_write_hook(tmp_path):
