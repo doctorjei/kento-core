@@ -5,7 +5,7 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 LXC_BASE = Path("/var/lib/lxc")
 
@@ -36,3 +36,66 @@ def upper_base(name: str) -> Path:
         home = Path(pwd.getpwnam(sudo_user).pw_dir)
         return home / ".local" / "share" / "kento" / name
     return LXC_BASE / name
+
+
+def sanitize_image_name(image: str) -> str:
+    """Convert an OCI image reference to a filesystem-safe name.
+
+    The transformation is bijective (reversible):
+      '-' → '--',  '/' → '-',  '_' → '__',  ':' → '_'
+    """
+    s = image.replace("-", "--")
+    s = s.replace("/", "-")
+    s = s.replace("_", "__")
+    s = s.replace(":", "_")
+    return s
+
+
+def next_instance_name(base_name: str, scan_dir: Path) -> str:
+    """Return the next available auto-generated instance name.
+
+    Appends -0, -1, -2, ... to base_name until an unused name is found.
+    Checks both directory names and kento-name files in scan_dir.
+    """
+    used_names: set[str] = set()
+    if scan_dir.is_dir():
+        for d in scan_dir.iterdir():
+            if d.is_dir():
+                used_names.add(d.name)
+                name_file = d / "kento-name"
+                if name_file.is_file():
+                    used_names.add(name_file.read_text().strip())
+    n = 0
+    while True:
+        candidate = f"{base_name}-{n}"
+        if candidate not in used_names:
+            return candidate
+        n += 1
+
+
+def resolve_container(name: str, scan_dir: Path | None = None) -> Path:
+    """Resolve a container name to its directory path.
+
+    For LXC mode, the name IS the directory name (fast path).
+    For PVE mode, scans kento-name files to find the matching directory.
+    Returns the container directory path, or exits with error if not found.
+    """
+    base = scan_dir or LXC_BASE
+
+    # Fast path: directory name matches
+    direct = base / name
+    if direct.is_dir() and (direct / "kento-image").is_file():
+        return direct
+
+    # Scan kento-name files
+    if base.is_dir():
+        for d in sorted(base.iterdir()):
+            if not d.is_dir():
+                continue
+            name_file = d / "kento-name"
+            if name_file.is_file() and name_file.read_text().strip() == name:
+                if (d / "kento-image").is_file():
+                    return d
+
+    print(f"Error: container not found: {name}", file=sys.stderr)
+    sys.exit(1)
