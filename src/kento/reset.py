@@ -21,7 +21,10 @@ def reset(name: str) -> None:
     mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
 
     # Refuse if running
-    if mode == "pve":
+    if mode == "vm":
+        from kento.vm import is_vm_running
+        running = is_vm_running(lxc_dir)
+    elif mode == "pve":
         result = subprocess.run(
             ["pct", "status", container_id],
             capture_output=True, text=True,
@@ -60,11 +63,14 @@ def reset(name: str) -> None:
     upper.mkdir(parents=True)
     work.mkdir(parents=True)
 
-    # Re-resolve layers from image and regenerate hook
+    # Re-resolve layers from image
     image = (lxc_dir / "kento-image").read_text().strip()
     layers = resolve_layers(image)
     (lxc_dir / "kento-layers").write_text(layers + "\n")
-    write_hook(lxc_dir, layers, name, state_dir)
+
+    # Regenerate hook (LXC/PVE only — VM mode has no hook)
+    if mode != "vm":
+        write_hook(lxc_dir, layers, name, state_dir)
 
     print(f"Container reset: {name}")
     print("  Writable layer cleared, layers re-resolved from image.")

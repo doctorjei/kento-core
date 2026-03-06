@@ -1,9 +1,9 @@
-"""List kento-managed LXC containers."""
+"""List kento-managed containers."""
 
 import subprocess
 from pathlib import Path
 
-from kento import LXC_BASE
+from kento import LXC_BASE, VM_BASE
 
 
 def list_containers() -> None:
@@ -12,7 +12,13 @@ def list_containers() -> None:
     print(f"{'CONTAINER':<20} {'IMAGE':<30} {'STATUS':<10} {'MODE':<6} UPPER SIZE")
     print(f"{'---------':<20} {'-----':<30} {'------':<10} {'----':<6} ----------")
 
-    for image_file in sorted(LXC_BASE.glob("*/kento-image")):
+    # Collect kento-image files from both LXC and VM bases
+    image_files = []
+    for base in [LXC_BASE, VM_BASE]:
+        if base.is_dir():
+            image_files.extend(base.glob("*/kento-image"))
+
+    for image_file in sorted(image_files, key=lambda f: f.parent.name):
         found = True
         lxc_dir = image_file.parent
         container_id = lxc_dir.name
@@ -27,7 +33,10 @@ def list_containers() -> None:
         mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
 
         # Status check — use mode-appropriate command
-        if mode == "pve":
+        if mode == "vm":
+            from kento.vm import is_vm_running
+            status = "running" if is_vm_running(lxc_dir) else "stopped"
+        elif mode == "pve":
             result = subprocess.run(
                 ["pct", "status", container_id],
                 capture_output=True, text=True,

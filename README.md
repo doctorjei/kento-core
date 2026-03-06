@@ -10,22 +10,33 @@ woodblock printing blocks that ensure each color layer aligns perfectly.
 
 ## How it works
 
-1. `kento create` inspects an OCI image via podman, resolves the layer
-   paths, and writes an LXC config with a generated hook script.
-2. At container start, the hook mounts overlayfs using the image layers
-   as read-only lower dirs, plus a writable upper layer.
+1. `kento container create <image>` inspects an OCI image via podman,
+   resolves the layer paths, and writes the appropriate config + hook.
+2. At container start, overlayfs is mounted using the image layers as
+   read-only lower dirs, plus a writable upper layer.
 3. The container boots with systemd as PID 1 — a full system container.
 
 The OCI image layers are read-only. All writes go to a separate upper
-directory. `kento reset` clears the upper layer to revert to a clean
-image state.
+directory. `kento container reset` clears the upper layer to revert to
+a clean image state.
+
+## Three modes
+
+- **LXC** (default on plain LXC) — standard LXC containers via
+  `lxc-start`. Auto-detected.
+- **PVE** (default on Proxmox VE) — containers visible in Proxmox web UI
+  via `pct`. Auto-detected when `/etc/pve` exists.
+- **VM** (explicit `--vm` only) — boots OCI images as QEMU VMs via
+  virtiofs. Kernel and initramfs come from inside the OCI image
+  (`/boot/vmlinuz`, `/boot/initramfs.img`).
 
 ## Requirements
 
 - Python 3.11+
 - Podman
-- LXC
+- LXC (for LXC/PVE modes)
 - util-linux 2.39+ (for `LIBMOUNT_FORCE_MOUNT2` support)
+- QEMU + virtiofsd (for VM mode)
 
 ## Install
 
@@ -46,109 +57,80 @@ All commands require root (run with `sudo`).
 ### Create a container
 
 ```
-sudo kento create mybox --image myimage:latest
+sudo kento container create <image> [--name <name>]
 ```
 
 Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--image IMAGE` | (required) | OCI image name |
-| `--bridge NAME` | `lxcbr0` | Network bridge |
+| `--name NAME` | auto | Container name (auto-generated if omitted) |
+| `--pve` / `--lxc` / `--vm` | auto | Force mode |
+| `--bridge NAME` | `vmbr0`/`lxcbr0` | Network bridge (LXC/PVE) |
 | `--memory MB` | no limit | Memory limit in MB |
 | `--cores N` | no limit | CPU core count |
 | `--nesting / --no-nesting` | on | Enable LXC nesting |
+| `--vmid N` | auto | PVE VMID (PVE mode only) |
+| `--port H:G` | `auto:22` | Port forwarding (VM mode only) |
 | `--start` | off | Start container after creation |
 
-### Start / stop / attach
-
-Kento creates standard LXC containers. Use LXC tools directly:
+### Start / stop
 
 ```
-sudo lxc-start -n mybox
-sudo lxc-stop -n mybox
-sudo lxc-attach -n mybox
+sudo kento container start <name>
+sudo kento container stop <name>
 ```
+
+For LXC/PVE containers, you can also use `lxc-attach` / `pct exec` directly.
+For VM containers, use `ssh -p <port> root@localhost`.
 
 ### List containers
 
 ```
-sudo kento list
+sudo kento container list
 ```
 
-Shows name, image, status, and writable layer size.
+Shows name, image, status, mode, and writable layer size. Lists containers
+from all modes (LXC, PVE, VM).
 
 ### Reset a container
 
 ```
-sudo kento reset mybox
+sudo kento container reset <name>
 ```
 
 Clears the writable layer and re-resolves image layers from podman.
-The container must be stopped first. Use this after pulling an updated
-image to pick up the new layers.
+The container must be stopped first.
 
-### Destroy a container
+### Remove a container
 
 ```
-sudo kento destroy mybox
+sudo kento container rm <name>
 ```
 
 Stops the container if running, unmounts the rootfs, and removes
 everything including the writable layer.
 
-## Writable layer storage
-
-When you run kento via `sudo`, the writable layer (upper/work) is
-stored in your home directory, separate from the LXC container config:
-
-```
-~/.local/share/kento/<name>/
-├── upper/          # All container writes land here
-└── work/           # Overlayfs internal workdir
-```
-
-When run as root directly (not via sudo), the writable layer is stored
-alongside the container in `/var/lib/lxc/<name>/`.
-
-This means:
-- Each user's container changes are isolated in their home directory
-- Cleanup is straightforward: `kento destroy` removes both locations,
-  or you can manually delete `~/.local/share/kento/` to wipe all
-  writable state
-- `kento reset` clears the writable layer without destroying the
-  container
-
 ## Runtime layout
 
 ```
-/var/lib/lxc/<name>/
-├── config          # LXC config (generated)
-├── kento-hook      # Mount hook script (generated, per-container)
-├── kento-image     # OCI image name
-├── kento-layers    # Pre-resolved layer paths
-├── kento-state     # Path to writable layer directory
-└── rootfs/         # Overlayfs mount point
+/var/lib/lxc/<name>/            (LXC mode)
+/var/lib/lxc/<VMID>/            (PVE mode)
+├── config / kento-hook         # LXC config + mount hook
+├── kento-image                 # OCI image name
+├── kento-layers                # Pre-resolved layer paths
+├── kento-state                 # Path to writable layer directory
+├── kento-mode                  # "lxc", "pve", or "vm"
+├── kento-name                  # Container name
+└── rootfs/                     # Overlayfs mount point
 
-~/.local/share/kento/<name>/    (when run via sudo)
-├── upper/          # Writable layer
-└── work/           # Overlayfs workdir
+/var/lib/kento/vm/<name>/       (VM mode)
+├── kento-port                  # Host:guest port (e.g., "10022:22")
+├── kento-qemu-pid              # QEMU PID (when running)
+├── kento-virtiofsd-pid         # virtiofsd PID (when running)
+├── virtiofsd.sock              # virtiofsd socket (when running)
+└── rootfs/                     # Overlayfs mount point
 ```
-
-## Layer resolution
-
-OCI image layers are resolved at create time (and on reset) because
-the LXC hook runs in a restricted mount namespace where podman can't
-initialize its storage driver. The hook validates that layer paths
-still exist at start time and gives an actionable error if they don't:
-
-```
-Error: layer path missing: /var/lib/containers/storage/overlay/.../diff
-Image may have changed. Run: kento reset mybox
-```
-
-When run via sudo, kento queries the invoking user's podman store
-(not root's), so your images don't need to be in the root store.
 
 ## License
 

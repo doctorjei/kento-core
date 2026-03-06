@@ -14,7 +14,10 @@ def stop(name: str) -> None:
     mode_file = lxc_dir / "kento-mode"
     mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
 
-    if mode == "pve":
+    if mode == "vm":
+        from kento.vm import stop_vm
+        stop_vm(lxc_dir)
+    elif mode == "pve":
         subprocess.run(["pct", "stop", container_id], check=True)
     else:
         subprocess.run(["lxc-stop", "-n", container_id], check=True)

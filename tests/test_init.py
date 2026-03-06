@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from kento import (
-    require_root, upper_base, LXC_BASE,
+    require_root, upper_base, LXC_BASE, VM_BASE,
     sanitize_image_name, next_instance_name, resolve_container,
 )
 
@@ -144,3 +144,46 @@ def test_resolve_container_prefers_direct_match(tmp_path):
     (d2 / "kento-name").write_text("mybox\n")
     result = resolve_container("mybox", tmp_path)
     assert result == d1
+
+
+def test_resolve_container_searches_vm_base(tmp_path):
+    """When scan_dir is None, searches both LXC_BASE and VM_BASE."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = vm / "testvm"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+    (d / "kento-name").write_text("testvm\n")
+
+    with patch("kento.LXC_BASE", lxc), \
+         patch("kento.VM_BASE", vm):
+        result = resolve_container("testvm")
+    assert result == d
+
+
+def test_resolve_container_lxc_before_vm(tmp_path):
+    """LXC_BASE is searched before VM_BASE."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d_lxc = lxc / "mybox"
+    d_lxc.mkdir()
+    (d_lxc / "kento-image").write_text("debian:12\n")
+    d_vm = vm / "mybox"
+    d_vm.mkdir()
+    (d_vm / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), \
+         patch("kento.VM_BASE", vm):
+        result = resolve_container("mybox")
+    assert result == d_lxc
+
+
+def test_upper_base_with_custom_base(tmp_path):
+    """upper_base accepts an optional base directory."""
+    with patch.dict(os.environ, {}, clear=True):
+        result = upper_base("test", tmp_path)
+    assert result == tmp_path / "test"

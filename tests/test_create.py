@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from kento.create import create, generate_config
+from kento.vm import VM_BASE
 
 
 class TestGenerateConfig:
@@ -246,3 +247,89 @@ class TestCreate:
             create("myimage:latest", name="test", mode="pve", vmid=200)
 
         assert (tmp_path / "200" / "kento-mode").read_text().strip() == "pve"
+
+
+class TestVmCreate:
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_creates_in_vm_base(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm")
+
+        lxc_dir = vm_dir / "test"
+        assert (lxc_dir / "rootfs").is_dir()
+        assert (lxc_dir / "upper").is_dir()
+        assert (lxc_dir / "work").is_dir()
+        assert (lxc_dir / "kento-image").read_text().strip() == "myimage:latest"
+        assert (lxc_dir / "kento-layers").read_text().strip() == "/a:/b"
+        assert (lxc_dir / "kento-mode").read_text().strip() == "vm"
+        assert (lxc_dir / "kento-name").read_text().strip() == "test"
+        assert (lxc_dir / "kento-port").is_file()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_no_hook(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm")
+
+        lxc_dir = vm_dir / "test"
+        assert not (lxc_dir / "kento-hook").exists()
+        assert not (lxc_dir / "config").exists()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_auto_port(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm")
+
+        port = (vm_dir / "test" / "kento-port").read_text().strip()
+        assert port == "10022:22"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_explicit_port(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm", port="12345:2222")
+
+        port = (vm_dir / "test" / "kento-port").read_text().strip()
+        assert port == "12345:2222"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vmid_with_vm_mode_errors(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm", vmid=100)
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_auto_name(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "myimage_latest-0"):
+            create("myimage:latest", mode="vm")
+
+        lxc_dir = vm_dir / "myimage_latest-0"
+        assert (lxc_dir / "kento-name").read_text().strip() == "myimage_latest-0"

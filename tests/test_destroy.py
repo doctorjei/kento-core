@@ -153,3 +153,54 @@ def test_destroy_pve_deletes_pve_config(mock_root, mock_run, tmp_path):
         destroy("mybox")
 
     assert not conf.exists()
+
+
+# --- VM mode tests ---
+
+
+def _mock_vm_run_not_mounted(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_vm_run_not_mounted)
+@patch("kento.destroy.require_root")
+def test_destroy_vm_removes_directory(mock_root, mock_run, tmp_path):
+    lxc_dir = _make_container(tmp_path, name="testvm", mode="vm")
+
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        destroy("testvm")
+
+    assert not lxc_dir.exists()
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_vm_run_not_mounted)
+@patch("kento.destroy.require_root")
+def test_destroy_vm_stops_running(mock_root, mock_run, tmp_path):
+    lxc_dir = _make_container(tmp_path, name="testvm", mode="vm")
+
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm.is_vm_running", return_value=True), \
+         patch("kento.vm.stop_vm") as mock_stop:
+        destroy("testvm")
+
+    mock_stop.assert_called_once_with(lxc_dir)
+    assert not lxc_dir.exists()
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_vm_run_not_mounted)
+@patch("kento.destroy.require_root")
+def test_destroy_vm_no_podman_unmount(mock_root, mock_run, tmp_path):
+    lxc_dir = _make_container(tmp_path, name="testvm", mode="vm")
+
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        destroy("testvm")
+
+    # No podman image unmount calls for VM mode
+    podman_calls = [c for c in mock_run.call_args_list
+                    if c[0][0][0] in ("podman", "runuser")]
+    assert len(podman_calls) == 0

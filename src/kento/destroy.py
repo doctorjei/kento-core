@@ -22,7 +22,10 @@ def destroy(name: str) -> None:
     state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else lxc_dir
 
     # Stop if running
-    if mode == "pve":
+    if mode == "vm":
+        from kento.vm import is_vm_running, stop_vm
+        running = is_vm_running(lxc_dir)
+    elif mode == "pve":
         result = subprocess.run(
             ["pct", "status", container_id],
             capture_output=True, text=True,
@@ -37,24 +40,33 @@ def destroy(name: str) -> None:
 
     if running:
         print("Stopping container...")
-        if mode == "pve":
+        if mode == "vm":
+            stop_vm(lxc_dir)
+        elif mode == "pve":
             subprocess.run(["pct", "stop", container_id], check=True)
         else:
             subprocess.run(["lxc-stop", "-n", container_id], check=True)
 
-    # Unmount rootfs if mounted
-    rootfs = lxc_dir / "rootfs"
-    if subprocess.run(["mountpoint", "-q", str(rootfs)],
-                      capture_output=True).returncode == 0:
-        subprocess.run(["umount", str(rootfs)])
+    if mode == "vm":
+        # Unmount rootfs if still mounted (stop_vm normally handles this)
+        rootfs = lxc_dir / "rootfs"
+        if subprocess.run(["mountpoint", "-q", str(rootfs)],
+                          capture_output=True).returncode == 0:
+            subprocess.run(["umount", str(rootfs)])
+    else:
+        # Unmount rootfs if mounted
+        rootfs = lxc_dir / "rootfs"
+        if subprocess.run(["mountpoint", "-q", str(rootfs)],
+                          capture_output=True).returncode == 0:
+            subprocess.run(["umount", str(rootfs)])
 
-    # Release OCI image mount
-    from kento.layers import _podman_cmd
-    image = (lxc_dir / "kento-image").read_text().strip()
-    subprocess.run(
-        [*_podman_cmd(), "image", "unmount", image],
-        capture_output=True,
-    )
+        # Release OCI image mount
+        from kento.layers import _podman_cmd
+        image = (lxc_dir / "kento-image").read_text().strip()
+        subprocess.run(
+            [*_podman_cmd(), "image", "unmount", image],
+            capture_output=True,
+        )
 
     # Remove state dir if separate from lxc_dir
     if state_dir != lxc_dir and state_dir.is_dir():

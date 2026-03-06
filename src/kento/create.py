@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kento import LXC_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
+from kento import LXC_BASE, VM_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
@@ -45,27 +45,30 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
            memory: int = 0, cores: int = 0, nesting: bool = True,
            start: bool = False, mode: str | None = None,
-           vmid: int = 0) -> None:
+           vmid: int = 0, port: str | None = None) -> None:
     require_root()
 
     # Resolve mode
     mode = detect_mode(mode)
 
+    # Determine base directory for this mode
+    base_dir = VM_BASE if mode == "vm" else LXC_BASE
+
     # Resolve container name
     if name is None:
         base_name = sanitize_image_name(image)
-        name = next_instance_name(base_name, LXC_BASE)
-    elif (LXC_BASE / name).exists():
+        name = next_instance_name(base_name, base_dir)
+    elif (base_dir / name).exists():
         print(f"Error: container name already taken: {name}", file=sys.stderr)
         sys.exit(1)
 
-    # Validate --vmid not used with --lxc
-    if vmid and mode == "lxc":
-        print("Error: --vmid cannot be used with LXC mode", file=sys.stderr)
+    # Validate --vmid not used with non-PVE modes
+    if vmid and mode != "pve":
+        print(f"Error: --vmid cannot be used with {mode.upper()} mode", file=sys.stderr)
         sys.exit(1)
 
-    # Resolve bridge default per mode
-    if bridge is None:
+    # Resolve bridge default per mode (not applicable for VM)
+    if mode != "vm" and bridge is None:
         bridge = "vmbr0" if mode == "pve" else "lxcbr0"
 
     # Resolve container_id for directory paths
@@ -77,11 +80,14 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             vmid = next_vmid()
         container_id = str(vmid)
         print(f"Mode: pve (VMID {vmid})")
+    elif mode == "vm":
+        container_id = name
+        print("Mode: vm")
     else:
         container_id = name
         print("Mode: lxc")
 
-    lxc_dir = LXC_BASE / container_id
+    lxc_dir = base_dir / container_id
 
     if lxc_dir.exists():
         print(f"Error: container already exists: {container_id}", file=sys.stderr)
@@ -95,7 +101,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         sys.exit(1)
 
     # Create directory structure — upper/work may be outside lxc_dir for sudo users
-    state_dir = upper_base(container_id)
+    state_dir = upper_base(container_id, base_dir if mode == "vm" else None)
     (lxc_dir / "rootfs").mkdir(parents=True)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "upper").mkdir(exist_ok=True)
@@ -108,45 +114,64 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     (lxc_dir / "kento-mode").write_text(mode + "\n")
     (lxc_dir / "kento-name").write_text(name + "\n")
 
-    # Generate hook
-    write_hook(lxc_dir, layers, name, state_dir)
+    if mode == "vm":
+        # Write port mapping
+        from kento.vm import allocate_port
+        if port is None:
+            host_port = allocate_port(base_dir)
+            guest_port = 22
+        else:
+            host_port, guest_port = port.split(":")
+            host_port, guest_port = int(host_port), int(guest_port)
+        (lxc_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
 
-    # Generate config
-    if mode == "pve":
-        pve_memory = memory if memory else 512
-        pve_cores = cores if cores else 1
-        pve_conf = write_pve_config(
-            vmid,
-            generate_pve_config(name, vmid, lxc_dir, bridge=bridge,
-                                memory=pve_memory, cores=pve_cores,
-                                nesting=nesting)
-        )
-        config_path = str(pve_conf)
+        print(f"\nContainer created: {name}")
+        print(f"  Image:  {image}")
+        print(f"  Port:   {host_port}:{guest_port}")
+        print(f"  Dir:    {lxc_dir}")
     else:
-        (lxc_dir / "config").write_text(
-            generate_config(name, lxc_dir, bridge=bridge, memory=memory,
-                            cores=cores, nesting=nesting)
-        )
-        config_path = f"{lxc_dir}/config"
+        # Generate hook (LXC/PVE only)
+        write_hook(lxc_dir, layers, name, state_dir)
 
-    print(f"\nContainer created: {name}")
-    print(f"  Image:   {image}")
-    print(f"  Bridge:  {bridge}")
-    if mode == "pve":
-        print(f"  VMID:    {vmid}")
-        print(f"  Memory:  {pve_memory} MB")
-        print(f"  Cores:   {pve_cores}")
-    else:
-        if memory:
-            print(f"  Memory:  {memory} MB")
-        if cores:
-            print(f"  Cores:   {cores}")
-    print(f"  Nesting: {nesting}")
-    print(f"  Config:  {config_path}")
+        # Generate config
+        if mode == "pve":
+            pve_memory = memory if memory else 512
+            pve_cores = cores if cores else 1
+            pve_conf = write_pve_config(
+                vmid,
+                generate_pve_config(name, vmid, lxc_dir, bridge=bridge,
+                                    memory=pve_memory, cores=pve_cores,
+                                    nesting=nesting)
+            )
+            config_path = str(pve_conf)
+        else:
+            (lxc_dir / "config").write_text(
+                generate_config(name, lxc_dir, bridge=bridge, memory=memory,
+                                cores=cores, nesting=nesting)
+            )
+            config_path = f"{lxc_dir}/config"
+
+        print(f"\nContainer created: {name}")
+        print(f"  Image:   {image}")
+        print(f"  Bridge:  {bridge}")
+        if mode == "pve":
+            print(f"  VMID:    {vmid}")
+            print(f"  Memory:  {pve_memory} MB")
+            print(f"  Cores:   {pve_cores}")
+        else:
+            if memory:
+                print(f"  Memory:  {memory} MB")
+            if cores:
+                print(f"  Cores:   {cores}")
+        print(f"  Nesting: {nesting}")
+        print(f"  Config:  {config_path}")
 
     if start:
         print("\nStarting container...")
-        if mode == "pve":
+        if mode == "vm":
+            from kento.vm import start_vm
+            start_vm(lxc_dir, name)
+        elif mode == "pve":
             subprocess.run(["pct", "start", str(vmid)], check=True)
         else:
             subprocess.run(["lxc-start", "-n", name], check=True)

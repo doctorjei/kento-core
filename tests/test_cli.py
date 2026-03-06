@@ -18,7 +18,7 @@ def test_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "0.3.0" in output
+    assert "0.4.0" in output
 
 
 def test_no_command(capsys):
@@ -53,13 +53,27 @@ def test_container_create_help(capsys):
     assert "--name" in output
     assert "--pve" in output
     assert "--lxc" in output
+    assert "--vm" in output
     assert "--vmid" in output
+    assert "--port" in output
     assert "--start" in output
 
 
 def test_pve_lxc_mutually_exclusive(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["container", "create", "debian:12", "--pve", "--lxc"])
+    assert exc.value.code != 0
+
+
+def test_vm_pve_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["container", "create", "debian:12", "--vm", "--pve"])
+    assert exc.value.code != 0
+
+
+def test_vm_lxc_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["container", "create", "debian:12", "--vm", "--lxc"])
     assert exc.value.code != 0
 
 
