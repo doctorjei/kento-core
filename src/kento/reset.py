@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kento import LXC_BASE, require_root
+from kento import require_root, resolve_container
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
@@ -13,16 +13,8 @@ from kento.layers import resolve_layers
 def reset(name: str) -> None:
     require_root()
 
-    lxc_dir = LXC_BASE / name
-
-    if not lxc_dir.is_dir():
-        print(f"Error: container not found: {name}", file=sys.stderr)
-        sys.exit(1)
-
-    if not (lxc_dir / "kento-image").is_file():
-        print(f"Error: {name} is not a kento-managed container",
-              file=sys.stderr)
-        sys.exit(1)
+    lxc_dir = resolve_container(name)
+    container_id = lxc_dir.name
 
     # Detect mode (default lxc for containers created before mode tracking)
     mode_file = lxc_dir / "kento-mode"
@@ -31,19 +23,19 @@ def reset(name: str) -> None:
     # Refuse if running
     if mode == "pve":
         result = subprocess.run(
-            ["pct", "status", name],
+            ["pct", "status", container_id],
             capture_output=True, text=True,
         )
         running = result.returncode == 0 and "running" in result.stdout
     else:
         result = subprocess.run(
-            ["lxc-info", "-n", name, "-sH"],
+            ["lxc-info", "-n", container_id, "-sH"],
             capture_output=True, text=True,
         )
         running = result.returncode == 0 and "RUNNING" in result.stdout
 
     if running:
-        stop_hint = f"pct stop {name}" if mode == "pve" else f"lxc-stop -n {name}"
+        stop_hint = f"kento container stop {name}"
         print(f"Error: container is running. Stop it first: {stop_hint}",
               file=sys.stderr)
         sys.exit(1)

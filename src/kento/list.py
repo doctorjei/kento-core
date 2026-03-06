@@ -18,6 +18,10 @@ def list_containers() -> None:
         container_id = lxc_dir.name
         image = image_file.read_text().strip()
 
+        # Display name from kento-name file (falls back to dir name)
+        name_file = lxc_dir / "kento-name"
+        display_name = name_file.read_text().strip() if name_file.is_file() else container_id
+
         # Detect mode
         mode_file = lxc_dir / "kento-mode"
         mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
@@ -48,7 +52,7 @@ def list_containers() -> None:
         else:
             upper_size = "0"
 
-        print(f"{container_id:<20} {image:<30} {status:<10} {mode:<6} {upper_size}")
+        print(f"{display_name:<20} {image:<30} {status:<10} {mode:<6} {upper_size}")
 
     if not found:
         print("(no kento-managed containers found)")

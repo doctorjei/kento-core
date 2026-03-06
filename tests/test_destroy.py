@@ -15,6 +15,7 @@ def _make_container(tmp_path, name="test", state_dir=None, mode="lxc"):
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
     (lxc_dir / "kento-mode").write_text(mode + "\n")
+    (lxc_dir / "kento-name").write_text(name + "\n")
     (lxc_dir / "rootfs").mkdir()
     sd = state_dir or lxc_dir
     (lxc_dir / "kento-state").write_text(str(sd) + "\n")
@@ -47,7 +48,7 @@ def _mock_run_running(args, **kwargs):
 def test_destroy_removes_directory(mock_root, mock_run, tmp_path):
     lxc_dir = _make_container(tmp_path)
 
-    with patch("kento.destroy.LXC_BASE", tmp_path):
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir):
         destroy("test")
 
     assert not lxc_dir.exists()
@@ -58,7 +59,7 @@ def test_destroy_removes_directory(mock_root, mock_run, tmp_path):
 def test_destroy_stops_running_container(mock_root, mock_run, tmp_path):
     _make_container(tmp_path)
 
-    with patch("kento.destroy.LXC_BASE", tmp_path):
+    with patch("kento.destroy.resolve_container", return_value=tmp_path / "test"):
         destroy("test")
 
     stop_calls = [c for c in mock_run.call_args_list if "lxc-stop" in c[0][0]]
@@ -71,7 +72,7 @@ def test_destroy_removes_separate_state_dir(mock_root, mock_run, tmp_path):
     state = tmp_path / "user-state" / "test"
     lxc_dir = _make_container(tmp_path, state_dir=state)
 
-    with patch("kento.destroy.LXC_BASE", tmp_path):
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir):
         destroy("test")
 
     assert not lxc_dir.exists()
@@ -80,18 +81,10 @@ def test_destroy_removes_separate_state_dir(mock_root, mock_run, tmp_path):
 
 @patch("kento.destroy.require_root")
 def test_destroy_nonexistent(mock_root, tmp_path):
-    with patch("kento.destroy.LXC_BASE", tmp_path):
+    with patch("kento.destroy.resolve_container",
+               side_effect=SystemExit(1)):
         with pytest.raises(SystemExit):
             destroy("nonexistent")
-
-
-@patch("kento.destroy.require_root")
-def test_destroy_non_kento_container(mock_root, tmp_path):
-    lxc_dir = tmp_path / "test"
-    lxc_dir.mkdir()
-    with patch("kento.destroy.LXC_BASE", tmp_path):
-        with pytest.raises(SystemExit):
-            destroy("test")
 
 
 # --- PVE mode tests ---
@@ -120,10 +113,10 @@ def _mock_pve_run_running(args, **kwargs):
 def test_destroy_pve_removes_directory(mock_root, mock_run, tmp_path):
     lxc_dir = _make_container(tmp_path, name="100", mode="pve")
 
-    with patch("kento.destroy.LXC_BASE", tmp_path), \
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
          patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
          patch("kento.pve.socket.gethostname", return_value="node1"):
-        destroy("100")
+        destroy("mybox")
 
     assert not lxc_dir.exists()
 
@@ -133,10 +126,10 @@ def test_destroy_pve_removes_directory(mock_root, mock_run, tmp_path):
 def test_destroy_pve_stops_running_container(mock_root, mock_run, tmp_path):
     _make_container(tmp_path, name="100", mode="pve")
 
-    with patch("kento.destroy.LXC_BASE", tmp_path), \
+    with patch("kento.destroy.resolve_container", return_value=tmp_path / "100"), \
          patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
          patch("kento.pve.socket.gethostname", return_value="node1"):
-        destroy("100")
+        destroy("mybox")
 
     stop_calls = [c for c in mock_run.call_args_list
                   if "pct" in c[0][0] and "stop" in c[0][0]]
@@ -154,9 +147,9 @@ def test_destroy_pve_deletes_pve_config(mock_root, mock_run, tmp_path):
     conf = conf_dir / "100.conf"
     conf.write_text("arch: amd64\n")
 
-    with patch("kento.destroy.LXC_BASE", tmp_path), \
+    with patch("kento.destroy.resolve_container", return_value=tmp_path / "100"), \
          patch("kento.pve.PVE_DIR", pve), \
          patch("kento.pve.socket.gethostname", return_value="node1"):
-        destroy("100")
+        destroy("mybox")
 
     assert not conf.exists()

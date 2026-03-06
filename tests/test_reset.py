@@ -41,7 +41,7 @@ def test_reset_clears_upper_and_work(mock_root, mock_layers, mock_run,
     (lxc_dir / "work").mkdir()
     (lxc_dir / "rootfs").mkdir()
 
-    with patch("kento.reset.LXC_BASE", tmp_path):
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
         reset("test")
 
     assert upper.is_dir()
@@ -67,7 +67,7 @@ def test_reset_with_separate_state_dir(mock_root, mock_layers, mock_run,
     (upper / "somefile").write_text("data")
     (state / "work").mkdir()
 
-    with patch("kento.reset.LXC_BASE", tmp_path):
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
         reset("test")
 
     assert upper.is_dir()
@@ -83,14 +83,15 @@ def test_reset_refuses_running(mock_root, mock_run, tmp_path):
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
 
-    with patch("kento.reset.LXC_BASE", tmp_path):
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
         with pytest.raises(SystemExit):
             reset("test")
 
 
 @patch("kento.reset.require_root")
 def test_reset_nonexistent(mock_root, tmp_path):
-    with patch("kento.reset.LXC_BASE", tmp_path):
+    with patch("kento.reset.resolve_container",
+               side_effect=SystemExit(1)):
         with pytest.raises(SystemExit):
             reset("nonexistent")
 
@@ -131,8 +132,8 @@ def test_reset_pve_clears_upper_and_work(mock_root, mock_layers, mock_run,
     (lxc_dir / "work").mkdir()
     (lxc_dir / "rootfs").mkdir()
 
-    with patch("kento.reset.LXC_BASE", tmp_path):
-        reset("100")
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("mybox")
 
     assert upper.is_dir()
     assert not (upper / "somefile").exists()
@@ -147,6 +148,6 @@ def test_reset_pve_refuses_running(mock_root, mock_run, tmp_path):
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
     (lxc_dir / "kento-mode").write_text("pve\n")
 
-    with patch("kento.reset.LXC_BASE", tmp_path):
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
         with pytest.raises(SystemExit):
-            reset("100")
+            reset("mybox")

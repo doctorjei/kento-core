@@ -2,25 +2,16 @@
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
-from kento import LXC_BASE, require_root
+from kento import require_root, resolve_container
 
 
 def destroy(name: str) -> None:
     require_root()
 
-    lxc_dir = LXC_BASE / name
-
-    if not lxc_dir.is_dir():
-        print(f"Error: container not found: {name}", file=sys.stderr)
-        sys.exit(1)
-
-    if not (lxc_dir / "kento-image").is_file():
-        print(f"Error: {name} is not a kento-managed container",
-              file=sys.stderr)
-        sys.exit(1)
+    lxc_dir = resolve_container(name)
+    container_id = lxc_dir.name
 
     # Detect mode (default lxc for containers created before mode tracking)
     mode_file = lxc_dir / "kento-mode"
@@ -33,13 +24,13 @@ def destroy(name: str) -> None:
     # Stop if running
     if mode == "pve":
         result = subprocess.run(
-            ["pct", "status", name],
+            ["pct", "status", container_id],
             capture_output=True, text=True,
         )
         running = result.returncode == 0 and "running" in result.stdout
     else:
         result = subprocess.run(
-            ["lxc-info", "-n", name, "-sH"],
+            ["lxc-info", "-n", container_id, "-sH"],
             capture_output=True, text=True,
         )
         running = result.returncode == 0 and "RUNNING" in result.stdout
@@ -47,9 +38,9 @@ def destroy(name: str) -> None:
     if running:
         print("Stopping container...")
         if mode == "pve":
-            subprocess.run(["pct", "stop", name], check=True)
+            subprocess.run(["pct", "stop", container_id], check=True)
         else:
-            subprocess.run(["lxc-stop", "-n", name], check=True)
+            subprocess.run(["lxc-stop", "-n", container_id], check=True)
 
     # Unmount rootfs if mounted
     rootfs = lxc_dir / "rootfs"
@@ -74,6 +65,6 @@ def destroy(name: str) -> None:
     # Clean up PVE config if applicable
     if mode == "pve":
         from kento.pve import delete_pve_config
-        delete_pve_config(int(name))
+        delete_pve_config(int(container_id))
 
     print(f"Container destroyed: {name}")

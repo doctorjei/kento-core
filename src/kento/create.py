@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kento import LXC_BASE, require_root, upper_base, detect_mode
+from kento import LXC_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
@@ -42,7 +42,7 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
     return "\n".join(lines) + "\n"
 
 
-def create(name: str, image: str, *, bridge: str | None = None,
+def create(image: str, *, name: str | None = None, bridge: str | None = None,
            memory: int = 0, cores: int = 0, nesting: bool = True,
            start: bool = False, mode: str | None = None,
            vmid: int = 0) -> None:
@@ -50,6 +50,14 @@ def create(name: str, image: str, *, bridge: str | None = None,
 
     # Resolve mode
     mode = detect_mode(mode)
+
+    # Resolve container name
+    if name is None:
+        base_name = sanitize_image_name(image)
+        name = next_instance_name(base_name, LXC_BASE)
+    elif (LXC_BASE / name).exists():
+        print(f"Error: container name already taken: {name}", file=sys.stderr)
+        sys.exit(1)
 
     # Validate --vmid not used with --lxc
     if vmid and mode == "lxc":
@@ -93,11 +101,12 @@ def create(name: str, image: str, *, bridge: str | None = None,
     (state_dir / "upper").mkdir(exist_ok=True)
     (state_dir / "work").mkdir(exist_ok=True)
 
-    # Write image reference, layer paths, state dir, and mode
+    # Write image reference, layer paths, state dir, mode, and name
     (lxc_dir / "kento-image").write_text(image + "\n")
     (lxc_dir / "kento-layers").write_text(layers + "\n")
     (lxc_dir / "kento-state").write_text(str(state_dir) + "\n")
     (lxc_dir / "kento-mode").write_text(mode + "\n")
+    (lxc_dir / "kento-name").write_text(name + "\n")
 
     # Generate hook
     write_hook(lxc_dir, layers, name, state_dir)
@@ -143,7 +152,4 @@ def create(name: str, image: str, *, bridge: str | None = None,
             subprocess.run(["lxc-start", "-n", name], check=True)
         print("  Status: running")
     else:
-        if mode == "pve":
-            print(f"  Status: stopped (use 'pct start {vmid}' to boot)")
-        else:
-            print(f"  Status: stopped (use 'lxc-start -n {name}' to boot)")
+        print(f"  Status: stopped (use 'kento container start {name}' to boot)")

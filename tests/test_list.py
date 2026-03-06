@@ -87,6 +87,7 @@ def test_list_pve_container(mock_run, tmp_path, capsys):
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
     (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-name").write_text("webbox\n")
     (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
     (lxc_dir / "upper").mkdir()
 
@@ -94,7 +95,7 @@ def test_list_pve_container(mock_run, tmp_path, capsys):
         list_containers()
 
     output = capsys.readouterr().out
-    assert "100" in output
+    assert "webbox" in output
     assert "pve" in output
     assert "running" in output
 
@@ -114,6 +115,7 @@ def test_list_mixed_lxc_and_pve(mock_run, tmp_path, capsys):
     pve.mkdir()
     (pve / "kento-image").write_text("ubuntu:22.04\n")
     (pve / "kento-mode").write_text("pve\n")
+    (pve / "kento-name").write_text("webbox\n")
     (pve / "kento-state").write_text(str(pve) + "\n")
     (pve / "upper").mkdir()
 
@@ -123,7 +125,7 @@ def test_list_mixed_lxc_and_pve(mock_run, tmp_path, capsys):
     output = capsys.readouterr().out
     assert "mybox" in output
     assert "lxc" in output
-    assert "100" in output
+    assert "webbox" in output
     assert "pve" in output
 
 
