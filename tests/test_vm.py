@@ -79,8 +79,9 @@ class TestIsVmRunning:
 
 
 class TestMountRootfs:
+    @patch("kento.vm._is_mountpoint", return_value=False)
     @patch("kento.vm.subprocess.run")
-    def test_mount_command(self, mock_run, tmp_path):
+    def test_mount_command(self, mock_run, mock_mp, tmp_path):
         lxc_dir = tmp_path / "vm1"
         lxc_dir.mkdir()
         (lxc_dir / "rootfs").mkdir()
@@ -99,6 +100,14 @@ class TestMountRootfs:
         assert env["LIBMOUNT_FORCE_MOUNT2"] == "always"
         assert mock_run.call_args[1]["check"] is True
 
+    @patch("kento.vm._is_mountpoint", return_value=True)
+    def test_mount_rejects_already_mounted(self, mock_mp, tmp_path):
+        lxc_dir = tmp_path / "vm1"
+        lxc_dir.mkdir()
+        (lxc_dir / "rootfs").mkdir()
+        with pytest.raises(SystemExit):
+            mount_rootfs(lxc_dir, "/a:/b", lxc_dir)
+
 
 # --- unmount_rootfs ---
 
@@ -116,9 +125,11 @@ class TestUnmountRootfs:
 
 
 class TestStartVm:
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_lifecycle(self, mock_mount, mock_popen, tmp_path):
+    def test_start_lifecycle(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -146,9 +157,11 @@ class TestStartVm:
         assert (lxc_dir / "kento-virtiofsd-pid").read_text().strip() == "1001"
         assert (lxc_dir / "kento-qemu-pid").read_text().strip() == "1002"
 
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_passes_port(self, mock_mount, mock_popen, tmp_path):
+    def test_start_passes_port(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -174,9 +187,10 @@ class TestStartVm:
         qemu_args = mock_popen.call_args_list[1][0][0]
         assert "hostfwd=tcp:127.0.0.1:12345-:2222" in " ".join(qemu_args)
 
+    @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.unmount_rootfs")
     @patch("kento.vm.mount_rootfs")
-    def test_start_missing_kernel(self, mock_mount, mock_unmount, tmp_path):
+    def test_start_missing_kernel(self, mock_mount, mock_unmount, mock_running, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -190,9 +204,17 @@ class TestStartVm:
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
+    @patch("kento.vm.is_vm_running", return_value=True)
+    def test_start_rejects_running(self, mock_running, tmp_path):
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        with pytest.raises(SystemExit):
+            start_vm(lxc_dir, "testvm")
+
+    @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.unmount_rootfs")
     @patch("kento.vm.mount_rootfs")
-    def test_start_missing_initramfs(self, mock_mount, mock_unmount, tmp_path):
+    def test_start_missing_initramfs(self, mock_mount, mock_unmount, mock_running, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -213,48 +235,98 @@ class TestStartVm:
 
 
 class TestStopVm:
-    @patch("kento.vm.subprocess.run")
-    def test_stop_kills_processes_and_cleans_up(self, mock_run, tmp_path):
-        (tmp_path / "kento-qemu-pid").write_text("1001\n")
-        (tmp_path / "kento-virtiofsd-pid").write_text("1002\n")
+    @patch("kento.vm._is_mountpoint", return_value=False)
+    @patch("kento.vm._kill_and_wait")
+    def test_stop_kills_processes_and_cleans_up(self, mock_kw, mock_mp, tmp_path):
         (tmp_path / "virtiofsd.sock").write_text("")
-        # mountpoint check returns 1 (not mounted)
-        mock_run.return_value = subprocess.CompletedProcess([], 1)
 
-        with patch("kento.vm.os.kill") as mock_kill:
-            stop_vm(tmp_path)
+        stop_vm(tmp_path)
 
-        mock_kill.assert_any_call(1001, signal.SIGTERM)
-        mock_kill.assert_any_call(1002, signal.SIGTERM)
-        assert not (tmp_path / "kento-qemu-pid").exists()
-        assert not (tmp_path / "kento-virtiofsd-pid").exists()
+        assert mock_kw.call_count == 2
+        mock_kw.assert_any_call(tmp_path / "kento-qemu-pid")
+        mock_kw.assert_any_call(tmp_path / "kento-virtiofsd-pid")
         assert not (tmp_path / "virtiofsd.sock").exists()
 
     @patch("kento.vm.subprocess.run")
-    def test_stop_unmounts_if_mounted(self, mock_run, tmp_path):
+    @patch("kento.vm._is_mountpoint", return_value=True)
+    @patch("kento.vm._kill_and_wait")
+    def test_stop_unmounts_if_mounted(self, mock_kw, mock_mp, mock_run, tmp_path):
         (tmp_path / "rootfs").mkdir()
-        # mountpoint check returns 0 (mounted)
-        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="")
 
-        with patch("kento.vm.os.kill"):
-            stop_vm(tmp_path)
-
-        # Should have called mountpoint and then umount
-        umount_calls = [c for c in mock_run.call_args_list if "umount" in c[0][0]]
-        assert len(umount_calls) == 1
-
-    @patch("kento.vm.subprocess.run")
-    def test_stop_handles_no_pid_files(self, mock_run, tmp_path):
-        # No PID files, no socket — should not raise
-        mock_run.return_value = subprocess.CompletedProcess([], 1)
         stop_vm(tmp_path)
 
-    @patch("kento.vm.subprocess.run")
-    def test_stop_handles_dead_process(self, mock_run, tmp_path):
+        mock_run.assert_called_once_with(["umount", str(tmp_path / "rootfs")])
+
+    @patch("kento.vm._is_mountpoint", return_value=False)
+    @patch("kento.vm._kill_and_wait")
+    def test_stop_handles_no_pid_files(self, mock_kw, mock_mp, tmp_path):
+        stop_vm(tmp_path)
+
+    @patch("kento.vm._is_mountpoint", return_value=False)
+    def test_stop_handles_dead_process(self, mock_mp, tmp_path):
         (tmp_path / "kento-qemu-pid").write_text("999999999\n")
-        mock_run.return_value = subprocess.CompletedProcess([], 1)
 
         with patch("kento.vm.os.kill", side_effect=ProcessLookupError):
             stop_vm(tmp_path)
 
         assert not (tmp_path / "kento-qemu-pid").exists()
+
+
+class TestKillAndWait:
+    def test_no_pid_file(self, tmp_path):
+        from kento.vm import _kill_and_wait
+        _kill_and_wait(tmp_path / "nonexistent")  # should not raise
+
+    def test_malformed_pid_file(self, tmp_path):
+        from kento.vm import _kill_and_wait
+        pid_file = tmp_path / "pid"
+        pid_file.write_text("notanumber\n")
+        _kill_and_wait(pid_file)
+        assert not pid_file.exists()
+
+    @patch("kento.vm.os.kill", side_effect=ProcessLookupError)
+    def test_dead_process(self, mock_kill, tmp_path):
+        from kento.vm import _kill_and_wait
+        pid_file = tmp_path / "pid"
+        pid_file.write_text("999999999\n")
+        _kill_and_wait(pid_file)
+        mock_kill.assert_called_once_with(999999999, signal.SIGTERM)
+        assert not pid_file.exists()
+
+    @patch("kento.vm.Path")
+    @patch("kento.vm.os.kill")
+    def test_waits_for_exit(self, mock_kill, mock_path_cls, tmp_path):
+        from kento.vm import _kill_and_wait
+        pid_file = tmp_path / "pid"
+        pid_file.write_text("1234\n")
+
+        # /proc/1234 exists on first check, gone on second
+        proc_path = MagicMock()
+        proc_path.is_dir.side_effect = [True, False]
+        original_path = Path
+
+        def path_factory(p):
+            if p == "/proc/1234":
+                return proc_path
+            return original_path(p)
+
+        mock_path_cls.side_effect = path_factory
+
+        with patch("kento.vm.time.sleep"):
+            _kill_and_wait(pid_file)
+
+        mock_kill.assert_called_once_with(1234, signal.SIGTERM)
+
+
+class TestIsMountpoint:
+    @patch("kento.vm.subprocess.run")
+    def test_returns_true(self, mock_run):
+        from kento.vm import _is_mountpoint
+        mock_run.return_value = subprocess.CompletedProcess([], 0)
+        assert _is_mountpoint(Path("/some/path")) is True
+
+    @patch("kento.vm.subprocess.run")
+    def test_returns_false(self, mock_run):
+        from kento.vm import _is_mountpoint
+        mock_run.return_value = subprocess.CompletedProcess([], 1)
+        assert _is_mountpoint(Path("/some/path")) is False
