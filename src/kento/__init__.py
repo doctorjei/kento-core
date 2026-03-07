@@ -5,7 +5,7 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
