@@ -141,6 +141,20 @@ everything including the writable layer.
 - [Troubleshooting](docs/troubleshooting.md) — error messages and fixes
 - [Architecture](docs/architecture.md) — overlayfs, hooks, startup sequences, internals
 
+## Related projects
+
+Kento is part of a three-project stack:
+
+- **[droste](https://github.com/doctorjei/droste)** — builds layered
+  OCI images (process containers, system containers, VMs). Uses kento
+  to boot them as LXC containers or VMs.
+- **kento** (this project) — composes OCI images into running LXC
+  containers or QEMU VMs via overlayfs.
+- **[tenkei](https://github.com/doctorjei/tenkei)** — provides the
+  minimal kernel and initramfs that kento uses for VM mode.
+
+Kento was extracted from droste's OCI-backed LXC mount system.
+
 ## License
 
 MIT
