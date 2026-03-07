@@ -143,17 +143,22 @@ everything including the writable layer.
 
 ## Related projects
 
-Kento is part of a three-project stack:
+Kento is part of a stack of independent projects that work together but
+are each usable on their own:
 
+- **[kanibako](https://github.com/doctorjei/kanibako)** — container
+  management platform built on droste images and kento.
 - **[droste](https://github.com/doctorjei/droste)** — builds layered
-  OCI images (process containers, system containers, VMs). Uses kento
-  to boot them as LXC containers or VMs.
+  OCI images (process containers, system containers, VMs).
 - **kento** (this project) — composes OCI images into running LXC
-  containers or QEMU VMs via overlayfs.
+  containers or QEMU VMs via overlayfs. Works with any OCI image, not
+  just droste's.
 - **[tenkei](https://github.com/doctorjei/tenkei)** — provides the
-  minimal kernel and initramfs that kento uses for VM mode.
+  minimal kernel and initramfs for VM mode. Any compatible kernel +
+  initramfs will work.
 
-Kento was extracted from droste's OCI-backed LXC mount system.
+Kento was originally extracted from droste's OCI-backed LXC mount
+system.
 
 ## License
 
