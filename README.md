@@ -132,6 +132,15 @@ everything including the writable layer.
 └── rootfs/                     # Overlayfs mount point
 ```
 
+## Documentation
+
+- [Getting Started](docs/getting-started.md) — install, first container walkthrough
+- [Modes](docs/modes.md) — LXC vs PVE vs VM, auto-detection, defaults
+- [VM Mode](docs/vm-mode.md) — image requirements, SSH access, port forwarding
+- [Container Lifecycle](docs/container-lifecycle.md) — naming, state, reset, sudo behavior
+- [Troubleshooting](docs/troubleshooting.md) — error messages and fixes
+- [Architecture](docs/architecture.md) — overlayfs, hooks, startup sequences, internals
+
 ## License
 
 MIT
