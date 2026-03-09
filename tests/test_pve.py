@@ -152,6 +152,10 @@ class TestGeneratePveConfig:
         assert "net0: name=eth0,bridge=vmbr0,type=veth" in cfg
         assert "onboot: 0" in cfg
         assert "features: nesting=1" in cfg
+        assert "lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional" in cfg
+        assert "lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional" in cfg
+        assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
+        assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
         assert "lxc.mount.auto: proc:rw sys:rw cgroup:rw" in cfg
         assert "lxc.apparmor.profile: unconfined" in cfg
@@ -172,6 +176,8 @@ class TestGeneratePveConfig:
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   nesting=False)
         assert "nesting" not in cfg
+        assert "dev/.lxc/proc" not in cfg
+        assert "/dev/fuse" not in cfg
 
     def test_no_lxc_rootfs_path(self):
         """PVE hardcodes lxc.rootfs.path — we must NOT set it."""

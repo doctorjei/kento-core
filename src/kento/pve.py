@@ -109,6 +109,10 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     ]
     if nesting:
         lines.append("features: nesting=1")
+        lines.append("lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional 0 0")
+        lines.append("lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional 0 0")
+        lines.append("lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0")
+        lines.append("lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
     lines.extend([
         f"lxc.hook.pre-mount: {hook}",
         "lxc.mount.auto: proc:rw sys:rw cgroup:rw",

@@ -20,6 +20,8 @@ class TestGenerateConfig:
         assert "lxc.net.0.link = lxcbr0" in cfg
         assert "lxc.init.cmd = /sbin/init" in cfg
         assert "nesting.conf" in cfg
+        assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
+        assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
 
     def test_custom_bridge(self, tmp_path):
         cfg = generate_config("test", tmp_path, bridge="br0")
@@ -44,6 +46,11 @@ class TestGenerateConfig:
     def test_nesting_disabled(self, tmp_path):
         cfg = generate_config("test", tmp_path, nesting=False)
         assert "nesting.conf" not in cfg
+        assert "/dev/fuse" not in cfg
+        assert "/dev/net/tun" not in cfg
+
+
+_BRIDGE_PATCH = patch("kento.create._bridge_exists", return_value=True)
 
 
 class TestCreate:
@@ -53,7 +60,8 @@ class TestCreate:
     def test_creates_directory_structure(self, mock_root, mock_layers,
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test")
 
         lxc_dir = tmp_path / "test"
@@ -73,7 +81,8 @@ class TestCreate:
     def test_auto_name_from_image(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "myimage_latest-0"):
+             patch("kento.create.upper_base", return_value=tmp_path / "myimage_latest-0"), \
+             _BRIDGE_PATCH:
             create("myimage:latest")
 
         lxc_dir = tmp_path / "myimage_latest-0"
@@ -88,7 +97,8 @@ class TestCreate:
                                          mock_run, tmp_path):
         state = tmp_path / "user-state" / "test"
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=state):
+             patch("kento.create.upper_base", return_value=state), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test")
 
         lxc_dir = tmp_path / "test"
@@ -105,7 +115,8 @@ class TestCreate:
     def test_refuses_existing_container(self, mock_root, mock_layers,
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test")
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test")
@@ -116,7 +127,8 @@ class TestCreate:
     def test_start_calls_lxc_start(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", start=True)
 
         mock_run.assert_called_once_with(
@@ -129,7 +141,8 @@ class TestCreate:
     def test_kento_mode_file_lxc(self, mock_root, mock_layers,
                                   mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", mode="lxc")
 
         assert (tmp_path / "test" / "kento-mode").read_text().strip() == "lxc"
@@ -152,7 +165,8 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", side_effect=fake_write):
+             patch("kento.pve.write_pve_config", side_effect=fake_write), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", mode="pve")
 
         # Container dir should be VMID-based
@@ -184,7 +198,8 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", side_effect=fake_write):
+             patch("kento.pve.write_pve_config", side_effect=fake_write), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", mode="pve")
 
         pve_cfg = pve_conf.read_text()
@@ -196,7 +211,8 @@ class TestCreate:
     def test_lxc_bridge_default(self, mock_root, mock_layers,
                                  mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", mode="lxc")
 
         cfg = (tmp_path / "test" / "config").read_text()
@@ -208,7 +224,8 @@ class TestCreate:
     def test_vmid_with_lxc_mode_errors(self, mock_root, mock_layers,
                                         mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test", mode="lxc", vmid=100)
 
@@ -224,7 +241,8 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/100.conf")):
+             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/100.conf")), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", mode="pve", start=True)
 
         mock_run.assert_called_once_with(
@@ -243,10 +261,63 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "200"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/200.conf")):
+             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/200.conf")), \
+             _BRIDGE_PATCH:
             create("myimage:latest", name="test", mode="pve", vmid=200)
 
         assert (tmp_path / "200" / "kento-mode").read_text().strip() == "pve"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_bridge_not_found_errors(self, mock_root, mock_layers,
+                                      mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento.create._bridge_exists", return_value=False):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc")
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_explicit_bridge_not_found_errors(self, mock_root, mock_layers,
+                                               mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento.create._bridge_exists", return_value=False):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc", bridge="br99")
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_fallback_to_lxcbr0(self, mock_root, mock_layers,
+                                      mock_run, tmp_path, capsys):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        def bridge_check(name):
+            return name == "lxcbr0"  # vmbr0 missing, lxcbr0 exists
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write), \
+             patch("kento.create._bridge_exists", side_effect=bridge_check):
+            create("myimage:latest", name="test", mode="pve")
+
+        pve_cfg = pve_conf.read_text()
+        assert "bridge=lxcbr0" in pve_cfg
+        stderr = capsys.readouterr().err
+        assert "vmbr0 not found" in stderr
 
 
 class TestVmCreate:

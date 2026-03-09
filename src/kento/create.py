@@ -9,6 +9,11 @@ from kento.hook import write_hook
 from kento.layers import resolve_layers
 
 
+def _bridge_exists(name: str) -> bool:
+    """Check if a network bridge interface exists."""
+    return Path(f"/sys/class/net/{name}").is_dir()
+
+
 def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
                     memory: int = 0, cores: int = 0,
                     nesting: bool = True) -> str:
@@ -38,6 +43,8 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
         lines.append(f"lxc.cgroup2.cpuset.cpus = 0-{cores - 1}")
     if nesting:
         lines.append("lxc.include = /usr/share/lxc/config/nesting.conf")
+        lines.append("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file,optional 0 0")
+        lines.append("lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
 
     return "\n".join(lines) + "\n"
 
@@ -75,9 +82,24 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         if not nesting:
             print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
 
-    # Resolve bridge default per mode (not applicable for VM)
-    if mode != "vm" and bridge is None:
-        bridge = "vmbr0" if mode == "pve" else "lxcbr0"
+    # Resolve and validate bridge (not applicable for VM)
+    if mode != "vm":
+        if bridge is None:
+            # Auto-detect: try mode default first, then fallback
+            default = "vmbr0" if mode == "pve" else "lxcbr0"
+            fallback = "lxcbr0" if mode == "pve" else "vmbr0"
+            if _bridge_exists(default):
+                bridge = default
+            elif _bridge_exists(fallback):
+                bridge = fallback
+                print(f"Warning: {default} not found, using {fallback}", file=sys.stderr)
+            else:
+                print(f"Error: no bridge found (tried {default}, {fallback}). "
+                      f"Specify one with --bridge.", file=sys.stderr)
+                sys.exit(1)
+        elif not _bridge_exists(bridge):
+            print(f"Error: bridge interface not found: {bridge}", file=sys.stderr)
+            sys.exit(1)
 
     # Resolve container_id for directory paths
     if mode == "pve":
