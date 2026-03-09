@@ -49,10 +49,34 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
     return "\n".join(lines) + "\n"
 
 
+def _inject_network_config(state_dir: Path, ip: str,
+                           gateway: str | None = None,
+                           dns: str | None = None) -> None:
+    """Write 90-static.network into the overlayfs upper layer."""
+    lines = [
+        "[Match]",
+        "Name=eth0",
+        "",
+        "[Network]",
+        f"Address={ip}",
+    ]
+    if gateway:
+        lines.append(f"Gateway={gateway}")
+    if dns:
+        lines.append(f"DNS={dns}")
+    lines.append("")
+
+    net_dir = state_dir / "upper" / "etc" / "systemd" / "network"
+    net_dir.mkdir(parents=True, exist_ok=True)
+    (net_dir / "90-static.network").write_text("\n".join(lines))
+
+
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
            memory: int = 0, cores: int = 0, nesting: bool = True,
            start: bool = False, mode: str | None = None,
-           vmid: int = 0, port: str | None = None) -> None:
+           vmid: int = 0, port: str | None = None,
+           ip: str | None = None, gateway: str | None = None,
+           dns: str | None = None) -> None:
     require_root()
 
     # Resolve mode
@@ -75,6 +99,12 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         sys.exit(1)
     if port is not None and mode != "vm":
         print(f"Error: --port cannot be used with {mode.upper()} mode", file=sys.stderr)
+        sys.exit(1)
+    if ip is not None and mode == "vm":
+        print("Error: --ip cannot be used with VM mode", file=sys.stderr)
+        sys.exit(1)
+    if (gateway or dns) and not ip:
+        print("Error: --gateway and --dns require --ip", file=sys.stderr)
         sys.exit(1)
     if mode == "vm":
         if bridge is not None:
@@ -124,7 +154,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         sys.exit(1)
 
     # Resolve layers (validates image exists)
-    layers = resolve_layers(image)
+    layers = resolve_layers(image, mode=mode)
     if not layers:
         print(f"Error: failed to resolve layer paths for {image}",
               file=sys.stderr)
@@ -143,6 +173,16 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     (container_dir / "kento-state").write_text(str(state_dir) + "\n")
     (container_dir / "kento-mode").write_text(mode + "\n")
     (container_dir / "kento-name").write_text(name + "\n")
+
+    # Write static IP config if requested
+    if ip:
+        net_parts = [f"ip={ip}"]
+        if gateway:
+            net_parts.append(f"gateway={gateway}")
+        if dns:
+            net_parts.append(f"dns={dns}")
+        (container_dir / "kento-net").write_text("\n".join(net_parts) + "\n")
+        _inject_network_config(state_dir, ip, gateway, dns)
 
     if mode == "vm":
         # Write port mapping

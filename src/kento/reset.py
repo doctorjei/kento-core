@@ -45,9 +45,20 @@ def reset(name: str) -> None:
     upper.mkdir(parents=True)
     work.mkdir(parents=True)
 
+    # Re-inject static IP config if present
+    net_file = container_dir / "kento-net"
+    if net_file.is_file():
+        from kento.create import _inject_network_config
+        net_cfg = {}
+        for line in net_file.read_text().strip().splitlines():
+            k, v = line.split("=", 1)
+            net_cfg[k] = v
+        _inject_network_config(state_dir, net_cfg["ip"],
+                               net_cfg.get("gateway"), net_cfg.get("dns"))
+
     # Re-resolve layers from image
     image = (container_dir / "kento-image").read_text().strip()
-    layers = resolve_layers(image)
+    layers = resolve_layers(image, mode=mode)
     (container_dir / "kento-layers").write_text(layers + "\n")
 
     # Regenerate hook (LXC/PVE only — VM mode has no hook)

@@ -320,6 +320,85 @@ class TestCreate:
         assert "vmbr0 not found" in stderr
 
 
+class TestStaticIp:
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ip_creates_net_file_and_network_unit(self, mock_root, mock_layers,
+                                                   mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test", ip="192.168.0.160/22",
+                   gateway="192.168.0.1", dns="8.8.8.8")
+
+        lxc_dir = tmp_path / "test"
+        # kento-net metadata
+        net = (lxc_dir / "kento-net").read_text()
+        assert "ip=192.168.0.160/22" in net
+        assert "gateway=192.168.0.1" in net
+        assert "dns=8.8.8.8" in net
+
+        # 90-static.network in upper layer
+        unit = (lxc_dir / "upper" / "etc" / "systemd" / "network" /
+                "90-static.network").read_text()
+        assert "Address=192.168.0.160/22" in unit
+        assert "Gateway=192.168.0.1" in unit
+        assert "DNS=8.8.8.8" in unit
+        assert "[Match]" in unit
+        assert "Name=eth0" in unit
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ip_only_no_gateway_dns(self, mock_root, mock_layers,
+                                     mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test", ip="10.0.0.5/24")
+
+        unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
+                "90-static.network").read_text()
+        assert "Address=10.0.0.5/24" in unit
+        assert "Gateway" not in unit
+        assert "DNS" not in unit
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ip_with_vm_mode_errors(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       ip="192.168.0.160/22")
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_gateway_without_ip_errors(self, mock_root, mock_layers,
+                                        mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", gateway="192.168.0.1")
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_dns_without_ip_errors(self, mock_root, mock_layers,
+                                    mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", dns="8.8.8.8")
+
+
 class TestVmCreate:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")

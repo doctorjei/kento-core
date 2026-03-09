@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from kento.layers import resolve_layers
+from kento.layers import resolve_layers, _podman_cmd
 
 
 def _mock_run(args, **kwargs):
@@ -59,3 +59,25 @@ def test_resolve_layers_missing_image(mock_run):
     mock_run.side_effect = _mock_run_no_image
     with pytest.raises(SystemExit):
         resolve_layers("nonexistent:latest")
+
+
+class TestPodmanCmd:
+    def test_lxc_mode_ignores_sudo_user(self):
+        with patch.dict("os.environ", {"SUDO_USER": "alice"}):
+            assert _podman_cmd(mode="lxc") == ["podman"]
+
+    def test_pve_mode_ignores_sudo_user(self):
+        with patch.dict("os.environ", {"SUDO_USER": "alice"}):
+            assert _podman_cmd(mode="pve") == ["podman"]
+
+    def test_vm_mode_uses_sudo_user(self):
+        with patch.dict("os.environ", {"SUDO_USER": "alice"}):
+            assert _podman_cmd(mode="vm") == ["runuser", "-u", "alice", "--", "podman"]
+
+    def test_vm_mode_no_sudo_user(self):
+        with patch.dict("os.environ", {}, clear=True):
+            assert _podman_cmd(mode="vm") == ["podman"]
+
+    def test_none_mode_ignores_sudo_user(self):
+        with patch.dict("os.environ", {"SUDO_USER": "alice"}):
+            assert _podman_cmd() == ["podman"]

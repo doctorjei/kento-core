@@ -211,6 +211,52 @@ def test_reset_vm_no_hook_regenerated(mock_root, mock_layers, mock_run,
     assert not (lxc_dir / "kento-hook").exists()
 
 
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_reinjects_static_ip(mock_root, mock_layers, mock_run,
+                                    tmp_path):
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "kento-net").write_text("ip=192.168.0.160/22\ngateway=192.168.0.1\ndns=8.8.8.8\n")
+    upper = lxc_dir / "upper"
+    upper.mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    unit = (lxc_dir / "upper" / "etc" / "systemd" / "network" /
+            "90-static.network").read_text()
+    assert "Address=192.168.0.160/22" in unit
+    assert "Gateway=192.168.0.1" in unit
+    assert "DNS=8.8.8.8" in unit
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_no_net_file_skips_injection(mock_root, mock_layers, mock_run,
+                                            tmp_path):
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    assert not (lxc_dir / "upper" / "etc").exists()
+
+
 @patch("kento.reset.require_root")
 def test_reset_vm_refuses_running(mock_root, tmp_path):
     lxc_dir = tmp_path / "testvm"

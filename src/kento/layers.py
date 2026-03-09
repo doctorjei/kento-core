@@ -5,25 +5,28 @@ import subprocess
 import sys
 
 
-def _podman_cmd() -> list[str]:
+def _podman_cmd(mode: str | None = None) -> list[str]:
     """Return the podman command prefix.
 
-    When run via sudo, uses runuser to query the invoking user's
-    podman store instead of root's.
+    In LXC/PVE mode (or when mode is None), always uses root's podman
+    store to avoid UID remapping issues with rootless layers.
+    In VM mode, uses runuser to query the invoking user's podman store
+    when run via sudo.
     """
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        return ["runuser", "-u", sudo_user, "--", "podman"]
+    if mode == "vm":
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            return ["runuser", "-u", sudo_user, "--", "podman"]
     return ["podman"]
 
 
-def resolve_layers(image: str) -> str:
+def resolve_layers(image: str, mode: str | None = None) -> str:
     """Return colon-separated lowerdir string for an OCI image.
 
     Queries podman for the image's GraphDriver layer paths.
     Upper layer comes first (topmost), matching overlayfs lowerdir order.
     """
-    podman = _podman_cmd()
+    podman = _podman_cmd(mode)
 
     result = subprocess.run(
         [*podman, "image", "exists", image],
