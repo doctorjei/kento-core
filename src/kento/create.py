@@ -16,7 +16,8 @@ def _bridge_exists(name: str) -> bool:
 
 def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
                     memory: int = 0, cores: int = 0,
-                    nesting: bool = True) -> str:
+                    nesting: bool = True,
+                    ip: str | None = None, gateway: str | None = None) -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
         f"lxc.uts.name = {name}",
@@ -29,6 +30,12 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
         "lxc.net.0.type = veth",
         f"lxc.net.0.link = {bridge}",
         "lxc.net.0.flags = up",
+    ]
+    if ip:
+        lines.append(f"lxc.net.0.ipv4.address = {ip}")
+        if gateway:
+            lines.append(f"lxc.net.0.ipv4.gateway = {gateway}")
+    lines += [
         "",
         "lxc.init.cmd = /sbin/init",
         "lxc.mount.auto = proc:rw sys:rw cgroup:rw",
@@ -211,13 +218,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 vmid,
                 generate_pve_config(name, vmid, container_dir, bridge=bridge,
                                     memory=pve_memory, cores=pve_cores,
-                                    nesting=nesting)
+                                    nesting=nesting, ip=ip,
+                                    gateway=gateway)
             )
             config_path = str(pve_conf)
         else:
             (container_dir / "config").write_text(
                 generate_config(name, container_dir, bridge=bridge, memory=memory,
-                                cores=cores, nesting=nesting)
+                                cores=cores, nesting=nesting,
+                                ip=ip, gateway=gateway)
             )
             config_path = f"{container_dir}/config"
 

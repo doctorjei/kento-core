@@ -179,6 +179,23 @@ class TestGeneratePveConfig:
         assert "dev/.lxc/proc" not in cfg
         assert "/dev/fuse" not in cfg
 
+    def test_static_ip(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  ip="192.168.0.160/22", gateway="192.168.0.1")
+        assert "ip=192.168.0.160/22" in cfg
+        assert "gw=192.168.0.1" in cfg
+
+    def test_static_ip_no_gateway(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  ip="10.0.0.5/24")
+        assert "ip=10.0.0.5/24" in cfg
+        assert "gw=" not in cfg
+
+    def test_no_static_ip(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "ip=" not in cfg
+        assert "gw=" not in cfg
+
     def test_no_lxc_rootfs_path(self):
         """PVE hardcodes lxc.rootfs.path — we must NOT set it."""
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))

@@ -93,7 +93,9 @@ def delete_pve_config(vmid: int) -> None:
 
 def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         bridge: str = "vmbr0", memory: int = 512,
-                        cores: int = 1, nesting: bool = True) -> str:
+                        cores: int = 1, nesting: bool = True,
+                        ip: str | None = None,
+                        gateway: str | None = None) -> str:
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
@@ -104,7 +106,11 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         f"memory: {memory}",
         "swap: 0",
         f"cores: {cores}",
-        f"net0: name=eth0,bridge={bridge},type=veth",
+        "net0: name=eth0,bridge={bridge}{ip_part}{gw_part},type=veth".format(
+            bridge=bridge,
+            ip_part=f",ip={ip}" if ip else "",
+            gw_part=f",gw={gateway}" if gateway else "",
+        ),
         "onboot: 0",
     ]
     if nesting:

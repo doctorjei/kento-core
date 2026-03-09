@@ -43,6 +43,22 @@ class TestGenerateConfig:
         cfg = generate_config("test", tmp_path, cores=0)
         assert "cpuset.cpus" not in cfg
 
+    def test_static_ip(self, tmp_path):
+        cfg = generate_config("test", tmp_path, ip="192.168.0.160/22",
+                              gateway="192.168.0.1")
+        assert "lxc.net.0.ipv4.address = 192.168.0.160/22" in cfg
+        assert "lxc.net.0.ipv4.gateway = 192.168.0.1" in cfg
+
+    def test_static_ip_no_gateway(self, tmp_path):
+        cfg = generate_config("test", tmp_path, ip="10.0.0.5/24")
+        assert "lxc.net.0.ipv4.address = 10.0.0.5/24" in cfg
+        assert "ipv4.gateway" not in cfg
+
+    def test_no_static_ip(self, tmp_path):
+        cfg = generate_config("test", tmp_path)
+        assert "ipv4.address" not in cfg
+        assert "ipv4.gateway" not in cfg
+
     def test_nesting_disabled(self, tmp_path):
         cfg = generate_config("test", tmp_path, nesting=False)
         assert "nesting.conf" not in cfg

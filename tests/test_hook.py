@@ -54,6 +54,25 @@ def test_generate_hook_uses_lxc_rootfs_path():
     assert 'ROOTFS="${LXC_ROOTFS_PATH:-$CONTAINER_DIR/rootfs}"' in script
 
 
+def test_generate_hook_reads_lxc_config_for_ip():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "ipv4" in script
+    assert "90-static.network" in script
+
+
+def test_generate_hook_reads_pve_config_for_ip():
+    script = generate_hook(Path("/var/lib/lxc/200"), "/a:/b", "test")
+    assert "/etc/pve/lxc/" in script
+    assert "net0:" in script
+    assert 'ip=//p' in script
+
+
+def test_generate_hook_falls_back_to_kento_net():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-net" in script
+    assert "kento-mode" in script
+
+
 def test_write_hook(tmp_path):
     hook = write_hook(tmp_path, "/a:/b", "mycontainer")
     assert hook == tmp_path / "kento-hook"
