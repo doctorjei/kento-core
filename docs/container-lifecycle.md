@@ -98,11 +98,13 @@ Use reset when:
 
 ```
 sudo kento container rm <name>
+sudo kento container rm -f <name>
 ```
 
-Destroys a container completely:
+Removes a container completely. If the container is running, kento
+refuses unless `-f` / `--force` is passed. With `--force`:
 
-1. Stops the container if running (automatic)
+1. Stops the container
 2. Unmounts rootfs
 3. Releases the OCI image mount (LXC/PVE modes)
 4. Removes the state directory (writable layer)

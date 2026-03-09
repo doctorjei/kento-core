@@ -117,6 +117,7 @@ Removes the container, its config, hook, and writable layer.
 
 ```
 sudo kento container list
+sudo kento container ls
 ```
 
 Shows all kento-managed containers across all modes (LXC, PVE, VM)

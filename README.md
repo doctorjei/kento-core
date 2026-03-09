@@ -1,6 +1,6 @@
 # Kento
 
-Compose OCI container images into LXC system containers via overlayfs.
+Compose OCI images into system containers via overlayfs.
 
 Kento reads podman's layer store directly — no image duplication, no
 conversion. The OCI store IS the layer store.
@@ -77,9 +77,11 @@ Options:
 ### Start / stop
 
 ```
-sudo kento container start <name>
-sudo kento container stop <name>
+sudo kento container start <name> [<name> ...]
+sudo kento container stop <name> [<name> ...]
 ```
+
+Multiple containers can be started or stopped in one command.
 
 For LXC/PVE containers, you can also use `lxc-attach` / `pct exec` directly.
 For VM containers, use `ssh -p <port> root@localhost`.
@@ -88,15 +90,16 @@ For VM containers, use `ssh -p <port> root@localhost`.
 
 ```
 sudo kento container list
+sudo kento container ls
 ```
 
 Shows name, image, status, mode, and writable layer size. Lists containers
-from all modes (LXC, PVE, VM).
+from all modes (LXC, PVE, VM). `ls` is an alias for `list`.
 
 ### Reset a container
 
 ```
-sudo kento container reset <name>
+sudo kento container reset <name> [<name> ...]
 ```
 
 Clears the writable layer and re-resolves image layers from podman.
@@ -105,11 +108,12 @@ The container must be stopped first.
 ### Remove a container
 
 ```
-sudo kento container rm <name>
+sudo kento container rm <name> [<name> ...]
+sudo kento container rm -f <name>
 ```
 
-Stops the container if running, unmounts the rootfs, and removes
-everything including the writable layer.
+Removes a container and its writable layer. Errors if the container is
+running unless `-f` / `--force` is passed (which stops it first).
 
 ## Runtime layout
 
