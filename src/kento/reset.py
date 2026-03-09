@@ -1,11 +1,11 @@
-"""Reset a kento-managed LXC container to clean OCI state."""
+"""Reset a kento-managed container to clean OCI state."""
 
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from kento import require_root, resolve_container
+from kento import require_root, resolve_container, is_running
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
@@ -13,42 +13,24 @@ from kento.layers import resolve_layers
 def reset(name: str) -> None:
     require_root()
 
-    lxc_dir = resolve_container(name)
-    container_id = lxc_dir.name
+    container_dir = resolve_container(name)
 
     # Detect mode (default lxc for containers created before mode tracking)
-    mode_file = lxc_dir / "kento-mode"
+    mode_file = container_dir / "kento-mode"
     mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
 
     # Refuse if running
-    if mode == "vm":
-        from kento.vm import is_vm_running
-        running = is_vm_running(lxc_dir)
-    elif mode == "pve":
-        result = subprocess.run(
-            ["pct", "status", container_id],
-            capture_output=True, text=True,
-        )
-        running = result.returncode == 0 and "running" in result.stdout
-    else:
-        result = subprocess.run(
-            ["lxc-info", "-n", container_id, "-sH"],
-            capture_output=True, text=True,
-        )
-        running = result.returncode == 0 and "RUNNING" in result.stdout
-
-    if running:
-        stop_hint = f"kento container stop {name}"
-        print(f"Error: container is running. Stop it first: {stop_hint}",
+    if is_running(container_dir, mode):
+        print(f"Error: container is running. Stop it first: kento container stop {name}",
               file=sys.stderr)
         sys.exit(1)
 
     # Read state dir
-    state_file = lxc_dir / "kento-state"
-    state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else lxc_dir
+    state_file = container_dir / "kento-state"
+    state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else container_dir
 
     # Unmount rootfs if mounted
-    rootfs = lxc_dir / "rootfs"
+    rootfs = container_dir / "rootfs"
     if subprocess.run(["mountpoint", "-q", str(rootfs)],
                       capture_output=True).returncode == 0:
         subprocess.run(["umount", str(rootfs)])
@@ -64,13 +46,13 @@ def reset(name: str) -> None:
     work.mkdir(parents=True)
 
     # Re-resolve layers from image
-    image = (lxc_dir / "kento-image").read_text().strip()
+    image = (container_dir / "kento-image").read_text().strip()
     layers = resolve_layers(image)
-    (lxc_dir / "kento-layers").write_text(layers + "\n")
+    (container_dir / "kento-layers").write_text(layers + "\n")
 
     # Regenerate hook (LXC/PVE only — VM mode has no hook)
     if mode != "vm":
-        write_hook(lxc_dir, layers, name, state_dir)
+        write_hook(container_dir, layers, name, state_dir)
 
-    print(f"Container reset: {name}")
+    print(f"Reset: {name}")
     print("  Writable layer cleared, layers re-resolved from image.")

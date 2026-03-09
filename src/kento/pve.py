@@ -91,16 +91,16 @@ def delete_pve_config(vmid: int) -> None:
     conf_path.unlink(missing_ok=True)
 
 
-def generate_pve_config(name: str, vmid: int, lxc_dir: Path, *,
+def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         bridge: str = "vmbr0", memory: int = 512,
                         cores: int = 1, nesting: bool = True) -> str:
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
-    hook = lxc_dir / "kento-hook"
+    hook = container_dir / "kento-hook"
     lines = [
         "arch: amd64",
         "ostype: unmanaged",
         f"hostname: {name}",
-        f"rootfs: {lxc_dir}/rootfs",
+        f"rootfs: {container_dir}/rootfs",
         f"memory: {memory}",
         "swap: 0",
         f"cores: {cores}",

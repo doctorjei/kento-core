@@ -1,4 +1,4 @@
-"""Create an LXC container backed by an OCI image."""
+"""Create a container backed by an OCI image."""
 
 import subprocess
 import sys
@@ -62,10 +62,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         print(f"Error: container name already taken: {name}", file=sys.stderr)
         sys.exit(1)
 
-    # Validate --vmid not used with non-PVE modes
+    # Validate mode-specific flags
     if vmid and mode != "pve":
         print(f"Error: --vmid cannot be used with {mode.upper()} mode", file=sys.stderr)
         sys.exit(1)
+    if port is not None and mode != "vm":
+        print(f"Error: --port cannot be used with {mode.upper()} mode", file=sys.stderr)
+        sys.exit(1)
+    if mode == "vm":
+        if bridge is not None:
+            print("Warning: --bridge is ignored in VM mode", file=sys.stderr)
+        if not nesting:
+            print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
 
     # Resolve bridge default per mode (not applicable for VM)
     if mode != "vm" and bridge is None:
@@ -87,9 +95,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         container_id = name
         print("Mode: lxc")
 
-    lxc_dir = base_dir / container_id
+    container_dir = base_dir / container_id
 
-    if lxc_dir.exists():
+    if container_dir.exists():
         print(f"Error: container already exists: {container_id}", file=sys.stderr)
         sys.exit(1)
 
@@ -100,19 +108,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
               file=sys.stderr)
         sys.exit(1)
 
-    # Create directory structure — upper/work may be outside lxc_dir for sudo users
+    # Create directory structure — upper/work may be outside container_dir for sudo users
     state_dir = upper_base(container_id, base_dir if mode == "vm" else None)
-    (lxc_dir / "rootfs").mkdir(parents=True)
+    (container_dir / "rootfs").mkdir(parents=True)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "upper").mkdir(exist_ok=True)
     (state_dir / "work").mkdir(exist_ok=True)
 
     # Write image reference, layer paths, state dir, mode, and name
-    (lxc_dir / "kento-image").write_text(image + "\n")
-    (lxc_dir / "kento-layers").write_text(layers + "\n")
-    (lxc_dir / "kento-state").write_text(str(state_dir) + "\n")
-    (lxc_dir / "kento-mode").write_text(mode + "\n")
-    (lxc_dir / "kento-name").write_text(name + "\n")
+    (container_dir / "kento-image").write_text(image + "\n")
+    (container_dir / "kento-layers").write_text(layers + "\n")
+    (container_dir / "kento-state").write_text(str(state_dir) + "\n")
+    (container_dir / "kento-mode").write_text(mode + "\n")
+    (container_dir / "kento-name").write_text(name + "\n")
 
     if mode == "vm":
         # Write port mapping
@@ -123,15 +131,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         else:
             host_port, guest_port = port.split(":")
             host_port, guest_port = int(host_port), int(guest_port)
-        (lxc_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+        (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
 
         print(f"\nContainer created: {name}")
-        print(f"  Image:  {image}")
-        print(f"  Port:   {host_port}:{guest_port}")
-        print(f"  Dir:    {lxc_dir}")
+        print(f"  Image:   {image}")
+        print(f"  Port:    {host_port}:{guest_port}")
+        print(f"  Dir:     {container_dir}")
     else:
         # Generate hook (LXC/PVE only)
-        write_hook(lxc_dir, layers, name, state_dir)
+        write_hook(container_dir, layers, name, state_dir)
 
         # Generate config
         if mode == "pve":
@@ -139,17 +147,17 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             pve_cores = cores if cores else 1
             pve_conf = write_pve_config(
                 vmid,
-                generate_pve_config(name, vmid, lxc_dir, bridge=bridge,
+                generate_pve_config(name, vmid, container_dir, bridge=bridge,
                                     memory=pve_memory, cores=pve_cores,
                                     nesting=nesting)
             )
             config_path = str(pve_conf)
         else:
-            (lxc_dir / "config").write_text(
-                generate_config(name, lxc_dir, bridge=bridge, memory=memory,
+            (container_dir / "config").write_text(
+                generate_config(name, container_dir, bridge=bridge, memory=memory,
                                 cores=cores, nesting=nesting)
             )
-            config_path = f"{lxc_dir}/config"
+            config_path = f"{container_dir}/config"
 
         print(f"\nContainer created: {name}")
         print(f"  Image:   {image}")
@@ -170,7 +178,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         print("\nStarting container...")
         if mode == "vm":
             from kento.vm import start_vm
-            start_vm(lxc_dir, name)
+            start_vm(container_dir, name)
         elif mode == "pve":
             subprocess.run(["pct", "start", str(vmid)], check=True)
         else:

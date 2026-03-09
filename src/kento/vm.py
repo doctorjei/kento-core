@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-VM_BASE = Path("/var/lib/kento/vm")
+from kento import VM_BASE
 
 # virtiofsd is often installed outside PATH (e.g. /usr/libexec/virtiofsd on Debian)
 _VIRTIOFSD_SEARCH = ["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd"]
@@ -49,9 +49,9 @@ def allocate_port(scan_dir: Path | None = None) -> int:
     return port
 
 
-def is_vm_running(lxc_dir: Path) -> bool:
+def is_vm_running(container_dir: Path) -> bool:
     """Check if a VM is running by verifying the QEMU PID file."""
-    pid_file = lxc_dir / "kento-qemu-pid"
+    pid_file = container_dir / "kento-qemu-pid"
     if not pid_file.is_file():
         return False
     try:
@@ -68,9 +68,9 @@ def _is_mountpoint(path: Path) -> bool:
     ).returncode == 0
 
 
-def mount_rootfs(lxc_dir: Path, layers: str, state_dir: Path) -> None:
-    """Mount overlayfs at lxc_dir/rootfs on the host."""
-    rootfs = lxc_dir / "rootfs"
+def mount_rootfs(container_dir: Path, layers: str, state_dir: Path) -> None:
+    """Mount overlayfs at container_dir/rootfs on the host."""
+    rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
         print(f"Error: rootfs already mounted at {rootfs}", file=sys.stderr)
         sys.exit(1)
@@ -84,45 +84,45 @@ def mount_rootfs(lxc_dir: Path, layers: str, state_dir: Path) -> None:
     )
 
 
-def unmount_rootfs(lxc_dir: Path) -> None:
-    """Unmount overlayfs at lxc_dir/rootfs."""
-    rootfs = lxc_dir / "rootfs"
+def unmount_rootfs(container_dir: Path) -> None:
+    """Unmount overlayfs at container_dir/rootfs."""
+    rootfs = container_dir / "rootfs"
     subprocess.run(["umount", str(rootfs)], check=True)
 
 
-def start_vm(lxc_dir: Path, name: str) -> None:
+def start_vm(container_dir: Path, name: str) -> None:
     """Start a VM: mount rootfs, launch virtiofsd + QEMU, write PID files."""
-    if is_vm_running(lxc_dir):
+    if is_vm_running(container_dir):
         print(f"Error: VM {name} is already running", file=sys.stderr)
         sys.exit(1)
 
-    layers = (lxc_dir / "kento-layers").read_text().strip()
-    state_dir = Path((lxc_dir / "kento-state").read_text().strip())
+    layers = (container_dir / "kento-layers").read_text().strip()
+    state_dir = Path((container_dir / "kento-state").read_text().strip())
 
     # Mount overlayfs
-    mount_rootfs(lxc_dir, layers, state_dir)
+    mount_rootfs(container_dir, layers, state_dir)
 
-    rootfs = lxc_dir / "rootfs"
+    rootfs = container_dir / "rootfs"
 
     # Validate kernel and initramfs exist
     kernel = rootfs / "boot" / "vmlinuz"
     initramfs = rootfs / "boot" / "initramfs.img"
     if not kernel.is_file():
-        unmount_rootfs(lxc_dir)
+        unmount_rootfs(container_dir)
         print(f"Error: kernel not found at {kernel}", file=sys.stderr)
         sys.exit(1)
     if not initramfs.is_file():
-        unmount_rootfs(lxc_dir)
+        unmount_rootfs(container_dir)
         print(f"Error: initramfs not found at {initramfs}", file=sys.stderr)
         sys.exit(1)
 
     # Read port mapping
-    port_text = (lxc_dir / "kento-port").read_text().strip()
+    port_text = (container_dir / "kento-port").read_text().strip()
     host_port, guest_port = port_text.split(":")
 
     # Start virtiofsd
     virtiofsd_bin = _find_virtiofsd()
-    socket_path = lxc_dir / "virtiofsd.sock"
+    socket_path = container_dir / "virtiofsd.sock"
     virtiofsd = subprocess.Popen(
         [virtiofsd_bin,
          f"--socket-path={socket_path}",
@@ -131,7 +131,7 @@ def start_vm(lxc_dir: Path, name: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    (lxc_dir / "kento-virtiofsd-pid").write_text(str(virtiofsd.pid) + "\n")
+    (container_dir / "kento-virtiofsd-pid").write_text(str(virtiofsd.pid) + "\n")
 
     # Wait for socket to appear
     for _ in range(50):
@@ -157,7 +157,7 @@ def start_vm(lxc_dir: Path, name: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    (lxc_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
+    (container_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
 
     print(f"Started: {name}")
     print(f"  SSH: ssh -p {host_port} root@localhost")
@@ -192,15 +192,15 @@ def _kill_and_wait(pid_file: Path, timeout: float = 5.0) -> None:
     pid_file.unlink(missing_ok=True)
 
 
-def stop_vm(lxc_dir: Path) -> None:
+def stop_vm(container_dir: Path) -> None:
     """Stop a VM: kill QEMU + virtiofsd, unmount rootfs, clean up."""
-    _kill_and_wait(lxc_dir / "kento-qemu-pid")
-    _kill_and_wait(lxc_dir / "kento-virtiofsd-pid")
+    _kill_and_wait(container_dir / "kento-qemu-pid")
+    _kill_and_wait(container_dir / "kento-virtiofsd-pid")
 
     # Unmount rootfs
-    rootfs = lxc_dir / "rootfs"
+    rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
         subprocess.run(["umount", str(rootfs)])
 
     # Clean up socket
-    (lxc_dir / "virtiofsd.sock").unlink(missing_ok=True)
+    (container_dir / "virtiofsd.sock").unlink(missing_ok=True)

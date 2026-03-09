@@ -60,7 +60,7 @@ def test_destroy_stops_running_container(mock_root, mock_run, tmp_path):
     _make_container(tmp_path)
 
     with patch("kento.destroy.resolve_container", return_value=tmp_path / "test"):
-        destroy("test")
+        destroy("test", force=True)
 
     stop_calls = [c for c in mock_run.call_args_list if "lxc-stop" in c[0][0]]
     assert len(stop_calls) == 1
@@ -129,7 +129,7 @@ def test_destroy_pve_stops_running_container(mock_root, mock_run, tmp_path):
     with patch("kento.destroy.resolve_container", return_value=tmp_path / "100"), \
          patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
          patch("kento.pve.socket.gethostname", return_value="node1"):
-        destroy("mybox")
+        destroy("mybox", force=True)
 
     stop_calls = [c for c in mock_run.call_args_list
                   if "pct" in c[0][0] and "stop" in c[0][0]]
@@ -185,7 +185,7 @@ def test_destroy_vm_stops_running(mock_root, mock_run, tmp_path):
     with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
          patch("kento.vm.is_vm_running", return_value=True), \
          patch("kento.vm.stop_vm") as mock_stop:
-        destroy("testvm")
+        destroy("testvm", force=True)
 
     mock_stop.assert_called_once_with(lxc_dir)
     assert not lxc_dir.exists()

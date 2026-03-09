@@ -5,7 +5,7 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
@@ -18,7 +18,11 @@ def require_root() -> None:
 
 
 def detect_mode(force: str | None = None) -> str:
-    """Return 'pve' or 'lxc' based on environment or explicit override."""
+    """Return 'pve', 'lxc', or 'vm' based on environment or explicit override.
+
+    When force is set (e.g. 'vm'), returns it directly.
+    Otherwise auto-detects PVE vs plain LXC (VM is never auto-detected).
+    """
     if force:
         return force
     from kento.pve import is_pve
@@ -72,6 +76,26 @@ def next_instance_name(base_name: str, scan_dir: Path) -> str:
         if candidate not in used_names:
             return candidate
         n += 1
+
+
+def is_running(container_dir: Path, mode: str) -> bool:
+    """Check if a container is running, using the mode-appropriate method."""
+    import subprocess
+    if mode == "vm":
+        from kento.vm import is_vm_running
+        return is_vm_running(container_dir)
+    elif mode == "pve":
+        result = subprocess.run(
+            ["pct", "status", container_dir.name],
+            capture_output=True, text=True,
+        )
+        return result.returncode == 0 and "running" in result.stdout
+    else:
+        result = subprocess.run(
+            ["lxc-info", "-n", container_dir.name, "-sH"],
+            capture_output=True, text=True,
+        )
+        return result.returncode == 0 and "RUNNING" in result.stdout
 
 
 def resolve_container(name: str, scan_dir: Path | None = None) -> Path:

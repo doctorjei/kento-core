@@ -7,7 +7,7 @@ from kento.hook import generate_hook, write_hook
 
 def test_generate_hook_contains_paths():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b:/c", "test")
-    assert 'LXC_DIR="/var/lib/lxc/test"' in script
+    assert 'CONTAINER_DIR="/var/lib/lxc/test"' in script
     assert 'LAYERS="/a:/b:/c"' in script
     assert 'NAME="test"' in script
 
@@ -51,7 +51,7 @@ def test_generate_hook_is_posix_sh():
 def test_generate_hook_uses_lxc_rootfs_path():
     script = generate_hook(Path("/var/lib/lxc/100"), "/a:/b", "test")
     assert "LXC_ROOTFS_PATH" in script
-    assert 'ROOTFS="${LXC_ROOTFS_PATH:-$LXC_DIR/rootfs}"' in script
+    assert 'ROOTFS="${LXC_ROOTFS_PATH:-$CONTAINER_DIR/rootfs}"' in script
 
 
 def test_write_hook(tmp_path):
