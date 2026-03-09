@@ -240,6 +240,71 @@ def test_reset_reinjects_static_ip(mock_root, mock_layers, mock_run,
 @patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
 @patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
 @patch("kento.reset.require_root")
+def test_reset_reinjects_hostname(mock_root, mock_layers, mock_run, tmp_path):
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "kento-name").write_text("myhost\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("myhost")
+
+    hostname = (lxc_dir / "upper" / "etc" / "hostname").read_text()
+    assert hostname.strip() == "myhost"
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_reinjects_timezone(mock_root, mock_layers, mock_run, tmp_path):
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "kento-tz").write_text("Asia/Tokyo\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    assert (lxc_dir / "upper" / "etc" / "timezone").read_text().strip() == "Asia/Tokyo"
+    localtime = lxc_dir / "upper" / "etc" / "localtime"
+    assert localtime.is_symlink()
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_reinjects_env(mock_root, mock_layers, mock_run, tmp_path):
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "kento-env").write_text("FOO=bar\nBAZ=qux\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    env = (lxc_dir / "upper" / "etc" / "environment").read_text()
+    assert "FOO=bar" in env
+    assert "BAZ=qux" in env
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
 def test_reset_no_net_file_skips_injection(mock_root, mock_layers, mock_run,
                                             tmp_path):
     lxc_dir = tmp_path / "test"

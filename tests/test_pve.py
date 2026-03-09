@@ -196,6 +196,27 @@ class TestGeneratePveConfig:
         assert "ip=" not in cfg
         assert "gw=" not in cfg
 
+    def test_nameserver(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  nameserver="8.8.8.8")
+        assert "nameserver: 8.8.8.8" in cfg
+
+    def test_searchdomain(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  searchdomain="example.com")
+        assert "searchdomain: example.com" in cfg
+
+    def test_timezone(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  timezone="Europe/Berlin")
+        assert "timezone: Europe/Berlin" in cfg
+
+    def test_env(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  env=["FOO=bar", "BAZ=qux"])
+        assert "lxc.environment: FOO=bar" in cfg
+        assert "lxc.environment: BAZ=qux" in cfg
+
     def test_no_lxc_rootfs_path(self):
         """PVE hardcodes lxc.rootfs.path — we must NOT set it."""
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))

@@ -17,7 +17,8 @@ def _bridge_exists(name: str) -> bool:
 def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
                     memory: int = 0, cores: int = 0,
                     nesting: bool = True,
-                    ip: str | None = None, gateway: str | None = None) -> str:
+                    ip: str | None = None, gateway: str | None = None,
+                    env: list[str] | None = None) -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
         f"lxc.uts.name = {name}",
@@ -52,13 +53,17 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
         lines.append("lxc.include = /usr/share/lxc/config/nesting.conf")
         lines.append("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
+    if env:
+        for e in env:
+            lines.append(f"lxc.environment = {e}")
 
     return "\n".join(lines) + "\n"
 
 
 def _inject_network_config(state_dir: Path, ip: str,
                            gateway: str | None = None,
-                           dns: str | None = None) -> None:
+                           dns: str | None = None,
+                           searchdomain: str | None = None) -> None:
     """Write 90-static.network into the overlayfs upper layer."""
     lines = [
         "[Match]",
@@ -71,6 +76,8 @@ def _inject_network_config(state_dir: Path, ip: str,
         lines.append(f"Gateway={gateway}")
     if dns:
         lines.append(f"DNS={dns}")
+    if searchdomain:
+        lines.append(f"Domains={searchdomain}")
     lines.append("")
 
     net_dir = state_dir / "upper" / "etc" / "systemd" / "network"
@@ -78,12 +85,38 @@ def _inject_network_config(state_dir: Path, ip: str,
     (net_dir / "90-static.network").write_text("\n".join(lines))
 
 
+def _inject_hostname(state_dir: Path, hostname: str) -> None:
+    """Write /etc/hostname into the overlayfs upper layer."""
+    etc = state_dir / "upper" / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "hostname").write_text(hostname + "\n")
+
+
+def _inject_timezone(state_dir: Path, timezone: str) -> None:
+    """Write timezone config into the overlayfs upper layer."""
+    etc = state_dir / "upper" / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    localtime = etc / "localtime"
+    localtime.unlink(missing_ok=True)
+    localtime.symlink_to(f"/usr/share/zoneinfo/{timezone}")
+    (etc / "timezone").write_text(timezone + "\n")
+
+
+def _inject_env(state_dir: Path, env_list: list[str]) -> None:
+    """Write /etc/environment into the overlayfs upper layer."""
+    etc = state_dir / "upper" / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "environment").write_text("\n".join(env_list) + "\n")
+
+
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
            memory: int = 0, cores: int = 0, nesting: bool = True,
            start: bool = False, mode: str | None = None,
            vmid: int = 0, port: str | None = None,
            ip: str | None = None, gateway: str | None = None,
-           dns: str | None = None) -> None:
+           dns: str | None = None, searchdomain: str | None = None,
+           timezone: str | None = None,
+           env: list[str] | None = None) -> None:
     require_root()
 
     # Resolve mode
@@ -182,14 +215,32 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     (container_dir / "kento-name").write_text(name + "\n")
 
     # Write static IP config if requested
-    if ip:
-        net_parts = [f"ip={ip}"]
+    if ip or searchdomain:
+        net_parts = []
+        if ip:
+            net_parts.append(f"ip={ip}")
         if gateway:
             net_parts.append(f"gateway={gateway}")
         if dns:
             net_parts.append(f"dns={dns}")
+        if searchdomain:
+            net_parts.append(f"searchdomain={searchdomain}")
         (container_dir / "kento-net").write_text("\n".join(net_parts) + "\n")
-        _inject_network_config(state_dir, ip, gateway, dns)
+        if ip:
+            _inject_network_config(state_dir, ip, gateway, dns, searchdomain)
+
+    # Write hostname into guest
+    _inject_hostname(state_dir, name)
+
+    # Write timezone config if requested
+    if timezone:
+        (container_dir / "kento-tz").write_text(timezone + "\n")
+        _inject_timezone(state_dir, timezone)
+
+    # Write environment variables if requested
+    if env:
+        (container_dir / "kento-env").write_text("\n".join(env) + "\n")
+        _inject_env(state_dir, env)
 
     if mode == "vm":
         # Write port mapping
@@ -219,14 +270,16 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 generate_pve_config(name, vmid, container_dir, bridge=bridge,
                                     memory=pve_memory, cores=pve_cores,
                                     nesting=nesting, ip=ip,
-                                    gateway=gateway)
+                                    gateway=gateway, nameserver=dns,
+                                    searchdomain=searchdomain,
+                                    timezone=timezone, env=env)
             )
             config_path = str(pve_conf)
         else:
             (container_dir / "config").write_text(
                 generate_config(name, container_dir, bridge=bridge, memory=memory,
                                 cores=cores, nesting=nesting,
-                                ip=ip, gateway=gateway)
+                                ip=ip, gateway=gateway, env=env)
             )
             config_path = f"{container_dir}/config"
 

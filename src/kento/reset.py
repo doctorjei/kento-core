@@ -45,16 +45,36 @@ def reset(name: str) -> None:
     upper.mkdir(parents=True)
     work.mkdir(parents=True)
 
-    # Re-inject static IP config if present
+    # Re-inject guest config from kento metadata
+    from kento.create import (_inject_network_config, _inject_hostname,
+                              _inject_timezone, _inject_env)
+
+    # Hostname
+    name_file = container_dir / "kento-name"
+    if name_file.is_file():
+        _inject_hostname(state_dir, name_file.read_text().strip())
+
+    # Network (static IP + searchdomain)
     net_file = container_dir / "kento-net"
     if net_file.is_file():
-        from kento.create import _inject_network_config
         net_cfg = {}
         for line in net_file.read_text().strip().splitlines():
             k, v = line.split("=", 1)
             net_cfg[k] = v
-        _inject_network_config(state_dir, net_cfg["ip"],
-                               net_cfg.get("gateway"), net_cfg.get("dns"))
+        if "ip" in net_cfg:
+            _inject_network_config(state_dir, net_cfg["ip"],
+                                   net_cfg.get("gateway"), net_cfg.get("dns"),
+                                   net_cfg.get("searchdomain"))
+
+    # Timezone
+    tz_file = container_dir / "kento-tz"
+    if tz_file.is_file():
+        _inject_timezone(state_dir, tz_file.read_text().strip())
+
+    # Environment variables
+    env_file = container_dir / "kento-env"
+    if env_file.is_file():
+        _inject_env(state_dir, env_file.read_text().strip().splitlines())
 
     # Re-resolve layers from image
     image = (container_dir / "kento-image").read_text().strip()

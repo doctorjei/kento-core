@@ -73,6 +73,39 @@ def test_generate_hook_falls_back_to_kento_net():
     assert "kento-mode" in script
 
 
+def test_generate_hook_injects_hostname():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "/etc/hostname" in script
+    assert "CFG_HOSTNAME" in script
+
+
+def test_generate_hook_reads_pve_nameserver():
+    script = generate_hook(Path("/var/lib/lxc/200"), "/a:/b", "test")
+    assert "nameserver:" in script
+    assert "searchdomain:" in script
+
+
+def test_generate_hook_injects_timezone():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "/etc/localtime" in script
+    assert "/etc/timezone" in script
+    assert "kento-tz" in script
+    assert "zoneinfo" in script
+
+
+def test_generate_hook_injects_env():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "/etc/environment" in script
+    assert "kento-env" in script
+    assert "lxc.environment" in script
+
+
+def test_generate_hook_resolved_dropin_for_dns_without_ip():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "resolved.conf.d" in script
+    assert "90-kento.conf" in script
+
+
 def test_write_hook(tmp_path):
     hook = write_hook(tmp_path, "/a:/b", "mycontainer")
     assert hook == tmp_path / "kento-hook"

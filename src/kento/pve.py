@@ -95,7 +95,11 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         bridge: str = "vmbr0", memory: int = 512,
                         cores: int = 1, nesting: bool = True,
                         ip: str | None = None,
-                        gateway: str | None = None) -> str:
+                        gateway: str | None = None,
+                        nameserver: str | None = None,
+                        searchdomain: str | None = None,
+                        timezone: str | None = None,
+                        env: list[str] | None = None) -> str:
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
@@ -113,6 +117,12 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         ),
         "onboot: 0",
     ]
+    if nameserver:
+        lines.append(f"nameserver: {nameserver}")
+    if searchdomain:
+        lines.append(f"searchdomain: {searchdomain}")
+    if timezone:
+        lines.append(f"timezone: {timezone}")
     if nesting:
         lines.append("features: nesting=1")
         lines.append("lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional 0 0")
@@ -127,4 +137,7 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         "lxc.tty.max: 4",
         "lxc.pty.max: 1024",
     ])
+    if env:
+        for e in env:
+            lines.append(f"lxc.environment: {e}")
     return "\n".join(lines) + "\n"

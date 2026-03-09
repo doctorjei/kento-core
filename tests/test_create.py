@@ -415,6 +415,90 @@ class TestStaticIp:
                 create("myimage:latest", name="test", dns="8.8.8.8")
 
 
+class TestGuestConfig:
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_hostname_injected(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test")
+
+        hostname = (tmp_path / "test" / "upper" / "etc" / "hostname").read_text()
+        assert hostname.strip() == "test"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_searchdomain_in_network_file(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test", ip="10.0.0.5/24",
+                   searchdomain="example.com")
+
+        unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
+                "90-static.network").read_text()
+        assert "Domains=example.com" in unit
+        net = (tmp_path / "test" / "kento-net").read_text()
+        assert "searchdomain=example.com" in net
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_timezone_injected(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test", timezone="Asia/Tokyo")
+
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-tz").read_text().strip() == "Asia/Tokyo"
+        assert (lxc_dir / "upper" / "etc" / "timezone").read_text().strip() == "Asia/Tokyo"
+        localtime = lxc_dir / "upper" / "etc" / "localtime"
+        assert localtime.is_symlink()
+        assert str(localtime.readlink()) == "/usr/share/zoneinfo/Asia/Tokyo"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_env_injected(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test", env=["FOO=bar", "BAZ=qux"])
+
+        lxc_dir = tmp_path / "test"
+        env_content = (lxc_dir / "kento-env").read_text()
+        assert "FOO=bar" in env_content
+        assert "BAZ=qux" in env_content
+        etc_env = (lxc_dir / "upper" / "etc" / "environment").read_text()
+        assert "FOO=bar" in etc_env
+        assert "BAZ=qux" in etc_env
+        # Also in LXC config
+        cfg = (lxc_dir / "config").read_text()
+        assert "lxc.environment = FOO=bar" in cfg
+        assert "lxc.environment = BAZ=qux" in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_searchdomain_without_ip_writes_metadata(self, mock_root, mock_layers,
+                                                      mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             _BRIDGE_PATCH:
+            create("myimage:latest", name="test", searchdomain="example.com")
+
+        net = (tmp_path / "test" / "kento-net").read_text()
+        assert "searchdomain=example.com" in net
+        # No 90-static.network (no IP)
+        assert not (tmp_path / "test" / "upper" / "etc" / "systemd" /
+                    "network" / "90-static.network").exists()
+
+
 class TestVmCreate:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
