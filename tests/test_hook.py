@@ -57,7 +57,7 @@ def test_generate_hook_uses_lxc_rootfs_path():
 def test_generate_hook_reads_lxc_config_for_ip():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     assert "ipv4" in script
-    assert "90-static.network" in script
+    assert "10-static.network" in script
 
 
 def test_generate_hook_reads_pve_config_for_ip():

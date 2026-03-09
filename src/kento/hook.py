@@ -125,7 +125,7 @@ case "$HOOK_TYPE" in
                 [ -n "${{STATIC_GW:-}}" ] && echo "Gateway=$STATIC_GW"
                 [ -n "${{STATIC_DNS:-}}" ] && echo "DNS=$STATIC_DNS"
                 [ -n "${{STATIC_SEARCH:-}}" ] && echo "Domains=$STATIC_SEARCH"
-            }} > "$NET_DIR/90-static.network"
+            }} > "$NET_DIR/10-static.network"
         elif [ -n "${{STATIC_DNS:-}}" ] || [ -n "${{STATIC_SEARCH:-}}" ]; then
             # No static IP but DNS/search set — use resolved drop-in
             RESOLVED_DIR="$ROOTFS/etc/systemd/resolved.conf.d"

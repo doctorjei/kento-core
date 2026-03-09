@@ -355,9 +355,9 @@ class TestStaticIp:
         assert "gateway=192.168.0.1" in net
         assert "dns=8.8.8.8" in net
 
-        # 90-static.network in upper layer
+        # 10-static.network in upper layer
         unit = (lxc_dir / "upper" / "etc" / "systemd" / "network" /
-                "90-static.network").read_text()
+                "10-static.network").read_text()
         assert "Address=192.168.0.160/22" in unit
         assert "Gateway=192.168.0.1" in unit
         assert "DNS=8.8.8.8" in unit
@@ -375,7 +375,7 @@ class TestStaticIp:
             create("myimage:latest", name="test", ip="10.0.0.5/24")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
-                "90-static.network").read_text()
+                "10-static.network").read_text()
         assert "Address=10.0.0.5/24" in unit
         assert "Gateway" not in unit
         assert "DNS" not in unit
@@ -440,7 +440,7 @@ class TestGuestConfig:
                    searchdomain="example.com")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
-                "90-static.network").read_text()
+                "10-static.network").read_text()
         assert "Domains=example.com" in unit
         net = (tmp_path / "test" / "kento-net").read_text()
         assert "searchdomain=example.com" in net
@@ -494,9 +494,9 @@ class TestGuestConfig:
 
         net = (tmp_path / "test" / "kento-net").read_text()
         assert "searchdomain=example.com" in net
-        # No 90-static.network (no IP)
+        # No 10-static.network (no IP)
         assert not (tmp_path / "test" / "upper" / "etc" / "systemd" /
-                    "network" / "90-static.network").exists()
+                    "network" / "10-static.network").exists()
 
 
 class TestVmCreate:

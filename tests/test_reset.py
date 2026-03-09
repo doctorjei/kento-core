@@ -231,7 +231,7 @@ def test_reset_reinjects_static_ip(mock_root, mock_layers, mock_run,
         reset("test")
 
     unit = (lxc_dir / "upper" / "etc" / "systemd" / "network" /
-            "90-static.network").read_text()
+            "10-static.network").read_text()
     assert "Address=192.168.0.160/22" in unit
     assert "Gateway=192.168.0.1" in unit
     assert "DNS=8.8.8.8" in unit

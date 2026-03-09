@@ -64,7 +64,7 @@ def _inject_network_config(state_dir: Path, ip: str,
                            gateway: str | None = None,
                            dns: str | None = None,
                            searchdomain: str | None = None) -> None:
-    """Write 90-static.network into the overlayfs upper layer."""
+    """Write 10-static.network into the overlayfs upper layer."""
     lines = [
         "[Match]",
         "Name=eth0",
@@ -82,7 +82,7 @@ def _inject_network_config(state_dir: Path, ip: str,
 
     net_dir = state_dir / "upper" / "etc" / "systemd" / "network"
     net_dir.mkdir(parents=True, exist_ok=True)
-    (net_dir / "90-static.network").write_text("\n".join(lines))
+    (net_dir / "10-static.network").write_text("\n".join(lines))
 
 
 def _inject_hostname(state_dir: Path, hostname: str) -> None:
