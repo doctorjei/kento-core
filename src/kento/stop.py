@@ -1,11 +1,11 @@
-"""Stop a kento-managed container."""
+"""Shut down a kento-managed container."""
 
 import subprocess
 
 from kento import require_root, resolve_container
 
 
-def stop(name: str) -> None:
+def shutdown(name: str, *, force: bool = False) -> None:
     require_root()
 
     container_dir = resolve_container(name)
@@ -18,8 +18,19 @@ def stop(name: str) -> None:
         from kento.vm import stop_vm
         stop_vm(container_dir)
     elif mode == "pve":
-        subprocess.run(["pct", "stop", container_id], check=True)
+        if force:
+            subprocess.run(["pct", "stop", container_id], check=True)
+        else:
+            subprocess.run(["pct", "shutdown", container_id], check=True)
     else:
-        subprocess.run(["lxc-stop", "-n", container_id], check=True)
+        cmd = ["lxc-stop", "-n", container_id]
+        if force:
+            cmd.append("-k")
+        subprocess.run(cmd, check=True)
 
-    print(f"Stopped: {name}")
+    action = "Stopped" if force else "Shut down"
+    print(f"{action}: {name}")
+
+
+# Alias for backward compatibility
+stop = shutdown

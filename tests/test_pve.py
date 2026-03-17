@@ -142,15 +142,10 @@ class TestDetectMode:
 class TestGeneratePveConfig:
     def test_basic_config(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
-        assert "arch: amd64" in cfg
         assert "ostype: unmanaged" in cfg
         assert "hostname: test" in cfg
         assert "rootfs: /var/lib/lxc/100/rootfs" in cfg
-        assert "memory: 512" in cfg
-        assert "swap: 0" in cfg
-        assert "cores: 1" in cfg
         assert "net0: name=eth0,bridge=vmbr0,type=veth" in cfg
-        assert "onboot: 0" in cfg
         assert "features: nesting=1" in cfg
         assert "lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional" in cfg
         assert "lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional" in cfg
@@ -158,19 +153,21 @@ class TestGeneratePveConfig:
         assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
         assert "lxc.mount.auto: proc:rw sys:rw cgroup:rw" in cfg
-        assert "lxc.apparmor.profile: unconfined" in cfg
-        assert "lxc.init.cmd: /sbin/init" in cfg
+        assert "lxc.tty.max: 2" in cfg
+        # Dropped fields should not appear
+        assert "arch: amd64" not in cfg
+        assert "memory:" not in cfg
+        assert "swap:" not in cfg
+        assert "cores:" not in cfg
+        assert "onboot:" not in cfg
+        assert "lxc.apparmor.profile:" not in cfg
+        assert "lxc.init.cmd:" not in cfg
+        assert "lxc.pty.max:" not in cfg
 
     def test_custom_bridge(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   bridge="vmbr1")
         assert "bridge=vmbr1" in cfg
-
-    def test_custom_memory_cores(self):
-        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
-                                  memory=1024, cores=4)
-        assert "memory: 1024" in cfg
-        assert "cores: 4" in cfg
 
     def test_nesting_disabled(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
@@ -178,6 +175,12 @@ class TestGeneratePveConfig:
         assert "nesting" not in cfg
         assert "dev/.lxc/proc" not in cfg
         assert "/dev/fuse" not in cfg
+        assert "lxc.mount.auto: proc:mixed sys:mixed cgroup:mixed" in cfg
+
+    def test_no_bridge(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  bridge=None)
+        assert "net0:" not in cfg
 
     def test_static_ip(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),

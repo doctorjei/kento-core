@@ -92,8 +92,7 @@ def delete_pve_config(vmid: int) -> None:
 
 
 def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
-                        bridge: str = "vmbr0", memory: int = 512,
-                        cores: int = 1, nesting: bool = True,
+                        bridge: str | None = "vmbr0", nesting: bool = True,
                         ip: str | None = None,
                         gateway: str | None = None,
                         nameserver: str | None = None,
@@ -103,20 +102,18 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
-        "arch: amd64",
         "ostype: unmanaged",
         f"hostname: {name}",
         f"rootfs: {container_dir}/rootfs",
-        f"memory: {memory}",
-        "swap: 0",
-        f"cores: {cores}",
-        "net0: name=eth0,bridge={bridge}{ip_part}{gw_part},type=veth".format(
-            bridge=bridge,
-            ip_part=f",ip={ip}" if ip else "",
-            gw_part=f",gw={gateway}" if gateway else "",
-        ),
-        "onboot: 0",
     ]
+    if bridge:
+        lines.append(
+            "net0: name=eth0,bridge={bridge}{ip_part}{gw_part},type=veth".format(
+                bridge=bridge,
+                ip_part=f",ip={ip}" if ip else "",
+                gw_part=f",gw={gateway}" if gateway else "",
+            )
+        )
     if nameserver:
         lines.append(f"nameserver: {nameserver}")
     if searchdomain:
@@ -129,14 +126,12 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append("lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional 0 0")
         lines.append("lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
-    lines.extend([
-        f"lxc.hook.pre-mount: {hook}",
-        "lxc.mount.auto: proc:rw sys:rw cgroup:rw",
-        "lxc.apparmor.profile: unconfined",
-        "lxc.init.cmd: /sbin/init",
-        "lxc.tty.max: 4",
-        "lxc.pty.max: 1024",
-    ])
+    lines.append(f"lxc.hook.pre-mount: {hook}")
+    if nesting:
+        lines.append("lxc.mount.auto: proc:rw sys:rw cgroup:rw")
+    else:
+        lines.append("lxc.mount.auto: proc:mixed sys:mixed cgroup:mixed")
+    lines.append("lxc.tty.max: 2")
     if env:
         for e in env:
             lines.append(f"lxc.environment: {e}")

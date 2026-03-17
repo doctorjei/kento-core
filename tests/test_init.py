@@ -9,6 +9,7 @@ import pytest
 from kento import (
     require_root, upper_base, LXC_BASE, VM_BASE,
     sanitize_image_name, next_instance_name, resolve_container,
+    resolve_in_namespace, resolve_any, check_name_conflict,
 )
 
 
@@ -187,3 +188,203 @@ def test_upper_base_with_custom_base(tmp_path):
     with patch.dict(os.environ, {}, clear=True):
         result = upper_base("test", tmp_path)
     assert result == tmp_path / "test"
+
+
+# --- resolve_in_namespace ---
+
+
+def test_resolve_in_namespace_found(tmp_path):
+    """resolve_in_namespace returns path when found in the target namespace."""
+    lxc = tmp_path / "lxc"
+    lxc.mkdir()
+    d = lxc / "webbox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc):
+        result = resolve_in_namespace("webbox", "container")
+    assert result == d
+
+
+def test_resolve_in_namespace_found_by_kento_name(tmp_path):
+    """resolve_in_namespace finds containers via kento-name files."""
+    vm = tmp_path / "vm"
+    vm.mkdir()
+    d = vm / "myvm-dir"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+    (d / "kento-name").write_text("myvm\n")
+
+    with patch("kento.VM_BASE", vm):
+        result = resolve_in_namespace("myvm", "vm")
+    assert result == d
+
+
+def test_resolve_in_namespace_not_found(tmp_path):
+    """resolve_in_namespace exits with error when not found."""
+    lxc = tmp_path / "lxc"
+    lxc.mkdir()
+
+    with patch("kento.LXC_BASE", lxc):
+        with pytest.raises(SystemExit):
+            resolve_in_namespace("nope", "container")
+
+
+def test_resolve_in_namespace_ignores_other(tmp_path):
+    """resolve_in_namespace only searches the target namespace."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    # Container exists in VM namespace only
+    d = vm / "mybox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        with pytest.raises(SystemExit):
+            resolve_in_namespace("mybox", "container")
+
+
+# --- resolve_any ---
+
+
+def test_resolve_any_found_in_lxc(tmp_path):
+    """resolve_any returns (path, mode) when found only in LXC_BASE."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = lxc / "webbox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+    (d / "kento-mode").write_text("pve\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        path, mode = resolve_any("webbox")
+    assert path == d
+    assert mode == "pve"
+
+
+def test_resolve_any_found_in_vm(tmp_path):
+    """resolve_any returns (path, mode) when found only in VM_BASE."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = vm / "myvm"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+    (d / "kento-mode").write_text("vm\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        path, mode = resolve_any("myvm")
+    assert path == d
+    assert mode == "vm"
+
+
+def test_resolve_any_default_mode_lxc(tmp_path):
+    """resolve_any defaults to 'lxc' mode when no kento-mode file exists."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = lxc / "webbox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        path, mode = resolve_any("webbox")
+    assert path == d
+    assert mode == "lxc"
+
+
+def test_resolve_any_default_mode_vm(tmp_path):
+    """resolve_any defaults to 'vm' mode when no kento-mode file in VM_BASE."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = vm / "myvm"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        path, mode = resolve_any("myvm")
+    assert path == d
+    assert mode == "vm"
+
+
+def test_resolve_any_ambiguous(tmp_path):
+    """resolve_any exits with error when name exists in both namespaces."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d_lxc = lxc / "mybox"
+    d_lxc.mkdir()
+    (d_lxc / "kento-image").write_text("debian:12\n")
+    d_vm = vm / "mybox"
+    d_vm.mkdir()
+    (d_vm / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        with pytest.raises(SystemExit):
+            resolve_any("mybox")
+
+
+def test_resolve_any_not_found(tmp_path):
+    """resolve_any exits with error when name is not found anywhere."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        with pytest.raises(SystemExit):
+            resolve_any("ghost")
+
+
+# --- check_name_conflict ---
+
+
+def test_check_name_conflict_exists(tmp_path):
+    """check_name_conflict returns True when name exists in the other namespace."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = vm / "mybox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        # Creating in container namespace, but name exists in vm namespace
+        assert check_name_conflict("mybox", "container") is True
+
+
+def test_check_name_conflict_none(tmp_path):
+    """check_name_conflict returns False when no conflict."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        assert check_name_conflict("newbox", "container") is False
+
+
+def test_check_name_conflict_same_namespace_ignored(tmp_path):
+    """check_name_conflict ignores names in the target (same) namespace."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    # Name exists in container namespace
+    d = lxc / "mybox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+
+    with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+        # Creating in container namespace — same-namespace existence is not a conflict
+        assert check_name_conflict("mybox", "container") is False

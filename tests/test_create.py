@@ -17,8 +17,12 @@ class TestGenerateConfig:
         assert f"lxc.rootfs.path = dir:{tmp_path}/rootfs" in cfg
         assert "lxc.hook.pre-start" in cfg
         assert "lxc.hook.post-stop" in cfg
-        assert "lxc.net.0.link = lxcbr0" in cfg
-        assert "lxc.init.cmd = /sbin/init" in cfg
+        assert "lxc.net.0" not in cfg
+        assert "lxc.tty.max = 2" in cfg
+        assert "lxc.mount.auto = proc:rw sys:rw cgroup:rw" in cfg
+        assert "lxc.init.cmd" not in cfg
+        assert "lxc.apparmor.profile" not in cfg
+        assert "lxc.pty.max" not in cfg
         assert "nesting.conf" in cfg
         assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
         assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
@@ -27,30 +31,18 @@ class TestGenerateConfig:
         cfg = generate_config("test", tmp_path, bridge="br0")
         assert "lxc.net.0.link = br0" in cfg
 
-    def test_memory_limit(self, tmp_path):
-        cfg = generate_config("test", tmp_path, memory=512)
-        assert "lxc.cgroup2.memory.max = 512M" in cfg
-
-    def test_no_memory_limit(self, tmp_path):
-        cfg = generate_config("test", tmp_path, memory=0)
-        assert "memory.max" not in cfg
-
-    def test_cores_limit(self, tmp_path):
-        cfg = generate_config("test", tmp_path, cores=4)
-        assert "lxc.cgroup2.cpuset.cpus = 0-3" in cfg
-
-    def test_no_cores_limit(self, tmp_path):
-        cfg = generate_config("test", tmp_path, cores=0)
-        assert "cpuset.cpus" not in cfg
+    def test_no_bridge(self, tmp_path):
+        cfg = generate_config("test", tmp_path, bridge=None)
+        assert "lxc.net.0" not in cfg
 
     def test_static_ip(self, tmp_path):
-        cfg = generate_config("test", tmp_path, ip="192.168.0.160/22",
-                              gateway="192.168.0.1")
+        cfg = generate_config("test", tmp_path, bridge="lxcbr0",
+                              ip="192.168.0.160/22", gateway="192.168.0.1")
         assert "lxc.net.0.ipv4.address = 192.168.0.160/22" in cfg
         assert "lxc.net.0.ipv4.gateway = 192.168.0.1" in cfg
 
     def test_static_ip_no_gateway(self, tmp_path):
-        cfg = generate_config("test", tmp_path, ip="10.0.0.5/24")
+        cfg = generate_config("test", tmp_path, bridge="lxcbr0", ip="10.0.0.5/24")
         assert "lxc.net.0.ipv4.address = 10.0.0.5/24" in cfg
         assert "ipv4.gateway" not in cfg
 
@@ -61,12 +53,10 @@ class TestGenerateConfig:
 
     def test_nesting_disabled(self, tmp_path):
         cfg = generate_config("test", tmp_path, nesting=False)
+        assert "lxc.mount.auto = proc:mixed sys:mixed cgroup:mixed" in cfg
         assert "nesting.conf" not in cfg
         assert "/dev/fuse" not in cfg
         assert "/dev/net/tun" not in cfg
-
-
-_BRIDGE_PATCH = patch("kento.create._bridge_exists", return_value=True)
 
 
 class TestCreate:
@@ -76,8 +66,7 @@ class TestCreate:
     def test_creates_directory_structure(self, mock_root, mock_layers,
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test")
 
         lxc_dir = tmp_path / "test"
@@ -97,8 +86,7 @@ class TestCreate:
     def test_auto_name_from_image(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "myimage_latest-0"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "myimage_latest-0"):
             create("myimage:latest")
 
         lxc_dir = tmp_path / "myimage_latest-0"
@@ -113,8 +101,7 @@ class TestCreate:
                                          mock_run, tmp_path):
         state = tmp_path / "user-state" / "test"
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=state), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=state):
             create("myimage:latest", name="test")
 
         lxc_dir = tmp_path / "test"
@@ -131,8 +118,7 @@ class TestCreate:
     def test_refuses_existing_container(self, mock_root, mock_layers,
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test")
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test")
@@ -143,8 +129,7 @@ class TestCreate:
     def test_start_calls_lxc_start(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", start=True)
 
         mock_run.assert_called_once_with(
@@ -157,8 +142,7 @@ class TestCreate:
     def test_kento_mode_file_lxc(self, mock_root, mock_layers,
                                   mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", mode="lxc")
 
         assert (tmp_path / "test" / "kento-mode").read_text().strip() == "lxc"
@@ -181,8 +165,7 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", side_effect=fake_write), \
-             _BRIDGE_PATCH:
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
             create("myimage:latest", name="test", mode="pve")
 
         # Container dir should be VMID-based
@@ -199,49 +182,10 @@ class TestCreate:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_pve_bridge_default(self, mock_root, mock_layers,
-                                 mock_run, tmp_path):
-        pve = tmp_path / "pve"
-        pve.mkdir()
-        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
-        pve_conf = tmp_path / "pve-conf" / "100.conf"
-        pve_conf.parent.mkdir()
-
-        def fake_write(vmid, content):
-            pve_conf.write_text(content)
-            return pve_conf
-
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
-             patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", side_effect=fake_write), \
-             _BRIDGE_PATCH:
-            create("myimage:latest", name="test", mode="pve")
-
-        pve_cfg = pve_conf.read_text()
-        assert "bridge=vmbr0" in pve_cfg
-
-    @patch("kento.create.subprocess.run")
-    @patch("kento.create.resolve_layers", return_value="/a:/b")
-    @patch("kento.create.require_root")
-    def test_lxc_bridge_default(self, mock_root, mock_layers,
-                                 mock_run, tmp_path):
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
-            create("myimage:latest", name="test", mode="lxc")
-
-        cfg = (tmp_path / "test" / "config").read_text()
-        assert "lxc.net.0.link = lxcbr0" in cfg
-
-    @patch("kento.create.subprocess.run")
-    @patch("kento.create.resolve_layers", return_value="/a:/b")
-    @patch("kento.create.require_root")
     def test_vmid_with_lxc_mode_errors(self, mock_root, mock_layers,
                                         mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test", mode="lxc", vmid=100)
 
@@ -257,8 +201,7 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/100.conf")), \
-             _BRIDGE_PATCH:
+             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/100.conf")):
             create("myimage:latest", name="test", mode="pve", start=True)
 
         mock_run.assert_called_once_with(
@@ -277,8 +220,7 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "200"), \
              patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/200.conf")), \
-             _BRIDGE_PATCH:
+             patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/200.conf")):
             create("myimage:latest", name="test", mode="pve", vmid=200)
 
         assert (tmp_path / "200" / "kento-mode").read_text().strip() == "pve"
@@ -286,54 +228,15 @@ class TestCreate:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_bridge_not_found_errors(self, mock_root, mock_layers,
-                                      mock_run, tmp_path):
+    def test_no_bridge_means_no_network(self, mock_root, mock_layers,
+                                         mock_run, tmp_path):
+        """When bridge is None (omitted), no network config is generated."""
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             patch("kento.create._bridge_exists", return_value=False):
-            with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc")
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
 
-    @patch("kento.create.subprocess.run")
-    @patch("kento.create.resolve_layers", return_value="/a:/b")
-    @patch("kento.create.require_root")
-    def test_explicit_bridge_not_found_errors(self, mock_root, mock_layers,
-                                               mock_run, tmp_path):
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             patch("kento.create._bridge_exists", return_value=False):
-            with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc", bridge="br99")
-
-    @patch("kento.create.subprocess.run")
-    @patch("kento.create.resolve_layers", return_value="/a:/b")
-    @patch("kento.create.require_root")
-    def test_pve_fallback_to_lxcbr0(self, mock_root, mock_layers,
-                                      mock_run, tmp_path, capsys):
-        pve = tmp_path / "pve"
-        pve.mkdir()
-        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
-        pve_conf = tmp_path / "pve-conf" / "100.conf"
-        pve_conf.parent.mkdir()
-
-        def fake_write(vmid, content):
-            pve_conf.write_text(content)
-            return pve_conf
-
-        def bridge_check(name):
-            return name == "lxcbr0"  # vmbr0 missing, lxcbr0 exists
-
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
-             patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.write_pve_config", side_effect=fake_write), \
-             patch("kento.create._bridge_exists", side_effect=bridge_check):
-            create("myimage:latest", name="test", mode="pve")
-
-        pve_cfg = pve_conf.read_text()
-        assert "bridge=lxcbr0" in pve_cfg
-        stderr = capsys.readouterr().err
-        assert "vmbr0 not found" in stderr
+        cfg = (tmp_path / "test" / "config").read_text()
+        assert "lxc.net.0" not in cfg
 
 
 class TestStaticIp:
@@ -343,8 +246,7 @@ class TestStaticIp:
     def test_ip_creates_net_file_and_network_unit(self, mock_root, mock_layers,
                                                    mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", ip="192.168.0.160/22",
                    gateway="192.168.0.1", dns="8.8.8.8")
 
@@ -370,8 +272,7 @@ class TestStaticIp:
     def test_ip_only_no_gateway_dns(self, mock_root, mock_layers,
                                      mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", ip="10.0.0.5/24")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
@@ -398,8 +299,7 @@ class TestStaticIp:
     def test_gateway_without_ip_errors(self, mock_root, mock_layers,
                                         mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test", gateway="192.168.0.1")
 
@@ -409,8 +309,7 @@ class TestStaticIp:
     def test_dns_without_ip_errors(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test", dns="8.8.8.8")
 
@@ -421,8 +320,7 @@ class TestGuestConfig:
     @patch("kento.create.require_root")
     def test_hostname_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test")
 
         hostname = (tmp_path / "test" / "upper" / "etc" / "hostname").read_text()
@@ -434,8 +332,7 @@ class TestGuestConfig:
     def test_searchdomain_in_network_file(self, mock_root, mock_layers,
                                            mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", ip="10.0.0.5/24",
                    searchdomain="example.com")
 
@@ -450,8 +347,7 @@ class TestGuestConfig:
     @patch("kento.create.require_root")
     def test_timezone_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", timezone="Asia/Tokyo")
 
         lxc_dir = tmp_path / "test"
@@ -466,8 +362,7 @@ class TestGuestConfig:
     @patch("kento.create.require_root")
     def test_env_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", env=["FOO=bar", "BAZ=qux"])
 
         lxc_dir = tmp_path / "test"
@@ -488,8 +383,7 @@ class TestGuestConfig:
     def test_searchdomain_without_ip_writes_metadata(self, mock_root, mock_layers,
                                                       mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
-             _BRIDGE_PATCH:
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", searchdomain="example.com")
 
         net = (tmp_path / "test" / "kento-net").read_text()

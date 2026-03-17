@@ -126,3 +126,83 @@ def resolve_container(name: str, scan_dir: Path | None = None) -> Path:
 
     print(f"Error: container not found: {name}", file=sys.stderr)
     sys.exit(1)
+
+
+def _scan_namespace(name: str, base: Path) -> Path | None:
+    """Scan a single base directory for a container/VM by name.
+
+    Returns the directory path if found, None otherwise.
+    """
+    # Fast path: directory name matches
+    direct = base / name
+    if direct.is_dir() and (direct / "kento-image").is_file():
+        return direct
+
+    # Scan kento-name files
+    if base.is_dir():
+        for d in sorted(base.iterdir()):
+            if not d.is_dir():
+                continue
+            name_file = d / "kento-name"
+            if name_file.is_file() and name_file.read_text().strip() == name:
+                if (d / "kento-image").is_file():
+                    return d
+    return None
+
+
+def resolve_in_namespace(name: str, namespace: str) -> Path:
+    """Resolve a name within a specific namespace ('container' or 'vm').
+
+    Searches only LXC_BASE (for 'container') or VM_BASE (for 'vm').
+    Exits with error if not found.
+    """
+    base = LXC_BASE if namespace == "container" else VM_BASE
+    result = _scan_namespace(name, base)
+    if result is not None:
+        return result
+    print(f"Error: No {namespace} named '{name}'", file=sys.stderr)
+    sys.exit(1)
+
+
+def resolve_any(name: str) -> tuple[Path, str]:
+    """Resolve a name across both namespaces.
+
+    Returns (container_dir, mode) where mode is read from the kento-mode file.
+    Exits with error if ambiguous (found in both) or not found.
+    """
+    lxc_hit = _scan_namespace(name, LXC_BASE)
+    vm_hit = _scan_namespace(name, VM_BASE)
+
+    if lxc_hit and vm_hit:
+        print(
+            f"Ambiguous: '{name}' exists as both LXC container and VM. "
+            "Use 'kento container <cmd>' or 'kento vm <cmd>'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if lxc_hit:
+        mode_file = lxc_hit / "kento-mode"
+        mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
+        return lxc_hit, mode
+
+    if vm_hit:
+        mode_file = vm_hit / "kento-mode"
+        mode = mode_file.read_text().strip() if mode_file.is_file() else "vm"
+        return vm_hit, mode
+
+    print(f"Error: No container or VM named '{name}'", file=sys.stderr)
+    sys.exit(1)
+
+
+def check_name_conflict(name: str, target_namespace: str) -> bool:
+    """Check if a name already exists in the OTHER namespace.
+
+    Returns True if a conflict exists, False otherwise.
+    Does not error — the caller decides what to do.
+    """
+    if target_namespace == "container":
+        other_base = VM_BASE
+    else:
+        other_base = LXC_BASE
+    return _scan_namespace(name, other_base) is not None

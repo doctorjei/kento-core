@@ -34,7 +34,7 @@ def test_generate_hook_has_mount_workaround():
 def test_generate_hook_validates_layers():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     assert "layer path missing" in script
-    assert "kento reset $NAME" in script
+    assert "kento scrub $NAME" in script
 
 
 def test_generate_hook_has_pre_start_pre_mount_and_post_stop():

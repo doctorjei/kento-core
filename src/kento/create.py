@@ -9,13 +9,7 @@ from kento.hook import write_hook
 from kento.layers import resolve_layers
 
 
-def _bridge_exists(name: str) -> bool:
-    """Check if a network bridge interface exists."""
-    return Path(f"/sys/class/net/{name}").is_dir()
-
-
-def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
-                    memory: int = 0, cores: int = 0,
+def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     nesting: bool = True,
                     ip: str | None = None, gateway: str | None = None,
                     env: list[str] | None = None) -> str:
@@ -27,28 +21,25 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str = "lxcbr0",
         "lxc.hook.version = 1",
         f"lxc.hook.pre-start = {hook}",
         f"lxc.hook.post-stop = {hook}",
-        "",
-        "lxc.net.0.type = veth",
-        f"lxc.net.0.link = {bridge}",
-        "lxc.net.0.flags = up",
     ]
-    if ip:
-        lines.append(f"lxc.net.0.ipv4.address = {ip}")
-        if gateway:
-            lines.append(f"lxc.net.0.ipv4.gateway = {gateway}")
+    if bridge:
+        lines += [
+            "",
+            "lxc.net.0.type = veth",
+            f"lxc.net.0.link = {bridge}",
+            "lxc.net.0.flags = up",
+        ]
+        if ip:
+            lines.append(f"lxc.net.0.ipv4.address = {ip}")
+            if gateway:
+                lines.append(f"lxc.net.0.ipv4.gateway = {gateway}")
+    mount_auto = "proc:rw sys:rw cgroup:rw" if nesting else "proc:mixed sys:mixed cgroup:mixed"
     lines += [
         "",
-        "lxc.init.cmd = /sbin/init",
-        "lxc.mount.auto = proc:rw sys:rw cgroup:rw",
-        "lxc.apparmor.profile = unconfined",
-        "lxc.tty.max = 4",
-        "lxc.pty.max = 1024",
+        f"lxc.mount.auto = {mount_auto}",
+        "lxc.tty.max = 2",
     ]
 
-    if memory:
-        lines.append(f"lxc.cgroup2.memory.max = {memory}M")
-    if cores:
-        lines.append(f"lxc.cgroup2.cpuset.cpus = 0-{cores - 1}")
     if nesting:
         lines.append("lxc.include = /usr/share/lxc/config/nesting.conf")
         lines.append("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file,optional 0 0")
@@ -110,7 +101,7 @@ def _inject_env(state_dir: Path, env_list: list[str]) -> None:
 
 
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
-           memory: int = 0, cores: int = 0, nesting: bool = True,
+           nesting: bool = True,
            start: bool = False, mode: str | None = None,
            vmid: int = 0, port: str | None = None,
            ip: str | None = None, gateway: str | None = None,
@@ -151,25 +142,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             print("Warning: --bridge is ignored in VM mode", file=sys.stderr)
         if not nesting:
             print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
-
-    # Resolve and validate bridge (not applicable for VM)
-    if mode != "vm":
-        if bridge is None:
-            # Auto-detect: try mode default first, then fallback
-            default = "vmbr0" if mode == "pve" else "lxcbr0"
-            fallback = "lxcbr0" if mode == "pve" else "vmbr0"
-            if _bridge_exists(default):
-                bridge = default
-            elif _bridge_exists(fallback):
-                bridge = fallback
-                print(f"Warning: {default} not found, using {fallback}", file=sys.stderr)
-            else:
-                print(f"Error: no bridge found (tried {default}, {fallback}). "
-                      f"Specify one with --bridge.", file=sys.stderr)
-                sys.exit(1)
-        elif not _bridge_exists(bridge):
-            print(f"Error: bridge interface not found: {bridge}", file=sys.stderr)
-            sys.exit(1)
 
     # Resolve container_id for directory paths
     if mode == "pve":
@@ -263,12 +235,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
 
         # Generate config
         if mode == "pve":
-            pve_memory = memory if memory else 512
-            pve_cores = cores if cores else 1
             pve_conf = write_pve_config(
                 vmid,
                 generate_pve_config(name, vmid, container_dir, bridge=bridge,
-                                    memory=pve_memory, cores=pve_cores,
                                     nesting=nesting, ip=ip,
                                     gateway=gateway, nameserver=dns,
                                     searchdomain=searchdomain,
@@ -277,8 +246,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             config_path = str(pve_conf)
         else:
             (container_dir / "config").write_text(
-                generate_config(name, container_dir, bridge=bridge, memory=memory,
-                                cores=cores, nesting=nesting,
+                generate_config(name, container_dir, bridge=bridge,
+                                nesting=nesting,
                                 ip=ip, gateway=gateway, env=env)
             )
             config_path = f"{container_dir}/config"
@@ -288,13 +257,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         print(f"  Bridge:  {bridge}")
         if mode == "pve":
             print(f"  VMID:    {vmid}")
-            print(f"  Memory:  {pve_memory} MB")
-            print(f"  Cores:   {pve_cores}")
-        else:
-            if memory:
-                print(f"  Memory:  {memory} MB")
-            if cores:
-                print(f"  Cores:   {cores}")
         print(f"  Nesting: {nesting}")
         print(f"  Config:  {config_path}")
 

@@ -27,7 +27,7 @@ def destroy(name: str, force: bool = False) -> None:
 
     if running and not force:
         print(f"Error: container {name} is running. "
-              f"Use 'kento container rm -f {name}' to force removal.",
+              f"Use 'kento container destroy -f {name}' to force removal.",
               file=sys.stderr)
         sys.exit(1)
 

@@ -104,7 +104,7 @@ def test_list_pve_container(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "webbox" in output
-    assert "pve" in output
+    assert "LXC" in output
     assert "running" in output
 
 
@@ -134,13 +134,13 @@ def test_list_mixed_lxc_and_pve(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "mybox" in output
-    assert "lxc" in output
     assert "webbox" in output
-    assert "pve" in output
+    # Both lxc and pve modes should show as TYPE "LXC"
+    assert "LXC" in output
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_shows_mode_column(mock_run, tmp_path, capsys):
+def test_list_shows_type_column(mock_run, tmp_path, capsys):
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
@@ -153,8 +153,9 @@ def test_list_shows_mode_column(mock_run, tmp_path, capsys):
         list_containers()
 
     output = capsys.readouterr().out
-    assert "MODE" in output
-    assert "CONTAINER" in output
+    assert "TYPE" in output
+    assert "NAME" in output
+    assert "MODE" not in output
 
 
 # --- VM mode tests ---
@@ -188,7 +189,7 @@ def test_list_vm_container(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "testvm" in output
-    assert "vm" in output
+    assert "VM" in output
     assert "stopped" in output
 
 
@@ -256,6 +257,182 @@ def test_list_mixed_lxc_pve_vm(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "mybox" in output
-    assert "lxc" in output
+    assert "LXC" in output
     assert "testvm" in output
-    assert "vm" in output
+    assert "VM" in output
+
+
+# --- TYPE column tests ---
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
+    """Containers with mode 'lxc' should display TYPE 'LXC'."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("debian:12\n")
+    (lxc_dir / "kento-mode").write_text("lxc\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers()
+
+    output = capsys.readouterr().out
+    lines = output.strip().split("\n")
+    # Data line (skip header + separator)
+    data_line = lines[2]
+    assert "LXC" in data_line
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
+def test_pve_mode_shows_type_lxc(mock_run, tmp_path, capsys):
+    """Containers with mode 'pve' should display TYPE 'LXC'."""
+    lxc_dir = tmp_path / "100"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("ubuntu:22.04\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-name").write_text("pvehost\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers()
+
+    output = capsys.readouterr().out
+    lines = output.strip().split("\n")
+    data_line = lines[2]
+    assert "LXC" in data_line
+    assert "VM" not in data_line
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
+def test_vm_mode_shows_type_vm(mock_run, tmp_path, capsys):
+    """Containers with mode 'vm' should display TYPE 'VM'."""
+    lxc = tmp_path / "lxc"
+    lxc.mkdir()
+    vm = tmp_path / "vm"
+    vm.mkdir()
+    vm_dir = vm / "testvm"
+    vm_dir.mkdir()
+    (vm_dir / "kento-image").write_text("vm-image:latest\n")
+    (vm_dir / "kento-mode").write_text("vm\n")
+    (vm_dir / "kento-name").write_text("testvm\n")
+    (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+    (vm_dir / "upper").mkdir()
+
+    with patch("kento.list.LXC_BASE", lxc), \
+         patch("kento.list.VM_BASE", vm), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        list_containers()
+
+    output = capsys.readouterr().out
+    lines = output.strip().split("\n")
+    data_line = lines[2]
+    assert "VM" in data_line
+
+
+# --- Scope filtering tests ---
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
+def test_scope_none_shows_all(mock_run, tmp_path, capsys):
+    """scope=None should show both LXC and VM entries."""
+    lxc = tmp_path / "lxc"
+    lxc.mkdir()
+    vm = tmp_path / "vm"
+    vm.mkdir()
+
+    lxc_dir = lxc / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("debian:12\n")
+    (lxc_dir / "kento-mode").write_text("lxc\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+
+    vm_dir = vm / "testvm"
+    vm_dir.mkdir()
+    (vm_dir / "kento-image").write_text("vm-image:latest\n")
+    (vm_dir / "kento-mode").write_text("vm\n")
+    (vm_dir / "kento-name").write_text("testvm\n")
+    (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+    (vm_dir / "upper").mkdir()
+
+    with patch("kento.list.LXC_BASE", lxc), \
+         patch("kento.list.VM_BASE", vm), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        list_containers(scope=None)
+
+    output = capsys.readouterr().out
+    assert "mybox" in output
+    assert "testvm" in output
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
+def test_scope_container_shows_only_lxc(mock_run, tmp_path, capsys):
+    """scope='container' should show only LXC/PVE entries, not VMs."""
+    lxc = tmp_path / "lxc"
+    lxc.mkdir()
+    vm = tmp_path / "vm"
+    vm.mkdir()
+
+    lxc_dir = lxc / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("debian:12\n")
+    (lxc_dir / "kento-mode").write_text("lxc\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+
+    vm_dir = vm / "testvm"
+    vm_dir.mkdir()
+    (vm_dir / "kento-image").write_text("vm-image:latest\n")
+    (vm_dir / "kento-mode").write_text("vm\n")
+    (vm_dir / "kento-name").write_text("testvm\n")
+    (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+    (vm_dir / "upper").mkdir()
+
+    with patch("kento.list.LXC_BASE", lxc), \
+         patch("kento.list.VM_BASE", vm), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        list_containers(scope="container")
+
+    output = capsys.readouterr().out
+    assert "mybox" in output
+    assert "testvm" not in output
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
+def test_scope_vm_shows_only_vm(mock_run, tmp_path, capsys):
+    """scope='vm' should show only VM entries, not LXC/PVE."""
+    lxc = tmp_path / "lxc"
+    lxc.mkdir()
+    vm = tmp_path / "vm"
+    vm.mkdir()
+
+    lxc_dir = lxc / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("debian:12\n")
+    (lxc_dir / "kento-mode").write_text("lxc\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+
+    vm_dir = vm / "testvm"
+    vm_dir.mkdir()
+    (vm_dir / "kento-image").write_text("vm-image:latest\n")
+    (vm_dir / "kento-mode").write_text("vm\n")
+    (vm_dir / "kento-name").write_text("testvm\n")
+    (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+    (vm_dir / "upper").mkdir()
+
+    with patch("kento.list.LXC_BASE", lxc), \
+         patch("kento.list.VM_BASE", vm), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        list_containers(scope="vm")
+
+    output = capsys.readouterr().out
+    assert "testvm" in output
+    assert "mybox" not in output

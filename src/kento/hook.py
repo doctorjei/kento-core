@@ -26,7 +26,7 @@ case "$HOOK_TYPE" in
         for dir in $LAYERS; do
             if [ ! -d "$dir" ]; then
                 echo "Error: layer path missing: $dir" >&2
-                echo "Image may have changed. Run: kento reset $NAME" >&2
+                echo "Image may have changed. Run: kento scrub $NAME" >&2
                 exit 1
             fi
         done

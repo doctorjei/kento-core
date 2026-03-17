@@ -1,4 +1,4 @@
-"""Reset a kento-managed container to clean OCI state."""
+"""Scrub a kento-managed container back to clean OCI state."""
 
 import shutil
 import subprocess
@@ -21,7 +21,7 @@ def reset(name: str) -> None:
 
     # Refuse if running
     if is_running(container_dir, mode):
-        print(f"Error: container is running. Stop it first: kento container stop {name}",
+        print(f"Error: container is running. Stop it first: kento container shutdown {name}",
               file=sys.stderr)
         sys.exit(1)
 
@@ -85,5 +85,5 @@ def reset(name: str) -> None:
     if mode != "vm":
         write_hook(container_dir, layers, name, state_dir)
 
-    print(f"Reset: {name}")
+    print(f"Scrubbed: {name}")
     print("  Writable layer cleared, layers re-resolved from image.")
