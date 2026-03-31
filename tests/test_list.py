@@ -405,6 +405,84 @@ def test_scope_container_shows_only_lxc(mock_run, tmp_path, capsys):
     assert "testvm" not in output
 
 
+# --- PVE-VM mode tests ---
+
+
+class TestListPveVm:
+    @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
+    @patch("kento.list.is_running", return_value=False)
+    def test_pve_vm_shows_as_vm_type(self, mock_is_running, mock_run, tmp_path, capsys):
+        """Containers with mode 'pve-vm' should display TYPE 'VM'."""
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        vm_dir = vm / "test"
+        vm_dir.mkdir()
+        (vm_dir / "kento-image").write_text("myimage\n")
+        (vm_dir / "kento-mode").write_text("pve-vm\n")
+        (vm_dir / "kento-name").write_text("test\n")
+        (vm_dir / "kento-vmid").write_text("100\n")
+        (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+        (vm_dir / "upper").mkdir()
+
+        with patch("kento.list.LXC_BASE", lxc), \
+             patch("kento.list.VM_BASE", vm):
+            list_containers()
+
+        output = capsys.readouterr().out
+        assert "test" in output
+        lines = output.strip().split("\n")
+        data_line = lines[2]
+        assert "VM" in data_line
+
+    @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
+    @patch("kento.list.is_running", return_value=False)
+    def test_pve_vm_included_in_vm_scope(self, mock_is_running, mock_run, tmp_path, capsys):
+        """Containers with mode 'pve-vm' should appear with scope='vm'."""
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        vm_dir = vm / "test"
+        vm_dir.mkdir()
+        (vm_dir / "kento-image").write_text("myimage\n")
+        (vm_dir / "kento-mode").write_text("pve-vm\n")
+        (vm_dir / "kento-name").write_text("test\n")
+        (vm_dir / "kento-vmid").write_text("100\n")
+        (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+        (vm_dir / "upper").mkdir()
+
+        with patch("kento.list.LXC_BASE", lxc), \
+             patch("kento.list.VM_BASE", vm):
+            list_containers(scope="vm")
+
+        output = capsys.readouterr().out
+        assert "test" in output
+
+    @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
+    def test_pve_vm_excluded_from_container_scope(self, mock_run, tmp_path, capsys):
+        """Containers with mode 'pve-vm' should NOT appear with scope='container'."""
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        vm_dir = vm / "test"
+        vm_dir.mkdir()
+        (vm_dir / "kento-image").write_text("myimage\n")
+        (vm_dir / "kento-mode").write_text("pve-vm\n")
+        (vm_dir / "kento-name").write_text("test\n")
+        (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+        (vm_dir / "upper").mkdir()
+
+        with patch("kento.list.LXC_BASE", lxc), \
+             patch("kento.list.VM_BASE", vm):
+            list_containers(scope="container")
+
+        output = capsys.readouterr().out
+        assert "test" not in output or "no kento-managed" in output
+
+
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
 def test_scope_vm_shows_only_vm(mock_run, tmp_path, capsys):
     """scope='vm' should show only VM entries, not LXC/PVE."""

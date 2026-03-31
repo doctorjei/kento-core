@@ -394,6 +394,8 @@ class TestGuestConfig:
 
 
 class TestVmCreate:
+    """Tests for plain VM mode (no PVE host)."""
+
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_vm_creates_in_vm_base(self, mock_root, mock_layers, tmp_path):
@@ -477,3 +479,136 @@ class TestVmCreate:
 
         lxc_dir = vm_dir / "myimage_latest-0"
         assert (lxc_dir / "kento-name").read_text().strip() == "myimage_latest-0"
+
+
+class TestPveVmCreate:
+    """Tests for pve-vm mode (VM mode on PVE host)."""
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_mode_autodetected(self, mock_root, mock_layers, tmp_path):
+        """VM mode on PVE host auto-detects to pve-vm."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", return_value=Path("/etc/pve/qemu-server/100.conf")):
+            create("myimage:latest", name="test", mode="vm")
+
+        d = vm_dir / "test"
+        assert (d / "kento-mode").read_text().strip() == "pve-vm"
+        assert (d / "kento-vmid").read_text().strip() == "100"
+        assert (d / "kento-hook").is_file()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_creates_hookscript(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode generates VM hookscript."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", return_value=Path("/etc/pve/qemu-server/100.conf")):
+            create("myimage:latest", name="test", mode="vm")
+
+        hook = vm_dir / "test" / "kento-hook"
+        assert hook.is_file()
+        content = hook.read_text()
+        assert "pre-start" in content
+        assert "post-stop" in content
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_creates_snippets_wrapper(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode creates snippets wrapper."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", return_value=Path("/etc/pve/qemu-server/100.conf")):
+            create("myimage:latest", name="test", mode="vm")
+
+        wrapper = snippets / "kento-vm-100.sh"
+        assert wrapper.is_file()
+        assert "exec" in wrapper.read_text()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_writes_qm_config(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode calls write_qm_config."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        written_config = {}
+        def fake_write_qm(vmid, content):
+            written_config["vmid"] = vmid
+            written_config["content"] = content
+            return Path(f"/etc/pve/qemu-server/{vmid}.conf")
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", side_effect=fake_write_qm):
+            create("myimage:latest", name="test", mode="vm")
+
+        assert written_config["vmid"] == 100
+        assert "name: test" in written_config["content"]
+        assert "hookscript:" in written_config["content"]
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_no_port_for_bridge(self, mock_root, mock_layers, tmp_path):
+        """pve-vm with bridge networking doesn't create port file."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", return_value=Path("/etc/pve/qemu-server/100.conf")), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="vm",
+                   net_type="bridge", bridge="vmbr0")
+
+        assert not (vm_dir / "test" / "kento-port").exists()

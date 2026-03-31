@@ -9,6 +9,7 @@ import pytest
 from kento.pve import (
     is_pve, _used_vmids, next_vmid, validate_vmid,
     generate_pve_config, write_pve_config, delete_pve_config,
+    generate_qm_config, write_qm_config, delete_qm_config,
 )
 from kento import detect_mode
 
@@ -145,7 +146,7 @@ class TestGeneratePveConfig:
         assert "ostype: unmanaged" in cfg
         assert "hostname: test" in cfg
         assert "rootfs: /var/lib/lxc/100/rootfs" in cfg
-        assert "net0: name=eth0,bridge=vmbr0,type=veth" in cfg
+        assert "net0:" not in cfg  # no networking by default
         assert "features: nesting=1" in cfg
         assert "lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional" in cfg
         assert "lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional" in cfg
@@ -166,7 +167,7 @@ class TestGeneratePveConfig:
 
     def test_custom_bridge(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
-                                  bridge="vmbr1")
+                                  bridge="vmbr1", net_type="bridge")
         assert "bridge=vmbr1" in cfg
 
     def test_nesting_disabled(self):
@@ -184,12 +185,14 @@ class TestGeneratePveConfig:
 
     def test_static_ip(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  bridge="vmbr0", net_type="bridge",
                                   ip="192.168.0.160/22", gateway="192.168.0.1")
         assert "ip=192.168.0.160/22" in cfg
         assert "gw=192.168.0.1" in cfg
 
     def test_static_ip_no_gateway(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  bridge="vmbr0", net_type="bridge",
                                   ip="10.0.0.5/24")
         assert "ip=10.0.0.5/24" in cfg
         assert "gw=" not in cfg
@@ -274,3 +277,124 @@ class TestDeletePveConfig:
         with patch("kento.pve.PVE_DIR", pve), \
              patch("kento.pve.socket.gethostname", return_value="mynode"):
             delete_pve_config(999)  # should not raise
+
+
+class TestGenerateQmConfig:
+    def test_basic_config(self):
+        cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
+                                  hookscript_ref="local:snippets/kento-vm-100.sh")
+        assert "name: test" in cfg
+        assert "ostype: l26" in cfg
+        assert "machine: q35" in cfg
+        assert "memory: 512" in cfg
+        assert "cores: 1" in cfg
+        assert "hookscript: local:snippets/kento-vm-100.sh" in cfg
+        assert "serial0: socket" in cfg
+
+    def test_args_contains_kernel(self):
+        cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
+                                  hookscript_ref="local:snippets/kento-vm-100.sh")
+        assert "-kernel /var/lib/kento/vm/test/rootfs/boot/vmlinuz" in cfg
+
+    def test_args_contains_initrd(self):
+        cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
+                                  hookscript_ref="local:snippets/kento-vm-100.sh")
+        assert "-initrd /var/lib/kento/vm/test/rootfs/boot/initramfs.img" in cfg
+
+    def test_args_contains_console(self):
+        cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
+                                  hookscript_ref="local:snippets/kento-vm-100.sh")
+        assert "console=ttyS0 rootfstype=virtiofs root=rootfs" in cfg
+
+    def test_args_contains_virtiofs(self):
+        cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
+                                  hookscript_ref="local:snippets/kento-vm-100.sh")
+        assert "chardev socket,id=vfs,path=/var/lib/kento/vm/test/virtiofsd.sock" in cfg
+        assert "vhost-user-fs-pci,chardev=vfs,tag=rootfs" in cfg
+
+    def test_args_contains_memfd(self):
+        cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
+                                  hookscript_ref="local:snippets/kento-vm-100.sh")
+        assert "memory-backend-memfd,id=mem,size=512M,share=on" in cfg
+        assert "numa node,memdev=mem" in cfg
+
+    def test_memfd_matches_memory(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref", memory=1024)
+        assert "memory: 1024" in cfg
+        assert "size=1024M" in cfg
+
+    def test_kvm_enabled(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref", kvm=True)
+        assert "-enable-kvm" in cfg
+
+    def test_kvm_disabled(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref", kvm=False)
+        assert "-enable-kvm" not in cfg
+
+    def test_bridge_network(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref",
+                                  bridge="vmbr0", net_type="bridge")
+        assert "net0: virtio,bridge=vmbr0" in cfg
+
+    def test_no_bridge(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref")
+        assert "net0:" not in cfg
+
+    def test_custom_machine(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref", machine="pc")
+        assert "machine: pc" in cfg
+
+    def test_custom_cores(self):
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref", cores=4)
+        assert "cores: 4" in cfg
+
+
+class TestWriteQmConfig:
+    def test_writes_to_node_path(self, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.socket.gethostname", return_value="mynode"):
+            result = write_qm_config(100, "name: test\n")
+
+        expected = pve / "nodes" / "mynode" / "qemu-server" / "100.conf"
+        assert result == expected
+        assert expected.read_text() == "name: test\n"
+
+    def test_creates_intermediate_dirs(self, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.socket.gethostname", return_value="node1"):
+            write_qm_config(200, "test\n")
+
+        assert (pve / "nodes" / "node1" / "qemu-server" / "200.conf").is_file()
+
+
+class TestDeleteQmConfig:
+    def test_deletes_config(self, tmp_path):
+        pve = tmp_path / "pve"
+        conf_dir = pve / "nodes" / "mynode" / "qemu-server"
+        conf_dir.mkdir(parents=True)
+        conf = conf_dir / "100.conf"
+        conf.write_text("name: test\n")
+
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.socket.gethostname", return_value="mynode"):
+            delete_qm_config(100)
+
+        assert not conf.exists()
+
+    def test_missing_config_is_noop(self, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.socket.gethostname", return_value="mynode"):
+            delete_qm_config(999)  # should not raise

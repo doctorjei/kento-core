@@ -5,10 +5,69 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "0.5.4"
+__version__ = "0.7.0"
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
+
+
+def _bridge_exists(name: str) -> bool:
+    """Check if a network bridge interface exists."""
+    return Path(f"/sys/class/net/{name}").is_dir()
+
+
+def detect_bridge() -> str | None:
+    """Detect the first available network bridge.
+
+    Checks vmbr0 (PVE default), then lxcbr0 (LXC default).
+    Returns the bridge name or None if no bridge found.
+    """
+    for name in ("vmbr0", "lxcbr0"):
+        if _bridge_exists(name):
+            return name
+    return None
+
+
+def resolve_network(net_type: str | None, bridge_name: str | None,
+                    mode: str, port: str | None = None) -> dict:
+    """Resolve network configuration for container/VM creation.
+
+    Returns dict with keys: type, bridge, port
+    - type: "bridge", "host", "usermode", or "none"
+    - bridge: bridge name (str) or None
+    - port: "host:guest" (str) or None
+    """
+    # Port implies usermode if no explicit network set
+    if port is not None and net_type is None:
+        net_type = "usermode"
+
+    # Auto-detect if no network type specified
+    if net_type is None:
+        bridge = detect_bridge()
+        if bridge:
+            net_type = "bridge"
+            bridge_name = bridge
+            print(f"Network: using bridge {bridge}")
+        elif mode in ("vm", "pve-vm"):
+            net_type = "usermode"
+            print("Network: no bridge found, using usermode networking")
+        else:
+            net_type = "none"
+            print("Network: no bridge found, networking disabled")
+    elif net_type == "bridge" and bridge_name is None:
+        # --network bridge without name: auto-detect bridge
+        bridge_name = detect_bridge()
+        if bridge_name is None:
+            print("Error: --network bridge specified but no bridge interface found "
+                  "(checked vmbr0, lxcbr0)", file=sys.stderr)
+            sys.exit(1)
+        print(f"Network: using bridge {bridge_name}")
+
+    return {
+        "type": net_type,
+        "bridge": bridge_name,
+        "port": port,
+    }
 
 
 def require_root() -> None:
@@ -84,6 +143,16 @@ def is_running(container_dir: Path, mode: str) -> bool:
     if mode == "vm":
         from kento.vm import is_vm_running
         return is_vm_running(container_dir)
+    elif mode == "pve-vm":
+        vmid_file = container_dir / "kento-vmid"
+        if not vmid_file.is_file():
+            return False
+        vmid = vmid_file.read_text().strip()
+        result = subprocess.run(
+            ["qm", "status", vmid],
+            capture_output=True, text=True,
+        )
+        return result.returncode == 0 and "running" in result.stdout
     elif mode == "pve":
         result = subprocess.run(
             ["pct", "status", container_dir.name],

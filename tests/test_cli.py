@@ -2,7 +2,7 @@
 
 import pytest
 
-from kento.cli import main
+from kento.cli import main, _parse_network
 
 
 def test_help(capsys):
@@ -18,7 +18,7 @@ def test_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "0.5.4" in output
+    assert "0.7.0" in output
 
 
 def test_no_command(capsys):
@@ -296,3 +296,56 @@ class TestTopLevelHelp:
         output = capsys.readouterr().out
         assert "container" in output
         assert "vm" in output
+
+
+class TestParseNetwork:
+    """Tests for _parse_network() validation logic."""
+
+    def test_none_returns_none_none(self):
+        assert _parse_network(None, None) == (None, None)
+
+    def test_bridge_no_name(self):
+        assert _parse_network("bridge", "lxc") == ("bridge", None)
+
+    def test_bridge_with_name(self):
+        assert _parse_network("bridge=vmbr0", "lxc") == ("bridge", "vmbr0")
+
+    def test_host_mode(self):
+        assert _parse_network("host", "lxc") == ("host", None)
+
+    def test_host_errors_for_vm(self):
+        with pytest.raises(SystemExit):
+            _parse_network("host", "vm")
+
+    def test_usermode(self):
+        assert _parse_network("usermode", "vm") == ("usermode", None)
+
+    def test_usermode_errors_for_lxc(self):
+        with pytest.raises(SystemExit):
+            _parse_network("usermode", "lxc")
+
+    def test_usermode_errors_for_pve(self):
+        with pytest.raises(SystemExit):
+            _parse_network("usermode", "pve")
+
+    def test_usermode_allowed_for_bare(self):
+        """Bare command (mode=None) allows usermode since it might be VM."""
+        assert _parse_network("usermode", None) == ("usermode", None)
+
+    def test_none_mode(self):
+        assert _parse_network("none", "lxc") == ("none", None)
+
+    def test_unknown_mode_errors(self):
+        with pytest.raises(SystemExit):
+            _parse_network("invalid", "lxc")
+
+    def test_bridge_empty_name_errors(self):
+        with pytest.raises(SystemExit):
+            _parse_network("bridge=", "lxc")
+
+    def test_host_allowed_for_bare(self):
+        """Bare command (mode=None) allows host."""
+        assert _parse_network("host", None) == ("host", None)
+
+    def test_bridge_with_custom_name(self):
+        assert _parse_network("bridge=br-lan", "pve") == ("bridge", "br-lan")

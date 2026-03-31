@@ -18,6 +18,9 @@ def start(name: str) -> None:
         from kento.vm import start_vm
         start_vm(container_dir, name)
         return
+    elif mode == "pve-vm":
+        vmid = (container_dir / "kento-vmid").read_text().strip()
+        subprocess.run(["qm", "start", vmid], check=True)
     elif mode == "pve":
         subprocess.run(["pct", "start", container_id], check=True)
     else:

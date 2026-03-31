@@ -17,6 +17,12 @@ def shutdown(name: str, *, force: bool = False) -> None:
     if mode == "vm":
         from kento.vm import stop_vm
         stop_vm(container_dir)
+    elif mode == "pve-vm":
+        vmid = (container_dir / "kento-vmid").read_text().strip()
+        if force:
+            subprocess.run(["qm", "stop", vmid], check=True)
+        else:
+            subprocess.run(["qm", "shutdown", vmid], check=True)
     elif mode == "pve":
         if force:
             subprocess.run(["pct", "stop", container_id], check=True)

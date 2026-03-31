@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from kento import VM_BASE
+from kento.defaults import VM_MEMORY, VM_KVM, VM_MACHINE
 
 # virtiofsd is often installed outside PATH (e.g. /usr/libexec/virtiofsd on Debian)
 _VIRTIOFSD_SEARCH = ["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd"]
@@ -116,9 +117,12 @@ def start_vm(container_dir: Path, name: str) -> None:
         print(f"Error: initramfs not found at {initramfs}", file=sys.stderr)
         sys.exit(1)
 
-    # Read port mapping
-    port_text = (container_dir / "kento-port").read_text().strip()
-    host_port, guest_port = port_text.split(":")
+    # Read port mapping (usermode networking)
+    port_file = container_dir / "kento-port"
+    host_port = guest_port = None
+    if port_file.is_file():
+        port_text = port_file.read_text().strip()
+        host_port, guest_port = port_text.split(":")
 
     # Start virtiofsd
     virtiofsd_bin = _find_virtiofsd()
@@ -140,27 +144,40 @@ def start_vm(container_dir: Path, name: str) -> None:
         time.sleep(0.1)
 
     # Start QEMU
-    memory = "512"
-    qemu = subprocess.Popen(
-        ["qemu-system-x86_64",
+    memory = str(VM_MEMORY)
+    qemu_cmd = ["qemu-system-x86_64",
          "-kernel", str(kernel),
          "-initrd", str(initramfs),
-         "-m", memory, "-enable-kvm", "-cpu", "host",
+         "-m", memory,
+         "-machine", VM_MACHINE,
+    ]
+    if VM_KVM:
+        qemu_cmd += ["-enable-kvm", "-cpu", "host"]
+    qemu_cmd += [
          "-nographic",
          "-chardev", f"socket,id=vfs,path={socket_path}",
          "-device", "vhost-user-fs-pci,chardev=vfs,tag=rootfs",
          "-object", f"memory-backend-memfd,id=mem,size={memory}M,share=on",
          "-numa", "node,memdev=mem",
-         "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{host_port}-:{guest_port}",
-         "-device", "virtio-net-pci,netdev=net0",
-         "-append", "console=ttyS0 rootfstype=virtiofs root=rootfs"],
+    ]
+    if host_port is not None:
+        qemu_cmd += [
+             "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{host_port}-:{guest_port}",
+             "-device", "virtio-net-pci,netdev=net0",
+        ]
+    qemu_cmd += [
+         "-append", "console=ttyS0 rootfstype=virtiofs root=rootfs",
+    ]
+    qemu = subprocess.Popen(
+        qemu_cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     (container_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
 
     print(f"Started: {name}")
-    print(f"  SSH: ssh -p {host_port} root@localhost")
+    if port_file.is_file():
+        print(f"  SSH: ssh -p {host_port} root@localhost")
 
 
 def _kill_and_wait(pid_file: Path, timeout: float = 5.0) -> None:

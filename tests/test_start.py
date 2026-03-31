@@ -67,3 +67,23 @@ def test_start_vm(mock_root, tmp_path):
         start("testvm")
 
     mock_start_vm.assert_called_once_with(d, "testvm")
+
+
+# --- PVE-VM mode tests ---
+
+
+class TestStartPveVm:
+    @patch("kento.start.subprocess.run")
+    @patch("kento.start.require_root")
+    def test_start_calls_qm(self, mock_root, mock_run, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-image").write_text("myimage\n")
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-name").write_text("test\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.start.resolve_container", return_value=d):
+            start("test")
+
+        mock_run.assert_called_once_with(["qm", "start", "100"], check=True)

@@ -5,11 +5,13 @@ import sys
 from pathlib import Path
 
 from kento import LXC_BASE, VM_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
+from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
 
 def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
+                    net_type: str | None = None,
                     nesting: bool = True,
                     ip: str | None = None, gateway: str | None = None,
                     env: list[str] | None = None) -> str:
@@ -22,7 +24,8 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         f"lxc.hook.pre-start = {hook}",
         f"lxc.hook.post-stop = {hook}",
     ]
-    if bridge:
+    # Network config based on net_type
+    if net_type == "bridge" and bridge:
         lines += [
             "",
             "lxc.net.0.type = veth",
@@ -33,11 +36,28 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
             lines.append(f"lxc.net.0.ipv4.address = {ip}")
             if gateway:
                 lines.append(f"lxc.net.0.ipv4.gateway = {gateway}")
-    mount_auto = "proc:rw sys:rw cgroup:rw" if nesting else "proc:mixed sys:mixed cgroup:mixed"
+    elif net_type == "host":
+        lines += [
+            "",
+            "lxc.net.0.type = none",  # shares host network
+        ]
+    elif bridge:  # backward compat: bridge passed without net_type
+        lines += [
+            "",
+            "lxc.net.0.type = veth",
+            f"lxc.net.0.link = {bridge}",
+            "lxc.net.0.flags = up",
+        ]
+        if ip:
+            lines.append(f"lxc.net.0.ipv4.address = {ip}")
+            if gateway:
+                lines.append(f"lxc.net.0.ipv4.gateway = {gateway}")
+    # net_type == "none" or net_type is None with no bridge: no network lines
+    mount_auto = LXC_MOUNT_AUTO_NESTING if nesting else LXC_MOUNT_AUTO
     lines += [
         "",
         f"lxc.mount.auto = {mount_auto}",
-        "lxc.tty.max = 2",
+        f"lxc.tty.max = {LXC_TTY}",
     ]
 
     if nesting:
@@ -107,14 +127,27 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            ip: str | None = None, gateway: str | None = None,
            dns: str | None = None, searchdomain: str | None = None,
            timezone: str | None = None,
-           env: list[str] | None = None) -> None:
+           env: list[str] | None = None,
+           net_type: str | None = None) -> None:
     require_root()
 
     # Resolve mode
     mode = detect_mode(mode)
 
+    # Auto-detect pve-vm: VM mode on a PVE host
+    if mode == "vm":
+        from kento.pve import is_pve
+        if is_pve():
+            mode = "pve-vm"
+
+    # Resolve network configuration
+    from kento import resolve_network
+    network = resolve_network(net_type, bridge, mode, port)
+    bridge = network["bridge"]
+    port = network["port"]
+
     # Determine base directory for this mode
-    base_dir = VM_BASE if mode == "vm" else LXC_BASE
+    base_dir = VM_BASE if mode in ("vm", "pve-vm") else LXC_BASE
 
     # Resolve container name
     if name is None:
@@ -125,21 +158,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         sys.exit(1)
 
     # Validate mode-specific flags
-    if vmid and mode != "pve":
+    if vmid and mode not in ("pve", "pve-vm"):
         print(f"Error: --vmid cannot be used with {mode.upper()} mode", file=sys.stderr)
         sys.exit(1)
-    if port is not None and mode != "vm":
+    if port is not None and mode not in ("vm", "pve-vm"):
         print(f"Error: --port cannot be used with {mode.upper()} mode", file=sys.stderr)
         sys.exit(1)
-    if ip is not None and mode == "vm":
+    if ip is not None and mode in ("vm", "pve-vm"):
         print("Error: --ip cannot be used with VM mode", file=sys.stderr)
         sys.exit(1)
     if (gateway or dns) and not ip:
         print("Error: --gateway and --dns require --ip", file=sys.stderr)
         sys.exit(1)
-    if mode == "vm":
-        if bridge is not None:
-            print("Warning: --bridge is ignored in VM mode", file=sys.stderr)
+    if mode in ("vm", "pve-vm"):
         if not nesting:
             print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
 
@@ -152,6 +183,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             vmid = next_vmid()
         container_id = str(vmid)
         print(f"Mode: pve (VMID {vmid})")
+    elif mode == "pve-vm":
+        from kento.pve import next_vmid, validate_vmid, generate_qm_config, write_qm_config
+        from kento.vm_hook import write_vm_hook, write_snippets_wrapper
+        if vmid:
+            validate_vmid(vmid)
+        else:
+            vmid = next_vmid()
+        container_id = name  # VM_BASE uses name, not VMID
+        print(f"Mode: pve-vm (VMID {vmid})")
     elif mode == "vm":
         container_id = name
         print("Mode: vm")
@@ -173,7 +213,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         sys.exit(1)
 
     # Create directory structure — upper/work may be outside container_dir for sudo users
-    state_dir = upper_base(container_id, base_dir if mode == "vm" else None)
+    state_dir = upper_base(container_id, base_dir if mode in ("vm", "pve-vm") else None)
     (container_dir / "rootfs").mkdir(parents=True)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "upper").mkdir(exist_ok=True)
@@ -214,21 +254,61 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-env").write_text("\n".join(env) + "\n")
         _inject_env(state_dir, env)
 
-    if mode == "vm":
-        # Write port mapping
-        from kento.vm import allocate_port
-        if port is None:
-            host_port = allocate_port(base_dir)
-            guest_port = 22
-        else:
-            host_port, guest_port = port.split(":")
-            host_port, guest_port = int(host_port), int(guest_port)
-        (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+    if mode in ("vm", "pve-vm"):
+        # Write port mapping (usermode networking only)
+        if network["type"] == "usermode":
+            from kento.vm import allocate_port
+            if port is None:
+                host_port = allocate_port(base_dir)
+                guest_port = 22
+            else:
+                host_port, guest_port = port.split(":")
+                host_port, guest_port = int(host_port), int(guest_port)
+            (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
 
-        print(f"\nContainer created: {name}")
-        print(f"  Image:   {image}")
-        print(f"  Port:    {host_port}:{guest_port}")
-        print(f"  Dir:     {container_dir}")
+        if mode == "pve-vm":
+            # Generate VM hookscript
+            write_vm_hook(container_dir, layers, name, state_dir)
+
+            # Write snippets wrapper and get PVE reference
+            hookscript_ref = write_snippets_wrapper(vmid, container_dir / "kento-hook")
+
+            # Write VMID reference
+            (container_dir / "kento-vmid").write_text(str(vmid) + "\n")
+
+            # Generate and write QM config
+            from kento.defaults import get_vm_defaults
+            vm_defaults = get_vm_defaults()
+            qm_conf = write_qm_config(
+                vmid,
+                generate_qm_config(
+                    name, vmid, container_dir,
+                    hookscript_ref=hookscript_ref,
+                    memory=vm_defaults["memory"],
+                    cores=vm_defaults["cores"],
+                    machine=vm_defaults["machine"],
+                    kvm=vm_defaults["kvm"],
+                    bridge=bridge,
+                    net_type=network.get("type"),
+                ),
+            )
+
+            print(f"\nVM created: {name}")
+            print(f"  Image:   {image}")
+            print(f"  VMID:    {vmid}")
+            if network["type"] == "usermode":
+                print(f"  Port:    {host_port}:{guest_port}")
+            elif network["type"] == "bridge":
+                print(f"  Bridge:  {bridge}")
+            print(f"  Config:  {qm_conf}")
+            print(f"  Dir:     {container_dir}")
+        else:
+            # Plain VM mode (no PVE)
+            print(f"\nContainer created: {name}")
+            print(f"  Image:   {image}")
+            if network["type"] == "usermode":
+                print(f"  Port:    {host_port}:{guest_port}")
+            print(f"  Dir:     {container_dir}")
     else:
         # Generate hook (LXC/PVE only)
         write_hook(container_dir, layers, name, state_dir)
@@ -238,6 +318,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             pve_conf = write_pve_config(
                 vmid,
                 generate_pve_config(name, vmid, container_dir, bridge=bridge,
+                                    net_type=network.get("type"),
                                     nesting=nesting, ip=ip,
                                     gateway=gateway, nameserver=dns,
                                     searchdomain=searchdomain,
@@ -247,6 +328,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         else:
             (container_dir / "config").write_text(
                 generate_config(name, container_dir, bridge=bridge,
+                                net_type=network.get("type"),
                                 nesting=nesting,
                                 ip=ip, gateway=gateway, env=env)
             )
@@ -261,14 +343,17 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         print(f"  Config:  {config_path}")
 
     if start:
-        print("\nStarting container...")
-        if mode == "vm":
-            from kento.vm import start_vm
-            start_vm(container_dir, name)
+        print("\nStarting...")
+        if mode in ("vm", "pve-vm"):
+            if mode == "pve-vm":
+                subprocess.run(["qm", "start", str(vmid)], check=True)
+            else:
+                from kento.vm import start_vm
+                start_vm(container_dir, name)
         elif mode == "pve":
             subprocess.run(["pct", "start", str(vmid)], check=True)
         else:
             subprocess.run(["lxc-start", "-n", name], check=True)
         print("  Status: running")
     else:
-        print(f"  Status: stopped (use 'kento container start {name}' to boot)")
+        print(f"  Status: stopped (use 'kento start {name}' to boot)")

@@ -2,7 +2,7 @@
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -204,3 +204,82 @@ def test_destroy_vm_no_podman_unmount(mock_root, mock_run, tmp_path):
     podman_calls = [c for c in mock_run.call_args_list
                     if c[0][0][0] in ("podman", "runuser")]
     assert len(podman_calls) == 0
+
+
+# --- PVE-VM mode tests ---
+
+
+def _mock_pvevm_run_not_mounted(args, **kwargs):
+    result = subprocess.CompletedProcess(args, 0)
+    if "mountpoint" in args:
+        result.returncode = 1
+    return result
+
+
+class TestDestroyPveVm:
+    @patch("kento.destroy.subprocess.run", side_effect=_mock_pvevm_run_not_mounted)
+    @patch("kento.destroy.is_running", return_value=False)
+    @patch("kento.destroy.require_root")
+    def test_destroy_cleans_up_qm_config(self, mock_root, mock_running, mock_run, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "rootfs").mkdir()
+        (d / "kento-image").write_text("myimage\n")
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-name").write_text("test\n")
+        (d / "kento-state").write_text(str(d) + "\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.destroy.resolve_container", return_value=d), \
+             patch("kento.pve.delete_qm_config") as mock_delete_qm, \
+             patch("kento.vm_hook.delete_snippets_wrapper") as mock_delete_snippets:
+            destroy("test")
+
+        mock_delete_qm.assert_called_once_with(100)
+        mock_delete_snippets.assert_called_once_with(100)
+        assert not d.exists()
+
+    @patch("kento.destroy.subprocess.run", side_effect=_mock_pvevm_run_not_mounted)
+    @patch("kento.destroy.is_running", return_value=True)
+    @patch("kento.destroy.require_root")
+    def test_force_destroy_stops_via_qm(self, mock_root, mock_running, mock_run, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "rootfs").mkdir()
+        (d / "kento-image").write_text("myimage\n")
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-name").write_text("test\n")
+        (d / "kento-state").write_text(str(d) + "\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.destroy.resolve_container", return_value=d), \
+             patch("kento.pve.delete_qm_config"), \
+             patch("kento.vm_hook.delete_snippets_wrapper"):
+            destroy("test", force=True)
+
+        # Check qm stop was called
+        calls = [c[0][0] for c in mock_run.call_args_list]
+        assert ["qm", "stop", "100"] in calls
+
+    @patch("kento.destroy.subprocess.run", side_effect=_mock_pvevm_run_not_mounted)
+    @patch("kento.destroy.is_running", return_value=False)
+    @patch("kento.destroy.require_root")
+    def test_destroy_no_podman_unmount(self, mock_root, mock_running, mock_run, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "rootfs").mkdir()
+        (d / "kento-image").write_text("myimage\n")
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-name").write_text("test\n")
+        (d / "kento-state").write_text(str(d) + "\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.destroy.resolve_container", return_value=d), \
+             patch("kento.pve.delete_qm_config"), \
+             patch("kento.vm_hook.delete_snippets_wrapper"):
+            destroy("test")
+
+        # No podman image unmount calls for pve-vm mode
+        podman_calls = [c for c in mock_run.call_args_list
+                        if c[0][0][0] in ("podman", "runuser")]
+        assert len(podman_calls) == 0

@@ -34,7 +34,7 @@ def list_containers(scope: str | None = None) -> None:
         # Detect mode and derive TYPE
         mode_file = container_dir / "kento-mode"
         mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
-        ctype = "VM" if mode == "vm" else "LXC"
+        ctype = "VM" if mode in ("vm", "pve-vm") else "LXC"
 
         # Status check
         status = "running" if is_running(container_dir, mode) else "stopped"

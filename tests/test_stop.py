@@ -108,3 +108,38 @@ def test_shutdown_vm(mock_root, tmp_path):
 
 def test_stop_is_alias_for_shutdown():
     assert stop is shutdown
+
+
+# --- PVE-VM mode tests ---
+
+
+class TestShutdownPveVm:
+    @patch("kento.stop.subprocess.run")
+    @patch("kento.stop.require_root")
+    def test_graceful_calls_qm_shutdown(self, mock_root, mock_run, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-image").write_text("myimage\n")
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-name").write_text("test\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test")
+
+        mock_run.assert_called_once_with(["qm", "shutdown", "100"], check=True)
+
+    @patch("kento.stop.subprocess.run")
+    @patch("kento.stop.require_root")
+    def test_force_calls_qm_stop(self, mock_root, mock_run, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-image").write_text("myimage\n")
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-name").write_text("test\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test", force=True)
+
+        mock_run.assert_called_once_with(["qm", "stop", "100"], check=True)

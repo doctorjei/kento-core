@@ -32,10 +32,13 @@ def destroy(name: str, force: bool = False) -> None:
         sys.exit(1)
 
     if running:
-        print("Stopping container...")
+        print("Stopping...")
         if mode == "vm":
             from kento.vm import stop_vm
             stop_vm(container_dir)
+        elif mode == "pve-vm":
+            vmid = (container_dir / "kento-vmid").read_text().strip()
+            subprocess.run(["qm", "stop", vmid], check=True)
         elif mode == "pve":
             subprocess.run(["pct", "stop", container_id], check=True)
         else:
@@ -47,8 +50,8 @@ def destroy(name: str, force: bool = False) -> None:
                       capture_output=True).returncode == 0:
         subprocess.run(["umount", str(rootfs)])
 
-    # Release OCI image mount (LXC/PVE only)
-    if mode != "vm":
+    # Release OCI image mount (LXC/PVE container only)
+    if mode not in ("vm", "pve-vm"):
         from kento.layers import _podman_cmd
         image = (container_dir / "kento-image").read_text().strip()
         subprocess.run(
@@ -56,15 +59,26 @@ def destroy(name: str, force: bool = False) -> None:
             capture_output=True,
         )
 
+    # Read vmid before deletion (needed for pve-vm cleanup)
+    vmid_str = None
+    if mode == "pve-vm":
+        vmid_file = container_dir / "kento-vmid"
+        vmid_str = vmid_file.read_text().strip() if vmid_file.is_file() else None
+
     # Remove state dir if separate from container_dir
     if state_dir != container_dir and state_dir.is_dir():
         shutil.rmtree(state_dir)
 
     shutil.rmtree(container_dir)
 
-    # Clean up PVE config if applicable
+    # Clean up platform-specific config
     if mode == "pve":
         from kento.pve import delete_pve_config
         delete_pve_config(int(container_id))
+    elif mode == "pve-vm" and vmid_str:
+        from kento.pve import delete_qm_config
+        from kento.vm_hook import delete_snippets_wrapper
+        delete_qm_config(int(vmid_str))
+        delete_snippets_wrapper(int(vmid_str))
 
     print(f"Removed: {name}")
