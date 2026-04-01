@@ -20,8 +20,8 @@ sudo kento container create <image> --vm
 ```
 
 The mode is recorded in `kento-mode` at create time. All subsequent
-commands (start, stop, reset, rm) read this file — you don't need to
-pass the flag again.
+commands (start, shutdown, scrub, destroy) read this file — you don't
+need to pass the flag again.
 
 ## LXC mode
 
@@ -29,9 +29,9 @@ Standard LXC system containers. This is the default on non-PVE hosts.
 
 - **Start command:** `lxc-start`
 - **Access:** `sudo lxc-attach -n <name>`
-- **Network bridge:** `lxcbr0` (override with `--bridge`)
+- **Network bridge:** `lxcbr0` (override with `--network bridge=<name>`)
 - **Config location:** `/var/lib/lxc/<name>/config`
-- **Memory/CPU:** no limit unless `--memory` or `--cores` specified
+- **Memory/CPU:** no limit by default
 - **Nesting:** enabled by default (`--no-nesting` to disable)
 - **Apparmor:** set to `unconfined`
 
@@ -45,10 +45,10 @@ be managed with `pct`.
 
 - **Start command:** `pct start <VMID>`
 - **Access:** `pct exec <VMID> -- bash` or the Proxmox web console
-- **Network bridge:** `vmbr0` (override with `--bridge`)
+- **Network bridge:** `vmbr0` (override with `--network bridge=<name>`)
 - **Config location:** `/etc/pve/nodes/<hostname>/lxc/<VMID>.conf`
-- **Memory:** 512 MB default (override with `--memory`)
-- **CPU:** 1 core default (override with `--cores`)
+- **Memory:** 512 MB default (configurable via `/etc/kento/lxc.conf`)
+- **CPU:** 1 core default (configurable via `/etc/kento/lxc.conf`)
 - **Nesting:** enabled by default
 - **VMID:** auto-assigned (lowest free >= 100), or specify with `--vmid`
 
@@ -78,7 +78,7 @@ OCI image. See [VM Mode](vm-mode.md) for full details.
 - **Start command:** QEMU via kento (no external hypervisor manager)
 - **Access:** SSH (`ssh -p <port> <user>@localhost`)
 - **Network:** QEMU user-mode networking with port forwarding
-- **Memory:** 512 MB (hardcoded)
+- **Memory:** 512 MB default (configurable via `/etc/kento/vm.conf`)
 - **Container directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** `--vm` flag, QEMU, virtiofsd, kernel + initramfs in image
 

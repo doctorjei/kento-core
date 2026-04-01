@@ -3,7 +3,7 @@
 import subprocess
 from pathlib import Path
 
-from kento import LXC_BASE, VM_BASE, is_running
+from kento import LXC_BASE, VM_BASE, is_running, read_mode
 
 
 def list_containers(scope: str | None = None) -> None:
@@ -32,8 +32,7 @@ def list_containers(scope: str | None = None) -> None:
         display_name = name_file.read_text().strip() if name_file.is_file() else container_id
 
         # Detect mode and derive TYPE
-        mode_file = container_dir / "kento-mode"
-        mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
+        mode = read_mode(container_dir)
         ctype = "VM" if mode in ("vm", "pve-vm") else "LXC"
 
         # Status check

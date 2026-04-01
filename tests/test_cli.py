@@ -1,5 +1,8 @@
 """Tests for CLI argument parsing."""
 
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
 import pytest
 
 from kento.cli import main, _parse_network
@@ -349,3 +352,102 @@ class TestParseNetwork:
 
     def test_bridge_with_custom_name(self):
         assert _parse_network("bridge=br-lan", "pve") == ("bridge", "br-lan")
+
+
+def _make_container(base: Path, dirname: str, name: str, mode: str) -> Path:
+    """Create a minimal container directory with kento metadata files."""
+    d = base / dirname
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "kento-name").write_text(name)
+    (d / "kento-mode").write_text(mode)
+    (d / "kento-image").write_text("test-image")
+    return d
+
+
+class TestDispatchScope:
+    """Test that scoped commands (kento vm / kento container) resolve to the
+    correct namespace when a name exists in both LXC_BASE and VM_BASE.
+
+    This is the regression test for the T3 dispatch scope bug.
+    """
+
+    def test_vm_scope_starts_vm_not_lxc(self, tmp_path):
+        """kento vm start X should start the VM, not the LXC container."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_dir = _make_container(lxc_base, "mybox", "mybox", "lxc")
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "vm")
+
+        mock_start = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.start.start", mock_start):
+            main(["vm", "start", "mybox"])
+
+        mock_start.assert_called_once_with(
+            "mybox", container_dir=vm_dir, mode="vm",
+        )
+
+    def test_container_scope_starts_lxc_not_vm(self, tmp_path):
+        """kento container start X should start the LXC container, not the VM."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_dir = _make_container(lxc_base, "mybox", "mybox", "lxc")
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "vm")
+
+        mock_start = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.start.start", mock_start):
+            main(["container", "start", "mybox"])
+
+        mock_start.assert_called_once_with(
+            "mybox", container_dir=lxc_dir, mode="lxc",
+        )
+
+    def test_bare_start_errors_on_ambiguous_name(self, tmp_path):
+        """kento start X (bare) should error when name exists in both namespaces."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        _make_container(lxc_base, "mybox", "mybox", "lxc")
+        _make_container(vm_base, "mybox", "mybox", "vm")
+
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base):
+            with pytest.raises(SystemExit) as exc:
+                main(["start", "mybox"])
+            assert exc.value.code == 1
+
+    def test_vm_scope_shutdown(self, tmp_path):
+        """kento vm shutdown X should shut down the VM, not the LXC container."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_dir = _make_container(lxc_base, "mybox", "mybox", "lxc")
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "vm")
+
+        mock_shutdown = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.stop.shutdown", mock_shutdown):
+            main(["vm", "shutdown", "mybox"])
+
+        mock_shutdown.assert_called_once_with(
+            "mybox", force=False, container_dir=vm_dir, mode="vm",
+        )
+
+    def test_container_scope_destroy(self, tmp_path):
+        """kento container destroy X should destroy the LXC container, not the VM."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_dir = _make_container(lxc_base, "mybox", "mybox", "lxc")
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "vm")
+
+        mock_destroy = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.destroy.destroy", mock_destroy):
+            main(["container", "destroy", "mybox"])
+
+        mock_destroy.assert_called_once_with(
+            "mybox", force=False, container_dir=lxc_dir, mode="lxc",
+        )

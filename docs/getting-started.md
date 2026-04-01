@@ -92,13 +92,15 @@ You're now inside a full system container running systemd.
 ### 5. Stop the container
 
 ```
-sudo kento container stop my-first
+sudo kento container shutdown my-first
 ```
 
-### 6. Reset to clean state
+(`stop` also works as an alias.)
+
+### 6. Scrub to clean state
 
 ```
-sudo kento container reset my-first
+sudo kento container scrub my-first
 ```
 
 This clears all writable changes and re-resolves image layers from
@@ -108,10 +110,11 @@ image.
 ### 7. Remove the container
 
 ```
-sudo kento container rm my-first
+sudo kento container destroy my-first
 ```
 
-Removes the container, its config, hook, and writable layer.
+Removes the container, its config, hook, and writable layer. (`rm` also
+works as an alias.)
 
 ## List containers
 
@@ -127,5 +130,5 @@ with their name, image, status, mode, and writable layer size.
 
 - [Modes](modes.md) — understand LXC vs PVE vs VM mode
 - [VM Mode](vm-mode.md) — boot OCI images as QEMU VMs
-- [Container Lifecycle](container-lifecycle.md) — naming, state, reset behavior
+- [Container Lifecycle](container-lifecycle.md) — naming, state, scrub behavior
 - [Troubleshooting](troubleshooting.md) — common errors and fixes

@@ -1,22 +1,24 @@
 """Shut down a kento-managed container."""
 
 import subprocess
+from pathlib import Path
 
-from kento import require_root, resolve_container
+from kento import read_mode, require_root, resolve_container
 
 
-def shutdown(name: str, *, force: bool = False) -> None:
+def shutdown(name: str, *, force: bool = False, container_dir: Path | None = None, mode: str | None = None) -> None:
     require_root()
 
-    container_dir = resolve_container(name)
+    if container_dir is None:
+        container_dir = resolve_container(name)
     container_id = container_dir.name
 
-    mode_file = container_dir / "kento-mode"
-    mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
+    if mode is None:
+        mode = read_mode(container_dir)
 
     if mode == "vm":
         from kento.vm import stop_vm
-        stop_vm(container_dir)
+        stop_vm(container_dir, force=force)
     elif mode == "pve-vm":
         vmid = (container_dir / "kento-vmid").read_text().strip()
         if force:

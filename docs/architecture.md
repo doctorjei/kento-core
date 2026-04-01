@@ -60,8 +60,8 @@ lowerdir strings with many layers.
 
 ### 1. kento CLI (Python)
 
-The management tool. Handles container create, start, stop, reset, rm,
-and list. Runs as root.
+The management tool. Handles container create, start, shutdown, scrub,
+destroy, and list. Runs as root.
 
 Key operations at create time:
 

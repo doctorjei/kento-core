@@ -63,24 +63,28 @@ Behavior depends on the mode recorded at create time:
 - **PVE:** runs `pct start <VMID>`
 - **VM:** mounts overlayfs, starts virtiofsd + QEMU, writes PID files
 
-## Stop
+## Shutdown / stop
 
 ```
+sudo kento container shutdown <name>
 sudo kento container stop <name>
 ```
+
+`shutdown` is the primary command; `stop` is an alias. Pass `-f` / `--force`
+to force an immediate stop (kill).
 
 - **LXC:** runs `lxc-stop -n <name>`
 - **PVE:** runs `pct stop <VMID>`
 - **VM:** sends SIGTERM to QEMU and virtiofsd, waits for exit (SIGKILL
   fallback after 5s), unmounts rootfs
 
-## Reset
+## Scrub
 
 ```
-sudo kento container reset <name>
+sudo kento container scrub <name>
 ```
 
-Resets a container to a clean state matching the OCI image:
+Scrubs a container back to a clean state matching the OCI image:
 
 1. Checks the container is stopped (refuses if running)
 2. Unmounts rootfs if still mounted
@@ -88,21 +92,23 @@ Resets a container to a clean state matching the OCI image:
 4. Re-resolves image layers from podman (picks up image updates)
 5. Regenerates the hook script (LXC/PVE modes)
 
-Use reset when:
+Use scrub when:
 
 - You want to discard all changes and start fresh
 - You've updated the OCI image and want the container to use new layers
 - Layer paths have gone stale (podman reorganized its store)
 
-## Remove
+## Destroy / rm
 
 ```
+sudo kento container destroy <name>
 sudo kento container rm <name>
-sudo kento container rm -f <name>
+sudo kento container destroy -f <name>
 ```
 
-Removes a container completely. If the container is running, kento
-refuses unless `-f` / `--force` is passed. With `--force`:
+`destroy` is the primary command; `rm` is an alias. Removes a container
+completely. If the container is running, kento refuses unless
+`-f` / `--force` is passed. With `--force`:
 
 1. Stops the container
 2. Unmounts rootfs
@@ -128,7 +134,7 @@ When kento is run via `sudo`, it detects the invoking user from
 When run as root directly (not via sudo), everything stays under the
 container directory.
 
-The `kento-state` file records which path was used, so reset and rm
+The `kento-state` file records which path was used, so scrub and destroy
 work correctly regardless of how you run them later.
 
 ## Runtime files

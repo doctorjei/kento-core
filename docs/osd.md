@@ -1,4 +1,4 @@
-# The Kanibako Open Source Definition
+# The Kento Open Source Definition
 
 *Derived 2026/02/26 from https://opensource.org/osd (Linux Foundation) | Original last modified on February 16, 2024*
 

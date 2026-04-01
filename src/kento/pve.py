@@ -1,6 +1,7 @@
 """Proxmox VE integration — VMID allocation and PVE config generation."""
 
 import json
+import os
 import socket
 import sys
 from pathlib import Path
@@ -10,6 +11,20 @@ from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 PVE_DIR = Path("/etc/pve")
 PVE_LXC_DIR = PVE_DIR / "lxc"
 PVE_QEMU_DIR = PVE_DIR / "qemu-server"
+
+
+def _pve_node_name() -> str:
+    """Get the PVE node name from /etc/pve/local symlink.
+
+    PVE's /etc/pve/local is a symlink to /etc/pve/nodes/<node-name>.
+    The node name defaults to the hostname but can differ (set during
+    PVE installation).  Fall back to socket.gethostname() if the
+    symlink doesn't exist (shouldn't happen on a real PVE host).
+    """
+    local = PVE_DIR / "local"
+    if local.is_symlink():
+        return Path(os.readlink(local)).name
+    return socket.gethostname()
 
 
 def is_pve() -> bool:
@@ -70,7 +85,7 @@ def write_pve_config(vmid: int, content: str) -> Path:
     one level at a time — os.makedirs() doesn't work because stat() returns
     ENOENT on empty virtual directories while mkdir() returns EEXIST.
     """
-    node = socket.gethostname()
+    node = _pve_node_name()
     conf_dir = PVE_DIR / "nodes" / node / "lxc"
     # Create each directory level, ignoring EEXIST (pmxcfs quirk)
     for parent in [PVE_DIR / "nodes", PVE_DIR / "nodes" / node, conf_dir]:
@@ -88,7 +103,7 @@ def delete_pve_config(vmid: int) -> None:
 
     No error if the file doesn't exist (idempotent).
     """
-    node = socket.gethostname()
+    node = _pve_node_name()
     conf_path = PVE_DIR / "nodes" / node / "lxc" / f"{vmid}.conf"
     conf_path.unlink(missing_ok=True)
 
@@ -202,7 +217,7 @@ def write_qm_config(vmid: int, content: str) -> Path:
 
     Same pmxcfs mkdir pattern as write_pve_config().
     """
-    node = socket.gethostname()
+    node = _pve_node_name()
     conf_dir = PVE_DIR / "nodes" / node / "qemu-server"
     for parent in [PVE_DIR / "nodes", PVE_DIR / "nodes" / node, conf_dir]:
         try:
@@ -216,6 +231,6 @@ def write_qm_config(vmid: int, content: str) -> Path:
 
 def delete_qm_config(vmid: int) -> None:
     """Delete a QM config. No error if the file doesn't exist."""
-    node = socket.gethostname()
+    node = _pve_node_name()
     conf_path = PVE_DIR / "nodes" / node / "qemu-server" / f"{vmid}.conf"
     conf_path.unlink(missing_ok=True)

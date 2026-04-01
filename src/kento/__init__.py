@@ -5,7 +5,7 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
@@ -70,6 +70,12 @@ def resolve_network(net_type: str | None, bridge_name: str | None,
     }
 
 
+def read_mode(container_dir: Path, default: str = "lxc") -> str:
+    """Read the kento-mode file from a container directory."""
+    mode_file = container_dir / "kento-mode"
+    return mode_file.read_text().strip() if mode_file.is_file() else default
+
+
 def require_root() -> None:
     if os.getuid() != 0:
         print("Error: must run as root", file=sys.stderr)
@@ -105,8 +111,11 @@ def upper_base(name: str, base: Path | None = None) -> Path:
 def sanitize_image_name(image: str) -> str:
     """Convert an OCI image reference to a filesystem-safe name.
 
-    The transformation is bijective (reversible):
-      '-' → '--',  '/' → '-',  '_' → '__',  ':' → '_'
+    Substitution order: '-' → '--',  '/' → '-',  '_' → '__',  ':' → '_'
+
+    The transformation is injective for typical OCI image references but not
+    bijective in the general case — adjacent '_:' and ':_' sequences produce
+    collisions (e.g. 'a_:b' and 'a:_b' both map to 'a___b').
     """
     s = image.replace("-", "--")
     s = s.replace("/", "-")
@@ -115,20 +124,24 @@ def sanitize_image_name(image: str) -> str:
     return s
 
 
-def next_instance_name(base_name: str, scan_dir: Path) -> str:
+def next_instance_name(base_name: str, scan_dir: Path,
+                       other_dir: Path | None = None) -> str:
     """Return the next available auto-generated instance name.
 
     Appends -0, -1, -2, ... to base_name until an unused name is found.
     Checks both directory names and kento-name files in scan_dir.
+    When other_dir is provided, also checks that directory for name conflicts
+    so that auto-generated names are unique across both namespaces.
     """
     used_names: set[str] = set()
-    if scan_dir.is_dir():
-        for d in scan_dir.iterdir():
-            if d.is_dir():
-                used_names.add(d.name)
-                name_file = d / "kento-name"
-                if name_file.is_file():
-                    used_names.add(name_file.read_text().strip())
+    for d_root in (scan_dir, other_dir):
+        if d_root is not None and d_root.is_dir():
+            for d in d_root.iterdir():
+                if d.is_dir():
+                    used_names.add(d.name)
+                    name_file = d / "kento-name"
+                    if name_file.is_file():
+                        used_names.add(name_file.read_text().strip())
     n = 0
     while True:
         candidate = f"{base_name}-{n}"
@@ -251,14 +264,10 @@ def resolve_any(name: str) -> tuple[Path, str]:
         sys.exit(1)
 
     if lxc_hit:
-        mode_file = lxc_hit / "kento-mode"
-        mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
-        return lxc_hit, mode
+        return lxc_hit, read_mode(lxc_hit)
 
     if vm_hit:
-        mode_file = vm_hit / "kento-mode"
-        mode = mode_file.read_text().strip() if mode_file.is_file() else "vm"
-        return vm_hit, mode
+        return vm_hit, read_mode(vm_hit, "vm")
 
     print(f"Error: No container or VM named '{name}'", file=sys.stderr)
     sys.exit(1)

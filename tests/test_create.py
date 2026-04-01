@@ -306,12 +306,18 @@ class TestStaticIp:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_dns_without_ip_errors(self, mock_root, mock_layers,
-                                    mock_run, tmp_path):
+    def test_dns_without_ip_writes_resolved_dropin(self, mock_root, mock_layers,
+                                                    mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", dns="8.8.8.8")
+            create("myimage:latest", name="test", dns="8.8.8.8")
+
+        dropin = (tmp_path / "test" / "upper" / "etc" / "systemd" /
+                  "resolved.conf.d" / "90-kento.conf")
+        assert dropin.exists()
+        content = dropin.read_text()
+        assert "DNS=8.8.8.8" in content
+        assert "[Resolve]" in content
 
 
 class TestGuestConfig:

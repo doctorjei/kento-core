@@ -5,19 +5,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kento import require_root, resolve_container, is_running
+from kento import is_running, read_mode, require_root, resolve_container
 from kento.hook import write_hook
 from kento.layers import resolve_layers
 
 
-def reset(name: str) -> None:
+def reset(name: str, *, container_dir: Path | None = None, mode: str | None = None) -> None:
     require_root()
 
-    container_dir = resolve_container(name)
+    if container_dir is None:
+        container_dir = resolve_container(name)
 
-    # Detect mode (default lxc for containers created before mode tracking)
-    mode_file = container_dir / "kento-mode"
-    mode = mode_file.read_text().strip() if mode_file.is_file() else "lxc"
+    if mode is None:
+        # Detect mode (default lxc for containers created before mode tracking)
+        mode = read_mode(container_dir)
 
     # Refuse if running
     if is_running(container_dir, mode):
@@ -33,7 +34,11 @@ def reset(name: str) -> None:
     rootfs = container_dir / "rootfs"
     if subprocess.run(["mountpoint", "-q", str(rootfs)],
                       capture_output=True).returncode == 0:
-        subprocess.run(["umount", str(rootfs)])
+        result = subprocess.run(["umount", str(rootfs)])
+        if result.returncode != 0:
+            print(f"Error: failed to unmount {rootfs}. Is the container still running?",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Clear writable layer
     upper = state_dir / "upper"
@@ -64,7 +69,17 @@ def reset(name: str) -> None:
         if "ip" in net_cfg:
             _inject_network_config(state_dir, net_cfg["ip"],
                                    net_cfg.get("gateway"), net_cfg.get("dns"),
-                                   net_cfg.get("searchdomain"))
+                                   net_cfg.get("searchdomain"), mode=mode)
+        elif net_cfg.get("dns") or net_cfg.get("searchdomain"):
+            resolved_dir = state_dir / "upper" / "etc" / "systemd" / "resolved.conf.d"
+            resolved_dir.mkdir(parents=True, exist_ok=True)
+            lines = ["[Resolve]"]
+            if net_cfg.get("dns"):
+                lines.append(f"DNS={net_cfg['dns']}")
+            if net_cfg.get("searchdomain"):
+                lines.append(f"Domains={net_cfg['searchdomain']}")
+            lines.append("")
+            (resolved_dir / "90-kento.conf").write_text("\n".join(lines))
 
     # Timezone
     tz_file = container_dir / "kento-tz"

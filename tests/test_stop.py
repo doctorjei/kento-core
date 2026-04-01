@@ -103,7 +103,7 @@ def test_shutdown_vm(mock_root, tmp_path):
          patch("kento.vm.stop_vm") as mock_stop_vm:
         shutdown("testvm")
 
-    mock_stop_vm.assert_called_once_with(d)
+    mock_stop_vm.assert_called_once_with(d, force=False)
 
 
 def test_stop_is_alias_for_shutdown():

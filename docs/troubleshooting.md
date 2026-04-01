@@ -53,10 +53,10 @@ ls /var/lib/kento/vm/<id>/    # VM
 
 ### "Error: container is running. Stop it first: kento container stop \<name\>"
 
-Reset requires the container to be stopped. Stop it first:
+Scrub requires the container to be stopped. Stop it first:
 
 ```
-sudo kento container stop <name>
+sudo kento container shutdown <name>
 ```
 
 ### "Error: failed to resolve layer paths for \<image\>"
@@ -68,7 +68,7 @@ image store is corrupted. Try:
 podman image inspect <image>
 ```
 
-If the image looks fine, try `kento container reset <name>` to
+If the image looks fine, try `kento container scrub <name>` to
 re-resolve layers.
 
 ### "Error: VMID must be >= 100"
@@ -206,10 +206,10 @@ If podman removes or reorganizes image layers (e.g., after `podman
 image prune`), the pre-resolved paths in `kento-layers` become invalid.
 The hook script will report missing layer paths at container start.
 
-Fix by resetting:
+Fix by scrubbing:
 
 ```
-sudo kento container reset <name>
+sudo kento container scrub <name>
 ```
 
 This re-resolves layers from the current podman store.

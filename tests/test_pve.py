@@ -240,7 +240,7 @@ class TestWritePveConfig:
         pve = tmp_path / "pve"
         pve.mkdir()
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="mynode"):
+             patch("kento.pve._pve_node_name", return_value="mynode"):
             result = write_pve_config(100, "arch: amd64\n")
 
         expected = pve / "nodes" / "mynode" / "lxc" / "100.conf"
@@ -251,7 +251,7 @@ class TestWritePveConfig:
         pve = tmp_path / "pve"
         pve.mkdir()
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="node1"):
+             patch("kento.pve._pve_node_name", return_value="node1"):
             write_pve_config(200, "test\n")
 
         assert (pve / "nodes" / "node1" / "lxc" / "200.conf").is_file()
@@ -266,7 +266,7 @@ class TestDeletePveConfig:
         conf.write_text("arch: amd64\n")
 
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="mynode"):
+             patch("kento.pve._pve_node_name", return_value="mynode"):
             delete_pve_config(100)
 
         assert not conf.exists()
@@ -275,7 +275,7 @@ class TestDeletePveConfig:
         pve = tmp_path / "pve"
         pve.mkdir()
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="mynode"):
+             patch("kento.pve._pve_node_name", return_value="mynode"):
             delete_pve_config(999)  # should not raise
 
 
@@ -361,7 +361,7 @@ class TestWriteQmConfig:
         pve = tmp_path / "pve"
         pve.mkdir()
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="mynode"):
+             patch("kento.pve._pve_node_name", return_value="mynode"):
             result = write_qm_config(100, "name: test\n")
 
         expected = pve / "nodes" / "mynode" / "qemu-server" / "100.conf"
@@ -372,7 +372,7 @@ class TestWriteQmConfig:
         pve = tmp_path / "pve"
         pve.mkdir()
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="node1"):
+             patch("kento.pve._pve_node_name", return_value="node1"):
             write_qm_config(200, "test\n")
 
         assert (pve / "nodes" / "node1" / "qemu-server" / "200.conf").is_file()
@@ -387,7 +387,7 @@ class TestDeleteQmConfig:
         conf.write_text("name: test\n")
 
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="mynode"):
+             patch("kento.pve._pve_node_name", return_value="mynode"):
             delete_qm_config(100)
 
         assert not conf.exists()
@@ -396,5 +396,5 @@ class TestDeleteQmConfig:
         pve = tmp_path / "pve"
         pve.mkdir()
         with patch("kento.pve.PVE_DIR", pve), \
-             patch("kento.pve.socket.gethostname", return_value="mynode"):
+             patch("kento.pve._pve_node_name", return_value="mynode"):
             delete_qm_config(999)  # should not raise

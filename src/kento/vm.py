@@ -2,6 +2,7 @@
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -27,10 +28,25 @@ def _find_virtiofsd() -> str:
     sys.exit(1)
 
 
-def allocate_port(scan_dir: Path | None = None) -> int:
-    """Return the next free host port starting from 10022.
+_PORT_MIN = 10022
+_PORT_MAX = 10999
 
-    Scans kento-port files in the VM base directory to find used ports.
+
+def _port_is_free(port: int) -> bool:
+    """Check if a TCP port is available on localhost."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+            return True
+    except OSError:
+        return False
+
+
+def allocate_port(scan_dir: Path | None = None) -> int:
+    """Return the next free host port in range 10022-10999.
+
+    Scans kento-port files in the VM base directory to find used ports,
+    then verifies the candidate port is actually free on the host.
     """
     base = scan_dir or VM_BASE
     used_ports: set[int] = set()
@@ -44,10 +60,11 @@ def allocate_port(scan_dir: Path | None = None) -> int:
                         used_ports.add(host_port)
                     except (ValueError, IndexError):
                         continue
-    port = 10022
-    while port in used_ports:
-        port += 1
-    return port
+    for port in range(_PORT_MIN, _PORT_MAX + 1):
+        if port not in used_ports and _port_is_free(port):
+            return port
+    print("Error: no free port in range 10022-10999", file=sys.stderr)
+    sys.exit(1)
 
 
 def is_vm_running(container_dir: Path) -> bool:
@@ -180,8 +197,8 @@ def start_vm(container_dir: Path, name: str) -> None:
         print(f"  SSH: ssh -p {host_port} root@localhost")
 
 
-def _kill_and_wait(pid_file: Path, timeout: float = 5.0) -> None:
-    """Send SIGTERM to a process and wait for it to exit."""
+def _kill_and_wait(pid_file: Path, timeout: float = 5.0, *, force: bool = False) -> None:
+    """Send SIGTERM (or SIGKILL if force) to a process and wait for it to exit."""
     if not pid_file.is_file():
         return
     try:
@@ -190,7 +207,7 @@ def _kill_and_wait(pid_file: Path, timeout: float = 5.0) -> None:
         pid_file.unlink(missing_ok=True)
         return
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
         return
@@ -209,15 +226,19 @@ def _kill_and_wait(pid_file: Path, timeout: float = 5.0) -> None:
     pid_file.unlink(missing_ok=True)
 
 
-def stop_vm(container_dir: Path) -> None:
+def stop_vm(container_dir: Path, *, force: bool = False) -> None:
     """Stop a VM: kill QEMU + virtiofsd, unmount rootfs, clean up."""
-    _kill_and_wait(container_dir / "kento-qemu-pid")
-    _kill_and_wait(container_dir / "kento-virtiofsd-pid")
+    _kill_and_wait(container_dir / "kento-qemu-pid", force=force)
+    _kill_and_wait(container_dir / "kento-virtiofsd-pid", force=force)
 
     # Unmount rootfs
     rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
-        subprocess.run(["umount", str(rootfs)])
+        result = subprocess.run(["umount", str(rootfs)])
+        if result.returncode != 0:
+            print(f"Error: failed to unmount {rootfs}. Is the container still running?",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Clean up socket
     (container_dir / "virtiofsd.sock").unlink(missing_ok=True)

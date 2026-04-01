@@ -74,11 +74,15 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
 def _inject_network_config(state_dir: Path, ip: str,
                            gateway: str | None = None,
                            dns: str | None = None,
-                           searchdomain: str | None = None) -> None:
+                           searchdomain: str | None = None,
+                           mode: str = "lxc") -> None:
     """Write 10-static.network into the overlayfs upper layer."""
+    # VM modes use predictable naming (e.g. enp0s2), so match by type.
+    # LXC/PVE modes always have eth0 (configured by LXC veth).
+    match_line = "Type=ether" if mode in ("vm", "pve-vm") else "Name=eth0"
     lines = [
         "[Match]",
-        "Name=eth0",
+        match_line,
         "",
         "[Network]",
         f"Address={ip}",
@@ -152,7 +156,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # Resolve container name
     if name is None:
         base_name = sanitize_image_name(image)
-        name = next_instance_name(base_name, base_dir)
+        other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
+        name = next_instance_name(base_name, base_dir, other_dir=other_dir)
     elif (base_dir / name).exists():
         print(f"Error: container name already taken: {name}", file=sys.stderr)
         sys.exit(1)
@@ -167,8 +172,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     if ip is not None and mode in ("vm", "pve-vm"):
         print("Error: --ip cannot be used with VM mode", file=sys.stderr)
         sys.exit(1)
-    if (gateway or dns) and not ip:
-        print("Error: --gateway and --dns require --ip", file=sys.stderr)
+    if gateway and not ip:
+        print("Error: --gateway requires --ip", file=sys.stderr)
         sys.exit(1)
     if mode in ("vm", "pve-vm"):
         if not nesting:
@@ -227,7 +232,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     (container_dir / "kento-name").write_text(name + "\n")
 
     # Write static IP config if requested
-    if ip or searchdomain:
+    if ip or dns or searchdomain:
         net_parts = []
         if ip:
             net_parts.append(f"ip={ip}")
@@ -239,7 +244,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             net_parts.append(f"searchdomain={searchdomain}")
         (container_dir / "kento-net").write_text("\n".join(net_parts) + "\n")
         if ip:
-            _inject_network_config(state_dir, ip, gateway, dns, searchdomain)
+            _inject_network_config(state_dir, ip, gateway, dns, searchdomain,
+                                   mode=mode)
+        elif dns or searchdomain:
+            resolved_dir = state_dir / "upper" / "etc" / "systemd" / "resolved.conf.d"
+            resolved_dir.mkdir(parents=True, exist_ok=True)
+            lines = ["[Resolve]"]
+            if dns:
+                lines.append(f"DNS={dns}")
+            if searchdomain:
+                lines.append(f"Domains={searchdomain}")
+            lines.append("")
+            (resolved_dir / "90-kento.conf").write_text("\n".join(lines))
 
     # Write hostname into guest
     _inject_hostname(state_dir, name)

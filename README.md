@@ -17,7 +17,7 @@ woodblock printing blocks that ensure each color layer aligns perfectly.
 3. The container boots with systemd as PID 1 — a full system container.
 
 The OCI image layers are read-only. All writes go to a separate upper
-directory. `kento container reset` clears the upper layer to revert to
+directory. `kento container scrub` clears the upper layer to revert to
 a clean image state.
 
 ## Three modes
@@ -66,27 +66,40 @@ Options:
 |------|---------|-------------|
 | `--name NAME` | auto | Container name (auto-generated if omitted) |
 | `--pve` / `--lxc` / `--vm` | auto | Force mode |
-| `--bridge NAME` | `vmbr0`/`lxcbr0` | Network bridge (LXC/PVE) |
-| `--memory MB` | no limit | Memory limit in MB |
-| `--cores N` | no limit | CPU core count |
+| `--network MODE` | auto | Network mode: `bridge`, `bridge=<name>`, `host`, `usermode`, `none` |
 | `--nesting / --no-nesting` | on | Enable LXC nesting |
 | `--vmid N` | auto | PVE VMID (PVE mode only) |
 | `--port H:G` | `auto:22` | Port forwarding (VM mode only) |
+| `--ip CIDR` | none | Static IP address (e.g. `192.168.1.10/24`) |
+| `--gateway IP` | none | Default gateway (requires `--ip`) |
+| `--dns IP` | none | DNS server (requires `--ip`) |
+| `--searchdomain DOMAIN` | none | DNS search domain |
+| `--timezone TZ` | none | Timezone (e.g. `America/New_York`) |
+| `--env KEY=VALUE` | none | Environment variable (repeatable) |
 | `--start` | off | Start container after creation |
 
-### Start / stop
+### Start
 
 ```
 sudo kento container start <name> [<name> ...]
-sudo kento container stop <name> [<name> ...]
 ```
 
-Multiple containers can be started or stopped in one command.
+Multiple containers can be started in one command.
 
 For LXC/PVE containers, you can also use `lxc-attach` / `pct exec` directly.
 For VM containers, use `ssh -p <port> root@localhost`.
 
-### List containers
+### Shutdown / stop
+
+```
+sudo kento container shutdown <name> [<name> ...]
+sudo kento container stop <name> [<name> ...]
+```
+
+`shutdown` is the primary command; `stop` is an alias. Pass `-f` / `--force`
+to force an immediate stop (kill) instead of a graceful shutdown.
+
+### List
 
 ```
 sudo kento container list
@@ -96,24 +109,26 @@ sudo kento container ls
 Shows name, image, status, mode, and writable layer size. Lists containers
 from all modes (LXC, PVE, VM). `ls` is an alias for `list`.
 
-### Reset a container
+### Scrub a container
 
 ```
-sudo kento container reset <name> [<name> ...]
+sudo kento container scrub <name> [<name> ...]
 ```
 
 Clears the writable layer and re-resolves image layers from podman.
 The container must be stopped first.
 
-### Remove a container
+### Destroy / rm
 
 ```
+sudo kento container destroy <name> [<name> ...]
 sudo kento container rm <name> [<name> ...]
-sudo kento container rm -f <name>
+sudo kento container destroy -f <name>
 ```
 
-Removes a container and its writable layer. Errors if the container is
-running unless `-f` / `--force` is passed (which stops it first).
+`destroy` is the primary command; `rm` is an alias. Removes a container
+and its writable layer. Errors if the container is running unless
+`-f` / `--force` is passed (which stops it first).
 
 ## Runtime layout
 
@@ -141,7 +156,7 @@ running unless `-f` / `--force` is passed (which stops it first).
 - [Getting Started](docs/getting-started.md) — install, first container walkthrough
 - [Modes](docs/modes.md) — LXC vs PVE vs VM, auto-detection, defaults
 - [VM Mode](docs/vm-mode.md) — image requirements, SSH access, port forwarding
-- [Container Lifecycle](docs/container-lifecycle.md) — naming, state, reset, sudo behavior
+- [Container Lifecycle](docs/container-lifecycle.md) — naming, state, scrub, sudo behavior
 - [Troubleshooting](docs/troubleshooting.md) — error messages and fixes
 - [Architecture](docs/architecture.md) — overlayfs, hooks, startup sequences, internals
 
@@ -166,4 +181,4 @@ system.
 
 ## License
 
-MIT
+GPL-3.0

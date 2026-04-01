@@ -7,23 +7,29 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from kento.vm import VM_BASE, allocate_port, is_vm_running, mount_rootfs, unmount_rootfs, start_vm, stop_vm
+from kento.vm import (
+    VM_BASE, _PORT_MIN, _PORT_MAX, _port_is_free,
+    allocate_port, is_vm_running, mount_rootfs, unmount_rootfs, start_vm, stop_vm,
+)
 
 
 # --- allocate_port ---
 
 
 class TestAllocatePort:
-    def test_empty_dir(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_empty_dir(self, mock_free, tmp_path):
         assert allocate_port(tmp_path) == 10022
 
-    def test_skips_used_ports(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_skips_used_ports(self, mock_free, tmp_path):
         d = tmp_path / "vm1"
         d.mkdir()
         (d / "kento-port").write_text("10022:22\n")
         assert allocate_port(tmp_path) == 10023
 
-    def test_fills_gaps(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_fills_gaps(self, mock_free, tmp_path):
         d1 = tmp_path / "vm1"
         d1.mkdir()
         (d1 / "kento-port").write_text("10022:22\n")
@@ -32,27 +38,46 @@ class TestAllocatePort:
         (d2 / "kento-port").write_text("10024:22\n")
         assert allocate_port(tmp_path) == 10023
 
-    def test_multiple_consecutive(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_multiple_consecutive(self, mock_free, tmp_path):
         for i in range(3):
             d = tmp_path / f"vm{i}"
             d.mkdir()
             (d / "kento-port").write_text(f"{10022 + i}:22\n")
         assert allocate_port(tmp_path) == 10025
 
-    def test_nonexistent_dir(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_nonexistent_dir(self, mock_free, tmp_path):
         assert allocate_port(tmp_path / "nope") == 10022
 
-    def test_ignores_malformed_port(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_ignores_malformed_port(self, mock_free, tmp_path):
         d = tmp_path / "vm1"
         d.mkdir()
         (d / "kento-port").write_text("bad\n")
         assert allocate_port(tmp_path) == 10022
 
-    def test_custom_guest_port(self, tmp_path):
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_custom_guest_port(self, mock_free, tmp_path):
         d = tmp_path / "vm1"
         d.mkdir()
         (d / "kento-port").write_text("10022:2222\n")
         assert allocate_port(tmp_path) == 10023
+
+    @patch("kento.vm._port_is_free", side_effect=lambda p: p != 10022)
+    def test_skips_port_in_use_on_host(self, mock_free, tmp_path):
+        """Port 10022 not in kento-port files but bound on host — skip it."""
+        assert allocate_port(tmp_path) == 10023
+
+    @patch("kento.vm._port_is_free", return_value=False)
+    def test_all_ports_exhausted(self, mock_free, tmp_path):
+        """Every port in range is busy — should exit with error."""
+        with pytest.raises(SystemExit):
+            allocate_port(tmp_path)
+
+    def test_port_range_constants(self):
+        assert _PORT_MIN == 10022
+        assert _PORT_MAX == 10999
 
 
 # --- is_vm_running ---
@@ -204,6 +229,161 @@ class TestStartVm:
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_virtiofsd_args(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+        """Validate virtiofsd command-line arguments."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        vfs_call = mock_popen.call_args_list[0]
+        vfs_args = vfs_call[0][0]
+        assert vfs_args[0] == "/usr/libexec/virtiofsd"
+        assert f"--socket-path={lxc_dir / 'virtiofsd.sock'}" in vfs_args
+        assert f"--shared-dir={rootfs}" in vfs_args
+        assert "--cache=auto" in vfs_args
+        assert vfs_call[1]["stdout"] == subprocess.DEVNULL
+        assert vfs_call[1]["stderr"] == subprocess.DEVNULL
+
+    @patch("kento.vm.VM_KVM", True)
+    @patch("kento.vm.VM_MACHINE", "q35")
+    @patch("kento.vm.VM_MEMORY", 512)
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_qemu_args(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+        """Validate QEMU command-line arguments that are critical for boot."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_call = mock_popen.call_args_list[1]
+        qemu_args = qemu_call[0][0]
+
+        # Executable
+        assert qemu_args[0] == "qemu-system-x86_64"
+
+        # Kernel and initrd paths
+        kernel_idx = qemu_args.index("-kernel")
+        assert qemu_args[kernel_idx + 1] == str(rootfs / "boot" / "vmlinuz")
+        initrd_idx = qemu_args.index("-initrd")
+        assert qemu_args[initrd_idx + 1] == str(rootfs / "boot" / "initramfs.img")
+
+        # Memory
+        m_idx = qemu_args.index("-m")
+        assert qemu_args[m_idx + 1] == "512"
+
+        # Machine type
+        machine_idx = qemu_args.index("-machine")
+        assert qemu_args[machine_idx + 1] == "q35"
+
+        # KVM enabled
+        assert "-enable-kvm" in qemu_args
+        cpu_idx = qemu_args.index("-cpu")
+        assert qemu_args[cpu_idx + 1] == "host"
+
+        # Nographic
+        assert "-nographic" in qemu_args
+
+        # virtiofs chardev and device
+        socket_path = str(lxc_dir / "virtiofsd.sock")
+        chardev_idx = qemu_args.index("-chardev")
+        assert qemu_args[chardev_idx + 1] == f"socket,id=vfs,path={socket_path}"
+        device_idx = qemu_args.index("-device")
+        assert qemu_args[device_idx + 1] == "vhost-user-fs-pci,chardev=vfs,tag=rootfs"
+
+        # Memory backend for virtiofs (memfd with share=on)
+        obj_idx = qemu_args.index("-object")
+        assert qemu_args[obj_idx + 1] == "memory-backend-memfd,id=mem,size=512M,share=on"
+
+        # NUMA node
+        numa_idx = qemu_args.index("-numa")
+        assert qemu_args[numa_idx + 1] == "node,memdev=mem"
+
+        # Network device (port mapping present)
+        netdev_idx = qemu_args.index("-netdev")
+        assert qemu_args[netdev_idx + 1] == "user,id=net0,hostfwd=tcp:127.0.0.1:10022-:22"
+
+        # Kernel command line
+        append_idx = qemu_args.index("-append")
+        assert qemu_args[append_idx + 1] == "console=ttyS0 rootfstype=virtiofs root=rootfs"
+
+        # QEMU stdout/stderr suppressed
+        assert qemu_call[1]["stdout"] == subprocess.DEVNULL
+        assert qemu_call[1]["stderr"] == subprocess.DEVNULL
+
+    @patch("kento.vm.VM_KVM", False)
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_qemu_no_kvm(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+        """When VM_KVM is False, -enable-kvm and -cpu host must be absent."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+        # No kento-port file — no network args
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        assert "-enable-kvm" not in qemu_args
+        assert "-cpu" not in qemu_args
+        # Without kento-port, no network args
+        assert "-netdev" not in qemu_args
+
     @patch("kento.vm.is_vm_running", return_value=True)
     def test_start_rejects_running(self, mock_running, tmp_path):
         lxc_dir = tmp_path / "testvm"
@@ -243,11 +423,11 @@ class TestStopVm:
         stop_vm(tmp_path)
 
         assert mock_kw.call_count == 2
-        mock_kw.assert_any_call(tmp_path / "kento-qemu-pid")
-        mock_kw.assert_any_call(tmp_path / "kento-virtiofsd-pid")
+        mock_kw.assert_any_call(tmp_path / "kento-qemu-pid", force=False)
+        mock_kw.assert_any_call(tmp_path / "kento-virtiofsd-pid", force=False)
         assert not (tmp_path / "virtiofsd.sock").exists()
 
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.vm.subprocess.run", return_value=subprocess.CompletedProcess([], 0))
     @patch("kento.vm._is_mountpoint", return_value=True)
     @patch("kento.vm._kill_and_wait")
     def test_stop_unmounts_if_mounted(self, mock_kw, mock_mp, mock_run, tmp_path):

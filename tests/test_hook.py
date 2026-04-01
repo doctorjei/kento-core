@@ -97,7 +97,7 @@ def test_generate_hook_injects_env():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     assert "/etc/environment" in script
     assert "kento-env" in script
-    assert "lxc.environment" in script
+    assert "lxc\\.environment" in script
 
 
 def test_generate_hook_resolved_dropin_for_dns_without_ip():
