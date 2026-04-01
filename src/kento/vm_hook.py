@@ -75,7 +75,7 @@ case "$PHASE" in
 
         # 5. Find and start virtiofsd
         VIRTIOFSD=""
-        for p in virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd; do
+        for p in virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd /usr/lib/virtiofsd /usr/bin/virtiofsd; do
             if command -v "$p" >/dev/null 2>&1 || [ -x "$p" ]; then
                 VIRTIOFSD="$p"
                 break

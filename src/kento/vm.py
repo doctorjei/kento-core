@@ -12,7 +12,8 @@ from kento import VM_BASE
 from kento.defaults import VM_MEMORY, VM_KVM, VM_MACHINE
 
 # virtiofsd is often installed outside PATH (e.g. /usr/libexec/virtiofsd on Debian)
-_VIRTIOFSD_SEARCH = ["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd"]
+_VIRTIOFSD_SEARCH = ["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd",
+                     "/usr/lib/virtiofsd", "/usr/bin/virtiofsd"]
 
 
 def _find_virtiofsd() -> str:
