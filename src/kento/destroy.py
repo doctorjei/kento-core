@@ -59,7 +59,7 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
     from kento.layers import _podman_cmd
     image = (container_dir / "kento-image").read_text().strip()
     subprocess.run(
-        [*_podman_cmd(mode), "image", "unmount", image],
+        [*_podman_cmd(), "image", "unmount", image],
         capture_output=True,
     )
 

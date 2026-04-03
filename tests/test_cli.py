@@ -301,6 +301,57 @@ class TestTopLevelHelp:
         assert "vm" in output
 
 
+class TestPullCommand:
+    """Tests for the bare-only 'kento pull' command."""
+
+    def test_pull_help(self, capsys):
+        """kento pull --help is recognized."""
+        with pytest.raises(SystemExit) as exc:
+            main(["pull", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "image" in output
+
+    def test_pull_requires_image(self, capsys):
+        """kento pull (no image) should error."""
+        with pytest.raises(SystemExit) as exc:
+            main(["pull"])
+        assert exc.value.code != 0
+
+    def test_pull_calls_podman(self):
+        """kento pull <image> calls podman pull with the image arg."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("kento.require_root"), \
+             patch("subprocess.run", return_value=mock_result) as mock_run:
+            main(["pull", "docker.io/library/alpine:3"])
+        mock_run.assert_called_once_with(["podman", "pull", "docker.io/library/alpine:3"])
+
+    def test_pull_forwards_exit_code(self):
+        """kento pull forwards non-zero exit codes from podman."""
+        mock_result = MagicMock()
+        mock_result.returncode = 125
+        with patch("kento.require_root"), \
+             patch("subprocess.run", return_value=mock_result):
+            with pytest.raises(SystemExit) as exc:
+                main(["pull", "nonexistent/image:latest"])
+            assert exc.value.code == 125
+
+    def test_pull_not_under_container(self, capsys):
+        """kento container pull should not dispatch to pull."""
+        with pytest.raises(SystemExit) as exc:
+            main(["container", "pull", "alpine:3"])
+        # argparse should reject this since pull is not a container subcommand
+        assert exc.value.code != 0
+
+    def test_pull_not_under_vm(self, capsys):
+        """kento vm pull should not dispatch to pull."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "pull", "alpine:3"])
+        # argparse should reject this since pull is not a vm subcommand
+        assert exc.value.code != 0
+
+
 class TestParseNetwork:
     """Tests for _parse_network() validation logic."""
 
@@ -451,3 +502,103 @@ class TestDispatchScope:
         mock_destroy.assert_called_once_with(
             "mybox", force=False, container_dir=lxc_dir, mode="lxc",
         )
+
+
+class TestRunCommand:
+    """Tests for the 'kento run' command (create + start)."""
+
+    def test_bare_run_help(self, capsys):
+        """kento run --help is recognized and shows create-like flags."""
+        with pytest.raises(SystemExit) as exc:
+            main(["run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--name" in output
+        assert "--vm" in output
+        assert "--force" in output
+        assert "--start" not in output  # run has no --start flag
+
+    def test_container_run_help(self, capsys):
+        """kento container run --help is recognized."""
+        with pytest.raises(SystemExit) as exc:
+            main(["container", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--name" in output
+
+    def test_vm_run_help(self, capsys):
+        """kento vm run --help is recognized."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--name" in output
+
+    def test_bare_run_requires_image(self, capsys):
+        """kento run (no image) should error."""
+        with pytest.raises(SystemExit) as exc:
+            main(["run"])
+        assert exc.value.code != 0
+
+    def test_run_dispatches_create_with_start_true(self):
+        """kento run debian:12 dispatches to create with start=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["run", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args
+        assert call_kwargs[1]["start"] is True
+
+    def test_run_with_name_flag(self):
+        """kento run --name mybox debian:12 passes name through."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["run", "--name", "mybox", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args
+        assert call_kwargs[1]["name"] == "mybox"
+        assert call_kwargs[1]["start"] is True
+
+    def test_run_with_vm_flag(self):
+        """kento run --vm debian:12 passes mode=vm through."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["run", "--vm", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args
+        assert call_kwargs[1]["mode"] == "vm"
+        assert call_kwargs[1]["start"] is True
+
+    def test_vm_run_forces_vm_mode(self):
+        """kento vm run debian:12 forces VM mode."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "run", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args
+        assert call_kwargs[1]["mode"] == "vm"
+        assert call_kwargs[1]["start"] is True
+
+    def test_run_in_subcommand_help(self, capsys):
+        """run appears in container and vm help output."""
+        with pytest.raises(SystemExit) as exc:
+            main(["container", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "run" in output
+
+    def test_run_in_vm_help(self, capsys):
+        """run appears in vm help output."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "run" in output
+
+    def test_run_in_top_level_help(self, capsys):
+        """run appears in top-level help output."""
+        with pytest.raises(SystemExit) as exc:
+            main(["--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "run" in output

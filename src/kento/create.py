@@ -211,7 +211,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         sys.exit(1)
 
     # Resolve layers (validates image exists)
-    layers = resolve_layers(image, mode=mode)
+    layers = resolve_layers(image)
     if not layers:
         print(f"Error: failed to resolve layer paths for {image}",
               file=sys.stderr)

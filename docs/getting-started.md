@@ -61,8 +61,14 @@ All kento commands require root. Run with `sudo`.
 ### 1. Pull an OCI image
 
 ```
-podman pull docker.io/library/debian:12
+sudo kento pull docker.io/library/debian:12
 ```
+
+`kento pull` wraps `podman pull` and ensures the image lands in the root
+store where kento can find it.
+
+> **Note:** You can skip this step if the image is already in podman's
+> store. `create` will use it directly.
 
 ### 2. Create a container
 
@@ -78,6 +84,14 @@ and writes the LXC config and hook script. No image data is copied.
 ```
 sudo kento container start my-first
 ```
+
+### 3.5. Check container info
+
+```
+sudo kento info my-first
+```
+
+Shows the container's image, mode, status, and metadata.
 
 ### 4. Attach to the container
 
@@ -115,6 +129,9 @@ sudo kento container destroy my-first
 
 Removes the container, its config, hook, and writable layer. (`rm` also
 works as an alias.)
+
+> **Tip:** `sudo kento run docker.io/library/debian:12 --name my-first`
+> combines create and start in one step.
 
 ## List containers
 

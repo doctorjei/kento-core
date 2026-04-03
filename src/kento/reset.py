@@ -93,7 +93,7 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
 
     # Re-resolve layers from image
     image = (container_dir / "kento-image").read_text().strip()
-    layers = resolve_layers(image, mode=mode)
+    layers = resolve_layers(image)
     (container_dir / "kento-layers").write_text(layers + "\n")
 
     # Regenerate hook (LXC/PVE only — VM mode has no hook)

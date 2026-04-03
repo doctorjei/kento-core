@@ -51,6 +51,15 @@ Pass `--start` to start the container immediately after creation:
 sudo kento container create <image> --name my-ct --start
 ```
 
+## Run (create + start)
+
+```
+sudo kento run <image> [--name <name>]
+```
+
+Equivalent to `create --start`. Accepts all the same flags as `create`
+except `--start` (which is implicit).
+
 ## Start
 
 ```
@@ -119,20 +128,32 @@ completely. If the container is running, kento refuses unless
 
 This is irreversible. All writable state is lost.
 
+## Info / inspect
+
+```
+sudo kento info <name>
+sudo kento inspect <name>
+```
+
+Shows container metadata: image, mode, status, directory paths, network
+config, layer count, and creation time. `inspect` is an alias for `info`.
+
+Pass `--json` for machine-readable output. Pass `-v` / `--verbose` to
+include layer sizes and individual layer paths.
+
 ## Sudo and user storage
 
 When kento is run via `sudo`, it detects the invoking user from
-`SUDO_USER` and:
+`SUDO_USER` and stores the writable layer in
+`~user/.local/share/kento/<name>/` instead of under the container
+directory.
 
-- **Queries the invoking user's podman store** (via `runuser`) instead
-  of root's. This means `sudo kento container create myimage` uses the
-  images you pulled as your normal user.
+Podman images are always resolved from the root store
+(`/var/lib/containers/storage/`). Pull images as root:
 
-- **Stores the writable layer** in `~user/.local/share/kento/<name>/`
-  instead of under `/var/lib/lxc/<name>/`.
-
-When run as root directly (not via sudo), everything stays under the
-container directory.
+```
+sudo kento pull <image>
+```
 
 The `kento-state` file records which path was used, so scrub and destroy
 work correctly regardless of how you run them later.

@@ -54,6 +54,15 @@ pip install .
 
 All commands require root (run with `sudo`).
 
+### Pull an image
+
+```
+sudo kento pull <image>
+```
+
+Fetches an OCI image via podman. This is optional — `create` will use
+images already in podman's store.
+
 ### Create a container
 
 ```
@@ -77,6 +86,15 @@ Options:
 | `--timezone TZ` | none | Timezone (e.g. `America/New_York`) |
 | `--env KEY=VALUE` | none | Environment variable (repeatable) |
 | `--start` | off | Start container after creation |
+
+### Run (create + start)
+
+```
+sudo kento run <image> [--name <name>]
+```
+
+Creates and starts a container in one step. Accepts all the same flags
+as `create` (except `--start`).
 
 ### Start
 
@@ -108,6 +126,21 @@ sudo kento container ls
 
 Shows name, image, status, mode, and writable layer size. Lists containers
 from all modes (LXC, PVE, VM). `ls` is an alias for `list`.
+
+### Info / inspect
+
+```
+sudo kento info <name>
+sudo kento inspect <name>
+```
+
+Shows container details: image, mode, status, directory paths, network
+config, layer count, and more. `inspect` is an alias for `info`.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Machine-readable JSON output |
+| `-v` / `--verbose` | Include layer sizes and paths |
 
 ### Scrub a container
 

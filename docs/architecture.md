@@ -33,7 +33,7 @@ changes.
 ```
 
 The layers come directly from podman's overlay storage at
-`~/.local/share/containers/storage/overlay/<hash>/diff`. Kento never
+`/var/lib/containers/storage/overlay/<hash>/diff` (root store). Kento never
 copies image data.
 
 ### The mount workaround
@@ -60,8 +60,8 @@ lowerdir strings with many layers.
 
 ### 1. kento CLI (Python)
 
-The management tool. Handles container create, start, shutdown, scrub,
-destroy, and list. Runs as root.
+The management tool. Handles container create, run, pull, start,
+shutdown, scrub, destroy, info, and list. Runs as root.
 
 Key operations at create time:
 
@@ -141,12 +141,10 @@ storage:
 - **State directory** (`~user/.local/share/kento/<name>/`) — owned
   by the invoking user, contains the writable upper and work dirs
 
-This separation means:
-
-- `podman image inspect` queries the invoking user's store (via
-  `runuser -u <user> -- podman`)
-- Writable state is per-user
-- Container infrastructure stays under root-owned paths
+Podman images are always resolved from the store matching the
+effective UID. When running as root, this is the root store
+(`/var/lib/containers/storage/`). Kento does not cross between
+podman's rootful and rootless stores.
 
 The `kento-state` file records the state directory path so all
 commands work regardless of who runs them.
