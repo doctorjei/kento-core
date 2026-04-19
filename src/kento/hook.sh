@@ -31,6 +31,20 @@ case "$HOOK_TYPE" in
             -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \
             "$ROOTFS"
 
+        # --- Fstab sanitization ---
+        # Comment out block device entries (PARTUUID=, UUID=, /dev/) that
+        # don't exist in containers. Prevents systemd waiting 90s for
+        # missing devices. Uses #kento# prefix for traceability.
+        if [ -f "$ROOTFS/etc/fstab" ]; then
+            sed -i \
+                -e '/^[[:space:]]*#/b' \
+                -e '/^[[:space:]]*$/b' \
+                -e '/^[[:space:]]*PARTUUID=/s/^/#kento# /' \
+                -e '/^[[:space:]]*UUID=/s/^/#kento# /' \
+                -e '/^[[:space:]]*\/dev\//s/^/#kento# /' \
+                "$ROOTFS/etc/fstab"
+        fi
+
         # --- Guest config injection ---
         # Read config from LXC/PVE config (authoritative, handles pct set)
         # and kento metadata files (fallback for values LXC config can't carry).
@@ -75,6 +89,14 @@ case "$HOOK_TYPE" in
                 [ -n "$CFG_SD" ] && STATIC_SEARCH="$CFG_SD"
                 CFG_PVE_TZ=$(sed -n 's/^timezone: *//p' "$PVE_CONF")
                 [ -n "$CFG_PVE_TZ" ] && CFG_TZ="$CFG_PVE_TZ"
+
+                # Create guest-side mount point directories for mp[n] entries
+                grep '^mp[0-9]*:' "$PVE_CONF" | while IFS= read -r mp_line; do
+                    MP_PATH=$(echo "$mp_line" | tr ',' '\n' | sed -n 's/^mp=//p')
+                    if [ -n "$MP_PATH" ]; then
+                        mkdir -p "$ROOTFS$MP_PATH"
+                    fi
+                done
             fi
         else
             CONFIG_FILE="$CONTAINER_DIR/config"

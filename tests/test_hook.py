@@ -106,6 +106,127 @@ def test_generate_hook_resolved_dropin_for_dns_without_ip():
     assert "90-kento.conf" in script
 
 
+def test_generate_hook_has_fstab_sanitization():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "Fstab sanitization" in script
+    assert "#kento#" in script
+    assert "$ROOTFS/etc/fstab" in script
+    assert "PARTUUID=" in script
+    assert "UUID=" in script
+    assert r"/dev/" in script or "/dev/" in script
+
+
+def test_fstab_sanitization_sed_patterns():
+    """Verify the sed expressions in the hook match the expected lines."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+
+    # Should skip comment lines (branch past substitution)
+    assert r"/^[[:space:]]*#/b" in script
+
+    # Should skip blank lines
+    assert r"/^[[:space:]]*$/b" in script
+
+    # Should comment out PARTUUID lines with #kento# prefix
+    assert r"PARTUUID=" in script
+    assert r"#kento# " in script
+
+    # Should comment out UUID= lines
+    assert r"/^[[:space:]]*UUID=/s/^/#kento# /" in script
+
+    # Should comment out /dev/ lines
+    assert r"/^[[:space:]]*\/dev\//s/^/#kento# /" in script
+
+
+def test_fstab_sanitization_sed_logic(tmp_path):
+    """Run the actual sed expressions against a sample fstab to verify behavior."""
+    import subprocess
+
+    fstab_content = """\
+# /etc/fstab: static file system information
+PARTUUID=abcd-1234 / ext4 defaults 0 1
+UUID=1234-5678 /boot vfat defaults 0 2
+/dev/sda1 /mnt/data ext4 defaults 0 0
+tmpfs /tmp tmpfs defaults,nosuid 0 0
+proc /proc proc defaults 0 0
+sysfs /sys sysfs defaults 0 0
+devpts /dev/pts devpts defaults 0 0
+none /run/shm tmpfs defaults 0 0
+
+# This is a comment about /dev/sda2
+  UUID=leading-space /data ext4 defaults 0 0
+  /dev/vda2 /extra xfs defaults 0 0
+"""
+    fstab = tmp_path / "fstab"
+    fstab.write_text(fstab_content)
+
+    # Run the same sed command from hook.sh
+    subprocess.run([
+        "sed", "-i",
+        "-e", r"/^[[:space:]]*#/b",
+        "-e", r"/^[[:space:]]*$/b",
+        "-e", r"/^[[:space:]]*PARTUUID=/s/^/#kento# /",
+        "-e", r"/^[[:space:]]*UUID=/s/^/#kento# /",
+        "-e", r"/^[[:space:]]*\/dev\//s/^/#kento# /",
+        str(fstab),
+    ], check=True)
+
+    result = fstab.read_text()
+    lines = result.splitlines()
+
+    # Comment lines preserved as-is
+    assert lines[0] == "# /etc/fstab: static file system information"
+
+    # Block device lines commented out with #kento# prefix
+    assert lines[1] == "#kento# PARTUUID=abcd-1234 / ext4 defaults 0 1"
+    assert lines[2] == "#kento# UUID=1234-5678 /boot vfat defaults 0 2"
+    assert lines[3] == "#kento# /dev/sda1 /mnt/data ext4 defaults 0 0"
+
+    # Virtual filesystem lines preserved
+    assert lines[4] == "tmpfs /tmp tmpfs defaults,nosuid 0 0"
+    assert lines[5] == "proc /proc proc defaults 0 0"
+    assert lines[6] == "sysfs /sys sysfs defaults 0 0"
+    assert lines[7] == "devpts /dev/pts devpts defaults 0 0"
+    assert lines[8] == "none /run/shm tmpfs defaults 0 0"
+
+    # Blank line preserved
+    assert lines[9] == ""
+
+    # Comment about /dev/ preserved (it's a comment line)
+    assert lines[10] == "# This is a comment about /dev/sda2"
+
+    # Indented lines also matched
+    assert lines[11] == "#kento#   UUID=leading-space /data ext4 defaults 0 0"
+    assert lines[12] == "#kento#   /dev/vda2 /extra xfs defaults 0 0"
+
+
+def test_fstab_sanitization_placement():
+    """Fstab sanitization must come after overlayfs mount and before guest config."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    mount_pos = script.index("mount -t overlay")
+    fstab_pos = script.index("Fstab sanitization")
+    guest_pos = script.index("Guest config injection")
+    assert mount_pos < fstab_pos < guest_pos
+
+
+def test_generate_hook_has_mount_point_creation():
+    script = generate_hook(Path("/var/lib/lxc/200"), "/a:/b", "test")
+    assert "mount point directories for mp" in script
+    assert "grep '^mp[0-9]*:'" in script
+    assert 'mkdir -p "$ROOTFS$MP_PATH"' in script
+
+
+def test_mount_point_parsing_patterns():
+    """Verify the grep/sed patterns for extracting mp= from PVE config lines."""
+    script = generate_hook(Path("/var/lib/lxc/200"), "/a:/b", "test")
+    # grep selects mp0:, mp1:, etc. lines
+    assert "grep '^mp[0-9]*:'" in script
+    # tr splits on comma, sed extracts mp= value
+    assert "tr ',' '\\n'" in script
+    assert "sed -n 's/^mp=//p'" in script
+    # MP_PATH used to create directory under ROOTFS
+    assert 'MP_PATH' in script
+
+
 def test_write_hook(tmp_path):
     hook = write_hook(tmp_path, "/a:/b", "mycontainer")
     assert hook == tmp_path / "kento-hook"
