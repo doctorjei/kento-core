@@ -132,8 +132,24 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            dns: str | None = None, searchdomain: str | None = None,
            timezone: str | None = None,
            env: list[str] | None = None,
+           ssh_keys: list[str] | None = None,
            net_type: str | None = None) -> None:
     require_root()
+
+    # Validate and read SSH key files early (before any filesystem changes)
+    ssh_key_contents: str | None = None
+    if ssh_keys:
+        parts = []
+        for key_path in ssh_keys:
+            p = Path(key_path)
+            if not p.is_file():
+                print(f"Error: SSH key file not found: {key_path}",
+                      file=sys.stderr)
+                sys.exit(1)
+            parts.append(p.read_text())
+        ssh_key_contents = "\n".join(parts)
+        if not ssh_key_contents.endswith("\n"):
+            ssh_key_contents += "\n"
 
     # Resolve mode
     mode = detect_mode(mode)
@@ -269,6 +285,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     if env:
         (container_dir / "kento-env").write_text("\n".join(env) + "\n")
         _inject_env(state_dir, env)
+
+    # Write SSH authorized_keys metadata if requested. Hook copies this into
+    # the guest's /root/.ssh/authorized_keys on every start.
+    if ssh_key_contents is not None:
+        (container_dir / "kento-authorized-keys").write_text(ssh_key_contents)
 
     if mode in ("vm", "pve-vm"):
         # Write port mapping (usermode networking only)

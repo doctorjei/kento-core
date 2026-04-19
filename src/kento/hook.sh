@@ -181,6 +181,14 @@ $KENTO_ENV"
         if [ -n "${CFG_ENV:-}" ]; then
             echo "$CFG_ENV" | awk -F= '!seen[$1]++' > "$ROOTFS/etc/environment"
         fi
+
+        # --- SSH authorized_keys injection ---
+        if [ -f "$CONTAINER_DIR/kento-authorized-keys" ]; then
+            mkdir -p "$ROOTFS/root/.ssh"
+            chmod 700 "$ROOTFS/root/.ssh"
+            cp "$CONTAINER_DIR/kento-authorized-keys" "$ROOTFS/root/.ssh/authorized_keys"
+            chmod 600 "$ROOTFS/root/.ssh/authorized_keys"
+        fi
         ;;
     post-stop)
         mountpoint -q "$CONTAINER_DIR/rootfs" 2>/dev/null && umount "$CONTAINER_DIR/rootfs" || true

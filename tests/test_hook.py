@@ -227,6 +227,40 @@ def test_mount_point_parsing_patterns():
     assert 'MP_PATH' in script
 
 
+def test_generate_hook_injects_authorized_keys():
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-authorized-keys" in script
+    assert "/root/.ssh" in script
+    assert "authorized_keys" in script
+    assert "chmod 700" in script
+    assert "chmod 600" in script
+
+
+def test_authorized_keys_injection_is_posix_sh():
+    """Injection block uses only POSIX shell constructs (no bashisms)."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    # Locate the SSH injection block
+    idx = script.index("SSH authorized_keys injection")
+    end = script.index(";;", idx)
+    block = script[idx:end]
+    # POSIX: `[` not `[[`, no `==`, no process substitution
+    assert "[[" not in block
+    assert "==" not in block
+    assert "<(" not in block
+    # Uses POSIX-compatible commands
+    assert "mkdir -p" in block
+    assert "cp " in block
+    assert "chmod" in block
+
+
+def test_authorized_keys_injection_after_env():
+    """SSH key injection should come after env injection, before ;;."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    env_pos = script.index("/etc/environment")
+    ssh_pos = script.index("SSH authorized_keys injection")
+    assert env_pos < ssh_pos
+
+
 def test_write_hook(tmp_path):
     hook = write_hook(tmp_path, "/a:/b", "mycontainer")
     assert hook == tmp_path / "kento-hook"

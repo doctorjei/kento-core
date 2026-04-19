@@ -602,3 +602,71 @@ class TestRunCommand:
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "run" in output
+
+
+class TestSSHKeyFlag:
+    """Tests for the --ssh-key flag on create and run."""
+
+    def test_ssh_key_in_create_help(self, capsys):
+        """--ssh-key appears in create --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--ssh-key" in output
+
+    def test_ssh_key_in_run_help(self, capsys):
+        """--ssh-key appears in run --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--ssh-key" in output
+
+    def test_ssh_key_in_container_create_help(self, capsys):
+        """--ssh-key appears in container create --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["container", "create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--ssh-key" in output
+
+    def test_ssh_key_repeatable(self):
+        """--ssh-key PATH can be given multiple times and produces a list."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create",
+                  "--ssh-key", "/tmp/key1.pub",
+                  "--ssh-key", "/tmp/key2.pub",
+                  "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_keys"] == ["/tmp/key1.pub", "/tmp/key2.pub"]
+
+    def test_ssh_key_passes_through_to_create(self):
+        """--ssh-key PATH reaches create() as ssh_keys=[...]."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--ssh-key", "/tmp/mykey.pub", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_keys"] == ["/tmp/mykey.pub"]
+
+    def test_ssh_key_default_none(self):
+        """Without --ssh-key, ssh_keys is None."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_keys"] is None
+
+    def test_ssh_key_passes_through_from_run(self):
+        """--ssh-key reaches create() when used via run."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["run", "--ssh-key", "/tmp/mykey.pub", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_keys"] == ["/tmp/mykey.pub"]
+        assert call_kwargs["start"] is True

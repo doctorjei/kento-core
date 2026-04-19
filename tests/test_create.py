@@ -386,6 +386,53 @@ class TestGuestConfig:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
+    def test_ssh_keys_concatenated(self, mock_root, mock_layers, mock_run, tmp_path):
+        """Multiple --ssh-key paths are concatenated into kento-authorized-keys."""
+        key1 = tmp_path / "id_rsa.pub"
+        key1.write_text("ssh-rsa AAAA user1@host\n")
+        key2 = tmp_path / "id_ed25519.pub"
+        key2.write_text("ssh-ed25519 BBBB user2@host\n")
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test",
+                   ssh_keys=[str(key1), str(key2)])
+
+        content = (tmp_path / "test" / "kento-authorized-keys").read_text()
+        assert "ssh-rsa AAAA user1@host" in content
+        assert "ssh-ed25519 BBBB user2@host" in content
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_keys_missing_file_errors(self, mock_root, mock_layers,
+                                            mock_run, tmp_path):
+        """Missing --ssh-key path exits 1."""
+        missing = tmp_path / "does-not-exist.pub"
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test",
+                       ssh_keys=[str(missing)])
+            assert exc.value.code == 1
+        # Container dir should not have been created yet
+        assert not (tmp_path / "test" / "kento-authorized-keys").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_keys_none_writes_nothing(self, mock_root, mock_layers,
+                                            mock_run, tmp_path):
+        """ssh_keys=None means no kento-authorized-keys file."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test")
+
+        assert not (tmp_path / "test" / "kento-authorized-keys").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
     def test_searchdomain_without_ip_writes_metadata(self, mock_root, mock_layers,
                                                       mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
