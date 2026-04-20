@@ -31,20 +31,6 @@ case "$HOOK_TYPE" in
             -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \
             "$ROOTFS"
 
-        # --- Fstab sanitization ---
-        # Comment out block device entries (PARTUUID=, UUID=, /dev/) that
-        # don't exist in containers. Prevents systemd waiting 90s for
-        # missing devices. Uses #kento# prefix for traceability.
-        if [ -f "$ROOTFS/etc/fstab" ]; then
-            sed -i \
-                -e '/^[[:space:]]*#/b' \
-                -e '/^[[:space:]]*$/b' \
-                -e '/^[[:space:]]*PARTUUID=/s/^/#kento# /' \
-                -e '/^[[:space:]]*UUID=/s/^/#kento# /' \
-                -e '/^[[:space:]]*\/dev\//s/^/#kento# /' \
-                "$ROOTFS/etc/fstab"
-        fi
-
         # --- Guest config injection ---
         # Read config from LXC/PVE config (authoritative, handles pct set)
         # and kento metadata files (fallback for values LXC config can't carry).
