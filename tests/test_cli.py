@@ -670,3 +670,78 @@ class TestSSHKeyFlag:
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_keys"] == ["/tmp/mykey.pub"]
         assert call_kwargs["start"] is True
+
+
+class TestMacFlag:
+    """Tests for the --mac flag on create and run."""
+
+    def test_mac_in_create_help(self, capsys):
+        """--mac appears in create --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--mac" in output
+
+    def test_mac_in_run_help(self, capsys):
+        """--mac appears in run --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--mac" in output
+
+    def test_mac_valid_passes_through(self):
+        """A valid --mac value reaches create() unchanged."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["mac"] == "52:54:00:ab:cd:ef"
+
+    def test_mac_default_none(self):
+        """Without --mac, mac is None (auto-generate in create)."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["mac"] is None
+
+    def test_mac_invalid_format_rejected(self, capsys):
+        """An invalid --mac value is rejected with an argparse error."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--mac", "not-a-mac", "debian:12"])
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "invalid MAC" in err or "MAC" in err
+
+    def test_mac_too_short_rejected(self, capsys):
+        """Too few octets → rejected."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--mac", "52:54:00:ab:cd", "debian:12"])
+        assert exc.value.code != 0
+
+    def test_mac_non_hex_rejected(self, capsys):
+        """Non-hex characters → rejected."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--mac", "52:54:00:gg:cd:ef", "debian:12"])
+        assert exc.value.code != 0
+
+    def test_mac_accepts_uppercase(self):
+        """Uppercase hex accepted."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--mac", "AA:BB:CC:DD:EE:FF", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["mac"] == "AA:BB:CC:DD:EE:FF"
+
+    def test_mac_reaches_create_via_run(self):
+        """--mac via 'run' also reaches create()."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["run", "--mac", "52:54:00:11:22:33", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["mac"] == "52:54:00:11:22:33"
+        assert mock_create.call_args[1]["start"] is True

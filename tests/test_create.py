@@ -81,6 +81,8 @@ class TestCreate:
         assert (lxc_dir / "kento-layers").read_text().strip() == "/a:/b"
         assert (lxc_dir / "kento-state").is_file()
         assert (lxc_dir / "kento-name").read_text().strip() == "test"
+        # LXC mode does not get a kento-mac file — MAC only makes sense for VMs.
+        assert not (lxc_dir / "kento-mac").exists()
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -538,6 +540,54 @@ class TestVmCreate:
         lxc_dir = vm_dir / "myimage_latest-0"
         assert (lxc_dir / "kento-name").read_text().strip() == "myimage_latest-0"
 
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_writes_kento_mac(self, mock_root, mock_layers, tmp_path):
+        """VM mode writes kento-mac with auto-generated MAC from the container name."""
+        from kento.vm import generate_mac, is_valid_mac
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm")
+
+        mac_file = vm_dir / "test" / "kento-mac"
+        assert mac_file.is_file()
+        mac = mac_file.read_text().strip()
+        assert is_valid_mac(mac)
+        assert mac == generate_mac("test")
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_mac_override(self, mock_root, mock_layers, tmp_path):
+        """--mac override writes the given MAC into kento-mac verbatim."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm",
+                   mac="aa:bb:cc:dd:ee:ff")
+
+        mac = (vm_dir / "test" / "kento-mac").read_text().strip()
+        assert mac == "aa:bb:cc:dd:ee:ff"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_mac_deterministic_across_recreate(self, mock_root, mock_layers, tmp_path):
+        """Same name → same auto-generated MAC."""
+        from kento.vm import generate_mac
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "foo"):
+            create("myimage:latest", name="foo", mode="vm")
+
+        mac1 = (vm_dir / "foo" / "kento-mac").read_text().strip()
+        assert mac1 == generate_mac("foo")
+
 
 class TestPveVmCreate:
     """Tests for pve-vm mode (VM mode on PVE host)."""
@@ -670,6 +720,66 @@ class TestPveVmCreate:
         inject = vm_dir / "test" / "kento-inject.sh"
         assert inject.is_file()
         assert inject.stat().st_mode & 0o755 == 0o755
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_writes_kento_mac_from_vmid(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode writes kento-mac derived from VMID (not name)."""
+        from kento.vm import generate_mac, is_valid_mac
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", return_value=Path("/etc/pve/qemu-server/100.conf")):
+            create("myimage:latest", name="test", mode="vm")
+
+        mac_file = vm_dir / "test" / "kento-mac"
+        assert mac_file.is_file()
+        mac = mac_file.read_text().strip()
+        assert is_valid_mac(mac)
+        # pve-vm derives MAC from VMID (as string), not name
+        assert mac == generate_mac("100")
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_qm_config_includes_mac(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode passes MAC through to the QM net0 line (when bridge used)."""
+        from kento.vm import generate_mac
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        written = {}
+
+        def fake_write_qm(vmid, content):
+            written["content"] = content
+            return Path(f"/etc/pve/qemu-server/{vmid}.conf")
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", side_effect=fake_write_qm), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="vm",
+                   net_type="bridge", bridge="vmbr0")
+
+        expected = generate_mac("100")
+        assert f"virtio={expected},bridge=vmbr0" in written["content"]
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")

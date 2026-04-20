@@ -345,6 +345,22 @@ class TestGenerateQmConfig:
                                   hookscript_ref="ref")
         assert "net0:" not in cfg
 
+    def test_bridge_with_mac(self):
+        """MAC is included in the net0 line via virtio=<MAC> syntax."""
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref",
+                                  bridge="vmbr0", net_type="bridge",
+                                  mac="52:54:00:de:ad:be")
+        assert "net0: virtio=52:54:00:de:ad:be,bridge=vmbr0" in cfg
+
+    def test_bridge_no_mac_fallback(self):
+        """Without mac, net0 uses plain virtio (PVE assigns its own MAC)."""
+        cfg = generate_qm_config("test", 100, Path("/d"),
+                                  hookscript_ref="ref",
+                                  bridge="vmbr0", net_type="bridge")
+        assert "net0: virtio,bridge=vmbr0" in cfg
+        assert "virtio=" not in cfg
+
     def test_custom_machine(self):
         cfg = generate_qm_config("test", 100, Path("/d"),
                                   hookscript_ref="ref", machine="pc")

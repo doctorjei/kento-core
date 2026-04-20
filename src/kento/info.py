@@ -56,6 +56,10 @@ def info(name: str, *, container_dir: Path, mode: str,
     if net:
         data["network"] = net
 
+    mac = _read_meta(container_dir, "kento-mac")
+    if mac:
+        data["mac"] = mac
+
     tz = _read_meta(container_dir, "kento-tz")
     if tz:
         data["timezone"] = tz
@@ -119,6 +123,8 @@ def _print_human(data: dict, verbose: bool) -> None:
         print(f"Port:       {data['port']}")
     if "network" in data:
         print(f"Network:    {data['network']}")
+    if "mac" in data:
+        print(f"MAC:        {data['mac']}")
     if "timezone" in data:
         print(f"Timezone:   {data['timezone']}")
     if "environment" in data:

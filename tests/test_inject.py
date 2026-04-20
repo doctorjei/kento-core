@@ -124,6 +124,109 @@ def test_inject_env_dedup():
     assert "!seen[$1]++" in script
 
 
+# ---------------------------------------------------------------------------
+# TZ env var auto-injection (Feature 1 of Step 1d)
+# ---------------------------------------------------------------------------
+
+def test_inject_tz_env_line_appended():
+    """When CFG_TZ is set, TZ=<zone> is appended to CFG_ENV before dedup."""
+    script = generate_inject()
+    assert 'TZ=$CFG_TZ' in script
+
+
+def test_inject_tz_after_kento_env():
+    """TZ must be appended AFTER kento-env — auto-TZ is lowest priority,
+    so user --env TZ=... (which appears before kento-env) wins the dedup."""
+    script = generate_inject()
+    # Locate both landmarks; TZ append must come after kento-env read.
+    kento_env_pos = script.index("kento-env")
+    tz_append_pos = script.index("TZ=$CFG_TZ")
+    assert kento_env_pos < tz_append_pos
+
+
+class TestInjectScriptTZExecution:
+    """Execute inject.sh against a fake rootfs to verify TZ injection behavior.
+
+    These are shell-level integration tests — they exercise the real script
+    content, not Python.
+    """
+
+    def _setup(self, tmp_path):
+        """Create rootfs + container_dir skeleton; return (rootfs, container_dir)."""
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        (rootfs / "etc").mkdir()
+        container = tmp_path / "container"
+        container.mkdir()
+        (container / "kento-mode").write_text("lxc")
+        return rootfs, container
+
+    def _run(self, rootfs, container):
+        import subprocess
+        from kento.inject import write_inject
+        script = write_inject(container)
+        subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            check=True,
+        )
+
+    def test_tz_lands_in_etc_environment_alone(self, tmp_path):
+        """CFG_TZ set and no other env → /etc/environment contains TZ line."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-tz").write_text("Europe/Berlin\n")
+        self._run(rootfs, container)
+        content = (rootfs / "etc" / "environment").read_text()
+        assert "TZ=Europe/Berlin" in content
+
+    def test_tz_alongside_other_env(self, tmp_path):
+        """CFG_TZ set plus kento-env → both land in /etc/environment."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-tz").write_text("Asia/Tokyo\n")
+        (container / "kento-env").write_text("FOO=bar\nBAZ=qux\n")
+        self._run(rootfs, container)
+        content = (rootfs / "etc" / "environment").read_text()
+        assert "FOO=bar" in content
+        assert "BAZ=qux" in content
+        assert "TZ=Asia/Tokyo" in content
+
+    def test_user_env_tz_wins_over_auto(self, tmp_path):
+        """User --env TZ=... (in kento-env) wins over auto-TZ from kento-tz."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-tz").write_text("Europe/Berlin\n")
+        (container / "kento-env").write_text("TZ=America/New_York\n")
+        self._run(rootfs, container)
+        content = (rootfs / "etc" / "environment").read_text()
+        assert "TZ=America/New_York" in content
+        assert "TZ=Europe/Berlin" not in content
+
+    def test_no_tz_no_tz_line(self, tmp_path):
+        """No CFG_TZ → no TZ= line at all."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-env").write_text("FOO=bar\n")
+        self._run(rootfs, container)
+        content = (rootfs / "etc" / "environment").read_text()
+        assert "FOO=bar" in content
+        assert "TZ=" not in content
+
+    def test_no_env_at_all_no_file(self, tmp_path):
+        """No CFG_TZ and no env at all → /etc/environment is not written."""
+        rootfs, container = self._setup(tmp_path)
+        self._run(rootfs, container)
+        assert not (rootfs / "etc" / "environment").exists()
+
+    def test_tz_only_produces_valid_file(self, tmp_path):
+        """Only CFG_TZ (no kento-env, no config env) still produces valid file."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-tz").write_text("UTC\n")
+        self._run(rootfs, container)
+        env_file = rootfs / "etc" / "environment"
+        assert env_file.is_file()
+        # Single line TZ=UTC (with trailing newline from awk)
+        content = env_file.read_text()
+        lines = [l for l in content.splitlines() if l]
+        assert lines == ["TZ=UTC"]
+
+
 def test_inject_has_mount_point_creation():
     script = generate_inject()
     assert "mount point directories for mp" in script

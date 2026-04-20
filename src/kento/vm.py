@@ -1,6 +1,8 @@
 """Tenkei VM mode — QEMU + virtiofs VM management."""
 
+import hashlib
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -10,6 +12,27 @@ from pathlib import Path
 
 from kento import VM_BASE
 from kento.defaults import VM_MEMORY, VM_KVM, VM_MACHINE
+
+# Locally-administered MAC prefix (QEMU's standard block).
+MAC_PREFIX = "52:54:00"
+
+_MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+
+
+def is_valid_mac(mac: str) -> bool:
+    """Return True if mac is a valid colon-separated 6-pair hex MAC."""
+    return bool(_MAC_RE.match(mac))
+
+
+def generate_mac(identifier: str) -> str:
+    """Return a stable deterministic MAC address for the given identifier.
+
+    The identifier is the container name (plain VM) or VMID (PVE-VM).
+    Uses 52:54:00 prefix + 3 bytes from sha256(identifier).
+    """
+    digest = hashlib.sha256(identifier.encode()).digest()[:3]
+    suffix = ":".join(f"{b:02x}" for b in digest)
+    return f"{MAC_PREFIX}:{suffix}"
 
 # virtiofsd is often installed outside PATH (e.g. /usr/libexec/virtiofsd on Debian)
 _VIRTIOFSD_SEARCH = ["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd",
@@ -193,9 +216,16 @@ def start_vm(container_dir: Path, name: str) -> None:
          "-numa", "node,memdev=mem",
     ]
     if host_port is not None:
+        # Include MAC if available (kento-mac written at create time for VM modes)
+        mac_file = container_dir / "kento-mac"
+        device = "virtio-net-pci,netdev=net0"
+        if mac_file.is_file():
+            mac = mac_file.read_text().strip()
+            if mac:
+                device = f"virtio-net-pci,netdev=net0,mac={mac}"
         qemu_cmd += [
              "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{host_port}-:{guest_port}",
-             "-device", "virtio-net-pci,netdev=net0",
+             "-device", device,
         ]
     qemu_cmd += [
          "-append", "console=ttyS0 rootfstype=virtiofs root=rootfs",

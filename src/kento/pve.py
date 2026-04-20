@@ -173,7 +173,8 @@ def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
                         machine: str = "q35",
                         bridge: str | None = None,
                         net_type: str | None = None,
-                        kvm: bool = True) -> str:
+                        kvm: bool = True,
+                        mac: str | None = None) -> str:
     """Generate a PVE QM config for a kento VM."""
     rootfs = container_dir / "rootfs"
     socket_path = container_dir / "virtiofsd.sock"
@@ -205,9 +206,14 @@ def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
     # Join with space (PVE's args: is a single line)
     lines.append(f"args: {' '.join(args_parts)}")
 
-    # Network
+    # Network. PVE's net0 format: virtio=<MAC>,bridge=<name>. Include MAC
+    # whenever we have one so external DHCP reservations stay stable across
+    # recreate/scrub.
     if net_type == "bridge" and bridge:
-        lines.append(f"net0: virtio,bridge={bridge}")
+        if mac:
+            lines.append(f"net0: virtio={mac},bridge={bridge}")
+        else:
+            lines.append(f"net0: virtio,bridge={bridge}")
 
     return "\n".join(lines) + "\n"
 

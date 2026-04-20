@@ -10,6 +10,7 @@ import pytest
 from kento.vm import (
     VM_BASE, _PORT_MIN, _PORT_MAX, _port_is_free,
     allocate_port, is_vm_running, mount_rootfs, unmount_rootfs, start_vm, stop_vm,
+    generate_mac, is_valid_mac, MAC_PREFIX,
 )
 
 
@@ -606,6 +607,135 @@ class TestKillAndWait:
             _kill_and_wait(pid_file)
 
         mock_kill.assert_called_once_with(1234, signal.SIGTERM)
+
+
+class TestGenerateMac:
+    """Tests for generate_mac() — deterministic MAC address generation."""
+
+    def test_prefix_is_qemu_block(self):
+        mac = generate_mac("anything")
+        assert mac.startswith("52:54:00:")
+
+    def test_mac_prefix_constant(self):
+        assert MAC_PREFIX == "52:54:00"
+
+    def test_format_is_six_pairs(self):
+        mac = generate_mac("foo")
+        parts = mac.split(":")
+        assert len(parts) == 6
+        for p in parts:
+            assert len(p) == 2
+            int(p, 16)  # valid hex
+
+    def test_deterministic_same_input(self):
+        assert generate_mac("foo-0") == generate_mac("foo-0")
+
+    def test_different_inputs_different_outputs(self):
+        assert generate_mac("foo-0") != generate_mac("foo-1")
+
+    def test_accepts_vmid_string(self):
+        mac = generate_mac("100")
+        assert mac.startswith("52:54:00:")
+        assert is_valid_mac(mac)
+
+
+class TestIsValidMac:
+    def test_valid_mac(self):
+        assert is_valid_mac("52:54:00:ab:cd:ef")
+
+    def test_valid_uppercase(self):
+        assert is_valid_mac("AA:BB:CC:DD:EE:FF")
+
+    def test_valid_mixed_case(self):
+        assert is_valid_mac("aA:Bb:00:11:22:33")
+
+    def test_too_few_pairs(self):
+        assert not is_valid_mac("52:54:00:ab:cd")
+
+    def test_too_many_pairs(self):
+        assert not is_valid_mac("52:54:00:ab:cd:ef:01")
+
+    def test_missing_colons(self):
+        assert not is_valid_mac("525400abcdef")
+
+    def test_non_hex_chars(self):
+        assert not is_valid_mac("52:54:00:ab:cd:gg")
+
+    def test_empty_string(self):
+        assert not is_valid_mac("")
+
+
+class TestStartVmMac:
+    """Tests that start_vm includes mac= on the -device line when kento-mac exists."""
+
+    @patch("kento.vm.subprocess.run")
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_qemu_includes_mac(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "kento-mac").write_text("52:54:00:de:ad:be\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        # Find the -device that follows -netdev
+        joined = " ".join(qemu_args)
+        assert "virtio-net-pci,netdev=net0,mac=52:54:00:de:ad:be" in joined
+
+    @patch("kento.vm.subprocess.run")
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_qemu_no_mac_file(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """Without kento-mac (older containers), the -device line has no mac=."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+        # No kento-mac
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        joined = " ".join(qemu_args)
+        assert "virtio-net-pci,netdev=net0" in joined
+        assert "mac=" not in joined
 
 
 class TestIsMountpoint:

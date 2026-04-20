@@ -141,6 +141,16 @@ $KENTO_ENV"
         CFG_ENV="$KENTO_ENV"
     fi
 fi
+# Auto-inject TZ from timezone config (lowest priority — user --env TZ wins
+# because the awk dedup below keeps the first occurrence of each key).
+if [ -n "${CFG_TZ:-}" ]; then
+    if [ -n "$CFG_ENV" ]; then
+        CFG_ENV="$CFG_ENV
+TZ=$CFG_TZ"
+    else
+        CFG_ENV="TZ=$CFG_TZ"
+    fi
+fi
 if [ -n "${CFG_ENV:-}" ]; then
     echo "$CFG_ENV" | awk -F= '!seen[$1]++' > "$ROOTFS/etc/environment"
 fi

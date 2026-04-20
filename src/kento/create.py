@@ -134,6 +134,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            timezone: str | None = None,
            env: list[str] | None = None,
            ssh_keys: list[str] | None = None,
+           mac: str | None = None,
            net_type: str | None = None) -> None:
     require_root()
 
@@ -293,6 +294,20 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-authorized-keys").write_text(ssh_key_contents)
 
     if mode in ("vm", "pve-vm"):
+        # Resolve MAC address for VM modes: user override wins, otherwise
+        # auto-generate a stable deterministic MAC from the container name
+        # (plain VM) or VMID (PVE-VM). Writing the result to kento-mac means
+        # scrub/recreate keep the same MAC (external DHCP reservations work).
+        from kento.vm import generate_mac
+        if mac is None:
+            if mode == "pve-vm":
+                mac_value = generate_mac(str(vmid))
+            else:
+                mac_value = generate_mac(name)
+        else:
+            mac_value = mac
+        (container_dir / "kento-mac").write_text(mac_value + "\n")
+
         # Write port mapping (usermode networking only)
         if network["type"] == "usermode":
             from kento.vm import allocate_port
@@ -330,6 +345,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                     kvm=vm_defaults["kvm"],
                     bridge=bridge,
                     net_type=network.get("type"),
+                    mac=mac_value,
                 ),
             )
 
