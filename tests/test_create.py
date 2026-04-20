@@ -649,6 +649,30 @@ class TestPveVmCreate:
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
+    def test_pve_vm_writes_inject_script(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode writes kento-inject.sh alongside the hookscript."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", return_value=Path("/etc/pve/qemu-server/100.conf")):
+            create("myimage:latest", name="test", mode="vm")
+
+        inject = vm_dir / "test" / "kento-inject.sh"
+        assert inject.is_file()
+        assert inject.stat().st_mode & 0o755 == 0o755
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
     def test_pve_vm_no_port_for_bridge(self, mock_root, mock_layers, tmp_path):
         """pve-vm with bridge networking doesn't create port file."""
         vm_dir = tmp_path / "vm"

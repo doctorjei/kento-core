@@ -73,7 +73,14 @@ case "$PHASE" in
             exit 1
         fi
 
-        # 5. Find and start virtiofsd
+        # 5. Inject guest-side config (hostname/network/tz/env/ssh-key) into
+        # the mounted rootfs before virtiofsd starts. A failing inject is a
+        # start failure — don't boot a misconfigured VM. set -eu at the top
+        # causes the hookscript to abort on non-zero exit, which PVE treats
+        # as a VM start failure.
+        sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"
+
+        # 6. Find and start virtiofsd
         VIRTIOFSD=""
         for p in virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd /usr/lib/virtiofsd /usr/bin/virtiofsd; do
             if command -v "$p" >/dev/null 2>&1 || [ -x "$p" ]; then
@@ -92,7 +99,7 @@ case "$PHASE" in
         VFS_PID=$!
         echo "$VFS_PID" > "$CONTAINER_DIR/kento-virtiofsd-pid"
 
-        # 6. Wait for socket (5s timeout)
+        # 7. Wait for socket (5s timeout)
         TRIES=50
         while [ $TRIES -gt 0 ]; do
             [ -e "$SOCKET" ] && break

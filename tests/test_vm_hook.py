@@ -63,6 +63,21 @@ class TestGenerateVmHook:
         assert 'VMID="$1"' in hook
         assert 'PHASE="$2"' in hook
 
+    def test_contains_inject_call(self):
+        """Hookscript must invoke kento-inject.sh with $ROOTFS and $CONTAINER_DIR."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        assert 'sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"' in hook
+
+    def test_inject_call_between_mount_and_virtiofsd(self):
+        """inject.sh must be called after overlayfs mount but before virtiofsd starts."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        mount_idx = hook.index("mount -t overlay")
+        inject_idx = hook.index('sh "$CONTAINER_DIR/kento-inject.sh"')
+        # virtiofsd launch is the `$VIRTIOFSD --socket-path=` line (the actual
+        # invocation), not the search loop above it.
+        virtiofsd_idx = hook.index('$VIRTIOFSD --socket-path=')
+        assert mount_idx < inject_idx < virtiofsd_idx
+
 
 class TestGenerateSnippetsWrapper:
     def test_wrapper_execs_hook(self):

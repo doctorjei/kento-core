@@ -305,8 +305,10 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
 
         if mode == "pve-vm":
-            # Generate VM hookscript
+            # Generate VM hookscript + inject.sh (hookscript invokes inject.sh
+            # in its pre-start phase after overlayfs mount, before virtiofsd).
             write_vm_hook(container_dir, layers, name, state_dir)
+            write_inject(container_dir)
 
             # Write snippets wrapper and get PVE reference
             hookscript_ref = write_snippets_wrapper(vmid, container_dir / "kento-hook")
