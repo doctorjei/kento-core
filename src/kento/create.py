@@ -7,6 +7,7 @@ from pathlib import Path
 from kento import LXC_BASE, VM_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
+from kento.inject import write_inject
 from kento.layers import resolve_layers
 
 
@@ -347,8 +348,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 print(f"  Port:    {host_port}:{guest_port}")
             print(f"  Dir:     {container_dir}")
     else:
-        # Generate hook (LXC/PVE only)
+        # Generate hook (LXC/PVE only) + inject.sh (shared with future VM/PVE-VM modes)
         write_hook(container_dir, layers, name, state_dir)
+        write_inject(container_dir)
 
         # Generate config
         if mode == "pve":

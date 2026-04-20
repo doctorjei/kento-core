@@ -75,6 +75,8 @@ class TestCreate:
         assert (lxc_dir / "work").is_dir()
         assert (lxc_dir / "config").is_file()
         assert (lxc_dir / "kento-hook").is_file()
+        assert (lxc_dir / "kento-inject.sh").is_file()
+        assert (lxc_dir / "kento-inject.sh").stat().st_mode & 0o755 == 0o755
         assert (lxc_dir / "kento-image").read_text().strip() == "myimage:latest"
         assert (lxc_dir / "kento-layers").read_text().strip() == "/a:/b"
         assert (lxc_dir / "kento-state").is_file()
@@ -172,6 +174,7 @@ class TestCreate:
         lxc_dir = tmp_path / "100"
         assert (lxc_dir / "rootfs").is_dir()
         assert (lxc_dir / "kento-hook").is_file()
+        assert (lxc_dir / "kento-inject.sh").is_file()
         assert (lxc_dir / "kento-mode").read_text().strip() == "pve"
         # PVE config written via write_pve_config
         assert pve_conf.is_file()
