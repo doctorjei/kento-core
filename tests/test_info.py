@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from kento.info import info, _read_meta, _get_size
+from kento.info import info, _read_meta, _get_size, _get_ssh_host_key_fingerprints
 
 
 # --- Helper ---
@@ -498,3 +498,212 @@ class TestCliInfo:
         assert "info" in output
         assert "inspect" in output
 
+
+# --- SSH host key fingerprints ---
+
+
+def _make_ssh_host_keys(container_dir: Path, key_types=("rsa", "ecdsa", "ed25519")):
+    """Create fake .pub files in ssh-host-keys/."""
+    keys_dir = container_dir / "ssh-host-keys"
+    keys_dir.mkdir(exist_ok=True)
+    for kt in key_types:
+        (keys_dir / f"ssh_host_{kt}_key").write_text("PRIVATE_KEY_DATA")
+        (keys_dir / f"ssh_host_{kt}_key.pub").write_text(f"ssh-{kt} AAAA...fake {kt}@host\n")
+    return keys_dir
+
+
+def _mock_ssh_keygen_run(args, **kwargs):
+    """Mock subprocess.run for ssh-keygen -lf calls."""
+    if args[0] == "ssh-keygen" and "-lf" in args:
+        pub_path = args[2]
+        # Determine key type from filename
+        if "rsa" in pub_path:
+            return subprocess.CompletedProcess(
+                args, 0,
+                stdout="3072 SHA256:abcRSA123 comment (RSA)\n", stderr="")
+        elif "ecdsa" in pub_path:
+            return subprocess.CompletedProcess(
+                args, 0,
+                stdout="256 SHA256:defECDSA456 comment (ECDSA)\n", stderr="")
+        elif "ed25519" in pub_path:
+            return subprocess.CompletedProcess(
+                args, 0,
+                stdout="256 SHA256:ghiED25519789 comment (ED25519)\n", stderr="")
+    if args[0] == "du":
+        return subprocess.CompletedProcess(args, 0, stdout="16K\t/whatever\n", stderr="")
+    return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+
+def _mock_ssh_keygen_and_du(args, **kwargs):
+    """Combined mock for ssh-keygen and du."""
+    if args[0] == "ssh-keygen":
+        return _mock_ssh_keygen_run(args, **kwargs)
+    if args[0] == "du":
+        return subprocess.CompletedProcess(args, 0, stdout="16K\t/whatever\n", stderr="")
+    return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+
+# --- _get_ssh_host_key_fingerprints unit tests ---
+
+
+@patch("kento.info.subprocess.run", side_effect=_mock_ssh_keygen_run)
+def test_get_fingerprints_with_keys(mock_run, tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    _make_ssh_host_keys(d)
+
+    fp, has_keys = _get_ssh_host_key_fingerprints(d)
+    assert has_keys is True
+    assert fp["rsa"] == "SHA256:abcRSA123"
+    assert fp["ecdsa"] == "SHA256:defECDSA456"
+    assert fp["ed25519"] == "SHA256:ghiED25519789"
+
+
+def test_get_fingerprints_no_dir(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    fp, has_keys = _get_ssh_host_key_fingerprints(d)
+    assert fp == {}
+    assert has_keys is False
+
+
+def test_get_fingerprints_empty_dir(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "ssh-host-keys").mkdir()
+    fp, has_keys = _get_ssh_host_key_fingerprints(d)
+    assert fp == {}
+    assert has_keys is False
+
+
+@patch("kento.info.subprocess.run", side_effect=FileNotFoundError("ssh-keygen"))
+def test_get_fingerprints_no_ssh_keygen(mock_run, tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    _make_ssh_host_keys(d)
+
+    fp, has_keys = _get_ssh_host_key_fingerprints(d)
+    assert fp == {}
+    assert has_keys is True  # keys exist but ssh-keygen missing
+
+
+# --- Human output ---
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_ssh_keygen_and_du)
+def test_info_shows_fingerprints(mock_run, mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+    _make_ssh_host_keys(d)
+
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    assert "SSH host key fingerprints:" in output
+    assert "RSA:" in output
+    assert "SHA256:abcRSA123" in output
+    assert "ECDSA:" in output
+    assert "SHA256:defECDSA456" in output
+    assert "ED25519:" in output
+    assert "SHA256:ghiED25519789" in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_no_fingerprints_without_keys(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    assert "SSH host key fingerprints:" not in output
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=FileNotFoundError("ssh-keygen"))
+def test_info_ssh_keygen_missing_note(mock_run, mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+    _make_ssh_host_keys(d)
+
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    assert "ssh-keygen not found, cannot display fingerprints" in output
+
+
+# --- JSON output ---
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_ssh_keygen_and_du)
+def test_info_json_fingerprints(mock_run, mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+    _make_ssh_host_keys(d)
+
+    info("mybox", container_dir=d, mode="lxc", as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert "ssh_host_key_fingerprints" in data
+    fp = data["ssh_host_key_fingerprints"]
+    assert fp["rsa"] == "SHA256:abcRSA123"
+    assert fp["ecdsa"] == "SHA256:defECDSA456"
+    assert fp["ed25519"] == "SHA256:ghiED25519789"
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_json_empty_fingerprints_without_keys(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+
+    info("mybox", container_dir=d, mode="lxc", as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["ssh_host_key_fingerprints"] == {}
+
+
+# --- Verbose mode with fingerprints ---
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_ssh_keygen_and_du)
+def test_info_verbose_still_shows_fingerprints(mock_run, mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+    _make_ssh_host_keys(d)
+    (d / "upper").mkdir()
+
+    info("mybox", container_dir=d, mode="lxc", verbose=True)
+
+    output = capsys.readouterr().out
+    assert "SSH host key fingerprints:" in output
+    assert "SHA256:abcRSA123" in output
+    assert "Upper size:" in output  # verbose field still present
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_ssh_keygen_and_du)
+def test_info_fingerprint_display_order(mock_run, mock_running, tmp_path, capsys):
+    """Fingerprints should display in order: RSA, ECDSA, ED25519."""
+    d = _make_container(tmp_path)
+    _make_ssh_host_keys(d)
+
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    rsa_pos = output.index("RSA:")
+    ecdsa_pos = output.index("ECDSA:")
+    ed25519_pos = output.index("ED25519:")
+    assert rsa_pos < ecdsa_pos < ed25519_pos
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_ssh_keygen_and_du)
+def test_info_fingerprints_single_key_type(mock_run, mock_running, tmp_path, capsys):
+    """Only one key type present."""
+    d = _make_container(tmp_path)
+    _make_ssh_host_keys(d, key_types=("ed25519",))
+
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    assert "SSH host key fingerprints:" in output
+    assert "ED25519:" in output
+    assert "RSA:" not in output
+    assert "ECDSA:" not in output
