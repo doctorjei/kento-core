@@ -155,6 +155,19 @@ if [ -n "${CFG_ENV:-}" ]; then
     echo "$CFG_ENV" | awk -F= '!seen[$1]++' > "$ROOTFS/etc/environment"
 fi
 
+# --- SSH host key injection ---
+HOST_KEY_DIR="$CONTAINER_DIR/ssh-host-keys"
+if [ -d "$HOST_KEY_DIR" ]; then
+    mkdir -p "$ROOTFS/etc/ssh"
+    for keyfile in "$HOST_KEY_DIR"/ssh_host_*; do
+        [ -f "$keyfile" ] || continue
+        cp "$keyfile" "$ROOTFS/etc/ssh/$(basename "$keyfile")"
+    done
+    # Fix permissions
+    chmod 600 "$ROOTFS"/etc/ssh/ssh_host_*_key 2>/dev/null || true
+    chmod 644 "$ROOTFS"/etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+fi
+
 # --- SSH authorized_keys injection ---
 if [ -f "$CONTAINER_DIR/kento-authorized-keys" ]; then
     SSH_USER="root"

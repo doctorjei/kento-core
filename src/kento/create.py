@@ -125,6 +125,29 @@ def _inject_env(state_dir: Path, env_list: list[str]) -> None:
     (etc / "environment").write_text("\n".join(env_list) + "\n")
 
 
+def _generate_ssh_host_keys(dest_dir: Path) -> None:
+    """Generate SSH host key pairs (rsa, ecdsa, ed25519) in dest_dir."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for key_type, extra_args in [("rsa", ["-b", "4096"]), ("ecdsa", []), ("ed25519", [])]:
+        key_path = dest_dir / f"ssh_host_{key_type}_key"
+        cmd = ["ssh-keygen", "-t", key_type] + extra_args + ["-f", str(key_path), "-N", ""]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except FileNotFoundError:
+            print("Error: ssh-keygen not found. Install openssh-client to use --ssh-host-keys.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+
+def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
+    """Copy ssh_host_* files from src_dir into dest_dir."""
+    import shutil
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for f in sorted(src_dir.iterdir()):
+        if f.name.startswith("ssh_host_") and f.is_file():
+            shutil.copy2(f, dest_dir / f.name)
+
+
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
            nesting: bool = True,
            start: bool = False, mode: str | None = None,
@@ -135,6 +158,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            env: list[str] | None = None,
            ssh_keys: list[str] | None = None,
            ssh_key_user: str = "root",
+           ssh_host_keys: bool = False,
+           ssh_host_key_dir: str | None = None,
            mac: str | None = None,
            net_type: str | None = None) -> None:
     require_root()
@@ -153,6 +178,20 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         ssh_key_contents = "\n".join(parts)
         if not ssh_key_contents.endswith("\n"):
             ssh_key_contents += "\n"
+
+    # Validate --ssh-host-key-dir early
+    if ssh_host_key_dir is not None:
+        src = Path(ssh_host_key_dir)
+        if not src.is_dir():
+            print(f"Error: SSH host key directory not found: {ssh_host_key_dir}",
+                  file=sys.stderr)
+            sys.exit(1)
+        has_key = any(f.name.startswith("ssh_host_") and f.name.endswith("_key")
+                      and f.is_file() for f in src.iterdir())
+        if not has_key:
+            print(f"Error: no ssh_host_*_key files found in {ssh_host_key_dir}",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Resolve mode
     mode = detect_mode(mode)
@@ -289,13 +328,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-env").write_text("\n".join(env) + "\n")
         _inject_env(state_dir, env)
 
-    # Write SSH authorized_keys metadata if requested. inject.sh copies this into
+    # Write SSH authorized_keys metadata if requested. Hook copies this into
     # the guest's ~/.ssh/authorized_keys on every start (target user controlled
     # by kento-ssh-user, defaulting to root).
     if ssh_key_contents is not None:
         (container_dir / "kento-authorized-keys").write_text(ssh_key_contents)
     if ssh_key_user != "root":
         (container_dir / "kento-ssh-user").write_text(ssh_key_user + "\n")
+
+    # Generate or copy SSH host keys
+    if ssh_host_keys:
+        _generate_ssh_host_keys(container_dir / "ssh-host-keys")
+    elif ssh_host_key_dir is not None:
+        _copy_ssh_host_keys(Path(ssh_host_key_dir), container_dir / "ssh-host-keys")
 
     if mode in ("vm", "pve-vm"):
         # Resolve MAC address for VM modes: user override wins, otherwise

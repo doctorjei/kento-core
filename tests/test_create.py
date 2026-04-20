@@ -494,6 +494,138 @@ class TestGuestConfig:
                     "network" / "10-static.network").exists()
 
 
+class TestSSHHostKeys:
+    """Tests for --ssh-host-keys and --ssh-host-key-dir create flags."""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_host_keys_generates_keys(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        """--ssh-host-keys calls ssh-keygen for 3 key types."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", ssh_host_keys=True)
+
+        key_dir = tmp_path / "test" / "ssh-host-keys"
+        assert key_dir.is_dir()
+        # ssh-keygen was called 3 times (rsa, ecdsa, ed25519) + 1 for lxc-start (not called here)
+        # We check via the keygen calls in subprocess.run
+        keygen_calls = [c for c in mock_run.call_args_list
+                        if c[0][0][0] == "ssh-keygen"]
+        assert len(keygen_calls) == 3
+        types = [c[0][0][c[0][0].index("-t") + 1] for c in keygen_calls]
+        assert sorted(types) == ["ecdsa", "ed25519", "rsa"]
+        # RSA call includes -b 4096
+        rsa_call = [c for c in keygen_calls if "rsa" in c[0][0]][0]
+        assert "-b" in rsa_call[0][0]
+        assert "4096" in rsa_call[0][0]
+        # All calls include -N ""
+        for c in keygen_calls:
+            args = c[0][0]
+            assert "-N" in args
+            n_idx = args.index("-N")
+            assert args[n_idx + 1] == ""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_host_keys_key_paths(self, mock_root, mock_layers,
+                                      mock_run, tmp_path):
+        """Generated keys are placed in ssh-host-keys/ with correct filenames."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", ssh_host_keys=True)
+
+        key_dir = tmp_path / "test" / "ssh-host-keys"
+        keygen_calls = [c for c in mock_run.call_args_list
+                        if c[0][0][0] == "ssh-keygen"]
+        for c in keygen_calls:
+            args = c[0][0]
+            f_idx = args.index("-f")
+            key_path = args[f_idx + 1]
+            assert key_path.startswith(str(key_dir))
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_host_key_dir_copies_files(self, mock_root, mock_layers,
+                                            mock_run, tmp_path):
+        """--ssh-host-key-dir copies ssh_host_* files into container dir."""
+        src = tmp_path / "src-keys"
+        src.mkdir()
+        (src / "ssh_host_rsa_key").write_text("RSA_PRIVATE")
+        (src / "ssh_host_rsa_key.pub").write_text("RSA_PUBLIC")
+        (src / "ssh_host_ed25519_key").write_text("ED25519_PRIVATE")
+        (src / "ssh_host_ed25519_key.pub").write_text("ED25519_PUBLIC")
+        (src / "unrelated_file").write_text("IGNORE")
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test",
+                   ssh_host_key_dir=str(src))
+
+        key_dir = tmp_path / "test" / "ssh-host-keys"
+        assert key_dir.is_dir()
+        assert (key_dir / "ssh_host_rsa_key").read_text() == "RSA_PRIVATE"
+        assert (key_dir / "ssh_host_rsa_key.pub").read_text() == "RSA_PUBLIC"
+        assert (key_dir / "ssh_host_ed25519_key").read_text() == "ED25519_PRIVATE"
+        assert (key_dir / "ssh_host_ed25519_key.pub").read_text() == "ED25519_PUBLIC"
+        # unrelated_file is NOT copied (doesn't start with ssh_host_)
+        assert not (key_dir / "unrelated_file").exists()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_host_key_dir_missing_errors(self, mock_root, mock_layers, tmp_path):
+        """--ssh-host-key-dir with missing directory exits 1."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test",
+                       ssh_host_key_dir=str(tmp_path / "nonexistent"))
+            assert exc.value.code == 1
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_host_key_dir_no_keys_errors(self, mock_root, mock_layers, tmp_path):
+        """--ssh-host-key-dir with no ssh_host_*_key files exits 1."""
+        src = tmp_path / "empty-keys"
+        src.mkdir()
+        (src / "some_file.txt").write_text("not a key")
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test",
+                       ssh_host_key_dir=str(src))
+            assert exc.value.code == 1
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_no_ssh_host_keys_no_dir(self, mock_root, mock_layers,
+                                      mock_run, tmp_path):
+        """Without either flag, no ssh-host-keys/ directory is created."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test")
+
+        assert not (tmp_path / "test" / "ssh-host-keys").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_keygen_not_found_errors(self, mock_root, mock_layers,
+                                          mock_run, tmp_path):
+        """If ssh-keygen is missing, a clear error is printed."""
+        mock_run.side_effect = FileNotFoundError("ssh-keygen")
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test", ssh_host_keys=True)
+            assert exc.value.code == 1
+
+
 class TestVmCreate:
     """Tests for plain VM mode (no PVE host)."""
 

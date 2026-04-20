@@ -348,6 +348,30 @@ def test_mount_point_parsing_patterns():
     assert "MP_PATH" in script
 
 
+def test_inject_has_host_key_injection():
+    """inject.sh has SSH host key injection block."""
+    script = generate_inject()
+    assert "SSH host key injection" in script
+    assert "ssh-host-keys" in script
+    assert "/etc/ssh" in script
+
+
+def test_inject_host_key_section_before_authorized_keys():
+    """SSH host key injection comes before authorized_keys injection."""
+    script = generate_inject()
+    host_key_pos = script.index("SSH host key injection")
+    auth_key_pos = script.index("SSH authorized_keys injection")
+    assert host_key_pos < auth_key_pos
+
+
+def test_inject_host_key_fixes_permissions():
+    """inject.sh sets correct permissions on host keys."""
+    script = generate_inject()
+    idx = script.index("SSH host key injection")
+    block = script[idx:script.index("SSH authorized_keys injection")]
+    assert "chmod 600" in block
+    assert "chmod 644" in block
+
 
 def test_inject_injects_authorized_keys():
     script = generate_inject()
@@ -419,3 +443,87 @@ def test_write_inject_content_matches_generate(tmp_path):
     assert out.read_text() == generate_inject()
 
 
+class TestInjectSSHHostKeyExecution:
+    """Execute inject.sh to verify SSH host key injection behavior."""
+
+    def _setup(self, tmp_path):
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        (rootfs / "etc").mkdir()
+        container = tmp_path / "container"
+        container.mkdir()
+        (container / "kento-mode").write_text("lxc")
+        return rootfs, container
+
+    def _run(self, rootfs, container):
+        import subprocess
+        script = write_inject(container)
+        subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            check=True,
+        )
+
+    def test_host_keys_copied_to_etc_ssh(self, tmp_path):
+        """ssh-host-keys/ present -> files copied to /etc/ssh/."""
+        rootfs, container = self._setup(tmp_path)
+        key_dir = container / "ssh-host-keys"
+        key_dir.mkdir()
+        (key_dir / "ssh_host_rsa_key").write_text("RSA_PRIV")
+        (key_dir / "ssh_host_rsa_key.pub").write_text("RSA_PUB")
+        (key_dir / "ssh_host_ed25519_key").write_text("ED25519_PRIV")
+        (key_dir / "ssh_host_ed25519_key.pub").write_text("ED25519_PUB")
+
+        self._run(rootfs, container)
+
+        assert (rootfs / "etc" / "ssh" / "ssh_host_rsa_key").read_text() == "RSA_PRIV"
+        assert (rootfs / "etc" / "ssh" / "ssh_host_rsa_key.pub").read_text() == "RSA_PUB"
+        assert (rootfs / "etc" / "ssh" / "ssh_host_ed25519_key").read_text() == "ED25519_PRIV"
+        assert (rootfs / "etc" / "ssh" / "ssh_host_ed25519_key.pub").read_text() == "ED25519_PUB"
+
+    def test_host_key_private_permissions(self, tmp_path):
+        """Private host keys get chmod 600."""
+        import os
+        import stat
+        rootfs, container = self._setup(tmp_path)
+        key_dir = container / "ssh-host-keys"
+        key_dir.mkdir()
+        (key_dir / "ssh_host_ecdsa_key").write_text("ECDSA_PRIV")
+        (key_dir / "ssh_host_ecdsa_key.pub").write_text("ECDSA_PUB")
+
+        self._run(rootfs, container)
+
+        priv = rootfs / "etc" / "ssh" / "ssh_host_ecdsa_key"
+        pub = rootfs / "etc" / "ssh" / "ssh_host_ecdsa_key.pub"
+        assert stat.S_IMODE(os.stat(priv).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(pub).st_mode) == 0o644
+
+    def test_no_host_key_dir_no_action(self, tmp_path):
+        """No ssh-host-keys/ directory -> /etc/ssh not created."""
+        rootfs, container = self._setup(tmp_path)
+        self._run(rootfs, container)
+        assert not (rootfs / "etc" / "ssh").exists()
+
+    def test_empty_host_key_dir_no_action(self, tmp_path):
+        """Empty ssh-host-keys/ directory -> /etc/ssh created but no files copied."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "ssh-host-keys").mkdir()
+        self._run(rootfs, container)
+        # The dir is created by mkdir -p, but no key files are copied
+        ssh_dir = rootfs / "etc" / "ssh"
+        if ssh_dir.exists():
+            key_files = [f for f in ssh_dir.iterdir() if f.name.startswith("ssh_host_")]
+            assert len(key_files) == 0
+
+    def test_host_keys_creates_etc_ssh_dir(self, tmp_path):
+        """inject.sh creates /etc/ssh if it doesn't exist."""
+        rootfs, container = self._setup(tmp_path)
+        # Remove /etc/ssh if it exists (we only have /etc)
+        key_dir = container / "ssh-host-keys"
+        key_dir.mkdir()
+        (key_dir / "ssh_host_rsa_key").write_text("RSA")
+        (key_dir / "ssh_host_rsa_key.pub").write_text("RSA_PUB")
+
+        self._run(rootfs, container)
+
+        assert (rootfs / "etc" / "ssh").is_dir()
+        assert (rootfs / "etc" / "ssh" / "ssh_host_rsa_key").is_file()
