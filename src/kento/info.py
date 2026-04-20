@@ -60,6 +60,9 @@ def info(name: str, *, container_dir: Path, mode: str,
     if mac:
         data["mac"] = mac
 
+    ssh_user = _read_meta(container_dir, "kento-ssh-user") or "root"
+    data["ssh_user"] = ssh_user
+
     tz = _read_meta(container_dir, "kento-tz")
     if tz:
         data["timezone"] = tz
@@ -129,6 +132,8 @@ def _print_human(data: dict, verbose: bool) -> None:
         print(f"Timezone:   {data['timezone']}")
     if "environment" in data:
         print(f"Env:        {', '.join(data['environment'])}")
+    if data.get("ssh_user", "root") != "root":
+        print(f"SSH user:   {data['ssh_user']}")
 
     print(f"Layers:     {data['layer_count']}")
 

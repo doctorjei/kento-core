@@ -227,6 +227,111 @@ class TestInjectScriptTZExecution:
         assert lines == ["TZ=UTC"]
 
 
+class TestInjectSSHUserExecution:
+    """Execute inject.sh to verify SSH user-based key injection."""
+
+    def _setup(self, tmp_path):
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        (rootfs / "etc").mkdir()
+        container = tmp_path / "container"
+        container.mkdir()
+        (container / "kento-mode").write_text("lxc")
+        return rootfs, container
+
+    def _run(self, rootfs, container):
+        import subprocess
+        script = write_inject(container)
+        subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            check=True,
+        )
+
+    def test_default_root_user(self, tmp_path):
+        """No kento-ssh-user file means keys go to /root/.ssh/."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-authorized-keys").write_text(
+            "ssh-rsa AAAA test@host\n")
+        self._run(rootfs, container)
+        ak = rootfs / "root" / ".ssh" / "authorized_keys"
+        assert ak.is_file()
+        assert "ssh-rsa AAAA" in ak.read_text()
+
+    def test_nonroot_user_resolves_home(self, tmp_path):
+        """kento-ssh-user=droste resolves home from /etc/passwd and writes there."""
+        rootfs, container = self._setup(tmp_path)
+        (rootfs / "etc" / "passwd").write_text(
+            "root:x:0:0:root:/root:/bin/bash\n"
+            "droste:x:1000:1000:Droste:/home/droste:/bin/bash\n"
+        )
+        (container / "kento-authorized-keys").write_text(
+            "ssh-ed25519 BBBB droste@host\n")
+        (container / "kento-ssh-user").write_text("droste\n")
+        self._run(rootfs, container)
+        ak = rootfs / "home" / "droste" / ".ssh" / "authorized_keys"
+        assert ak.is_file()
+        assert "ssh-ed25519 BBBB" in ak.read_text()
+        # Check ownership (numeric UID:GID from passwd)
+        import os
+        st = os.stat(ak)
+        assert st.st_uid == 1000
+        assert st.st_gid == 1000
+        # Also check .ssh dir ownership
+        ssh_dir = rootfs / "home" / "droste" / ".ssh"
+        st_dir = os.stat(ssh_dir)
+        assert st_dir.st_uid == 1000
+        assert st_dir.st_gid == 1000
+
+    def test_missing_user_skips_with_warning(self, tmp_path):
+        """User not in /etc/passwd skips injection with warning, no crash."""
+        rootfs, container = self._setup(tmp_path)
+        (rootfs / "etc" / "passwd").write_text(
+            "root:x:0:0:root:/root:/bin/bash\n"
+        )
+        (container / "kento-authorized-keys").write_text(
+            "ssh-rsa AAAA test@host\n")
+        (container / "kento-ssh-user").write_text("nobody_here\n")
+        import subprocess
+        script = write_inject(container)
+        result = subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "not found" in result.stderr or "Warning" in result.stderr
+        # No authorized_keys written anywhere
+        assert not (rootfs / "root" / ".ssh" / "authorized_keys").exists()
+
+    def test_nonroot_creates_home_dir(self, tmp_path):
+        """If home dir doesn't exist in rootfs, mkdir -p creates it."""
+        import os
+        uid = os.getuid()
+        gid = os.getgid()
+        rootfs, container = self._setup(tmp_path)
+        (rootfs / "etc" / "passwd").write_text(
+            f"appuser:x:{uid}:{gid}:App:/opt/appuser:/bin/sh\n"
+        )
+        (container / "kento-authorized-keys").write_text(
+            "ssh-rsa AAAA app@host\n")
+        (container / "kento-ssh-user").write_text("appuser\n")
+        # /opt/appuser does NOT exist yet
+        self._run(rootfs, container)
+        ak = rootfs / "opt" / "appuser" / ".ssh" / "authorized_keys"
+        assert ak.is_file()
+        assert "ssh-rsa AAAA" in ak.read_text()
+
+    def test_explicit_root_same_as_default(self, tmp_path):
+        """kento-ssh-user=root behaves same as no file (keys in /root/.ssh/)."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-authorized-keys").write_text(
+            "ssh-rsa AAAA test@host\n")
+        (container / "kento-ssh-user").write_text("root\n")
+        self._run(rootfs, container)
+        ak = rootfs / "root" / ".ssh" / "authorized_keys"
+        assert ak.is_file()
+        assert "ssh-rsa AAAA" in ak.read_text()
+
+
 def test_inject_has_mount_point_creation():
     script = generate_inject()
     assert "mount point directories for mp" in script
@@ -243,13 +348,37 @@ def test_mount_point_parsing_patterns():
     assert "MP_PATH" in script
 
 
+
 def test_inject_injects_authorized_keys():
     script = generate_inject()
     assert "kento-authorized-keys" in script
-    assert "/root/.ssh" in script
+    assert "SSH_HOME" in script
+    assert ".ssh" in script
     assert "authorized_keys" in script
     assert "chmod 700" in script
     assert "chmod 600" in script
+
+
+def test_inject_reads_ssh_user():
+    """inject.sh reads kento-ssh-user file for SSH key target user."""
+    script = generate_inject()
+    assert "kento-ssh-user" in script
+    assert "SSH_USER" in script
+
+
+def test_inject_resolves_home_from_passwd():
+    """inject.sh greps /etc/passwd to resolve non-root home dir."""
+    script = generate_inject()
+    assert "/etc/passwd" in script
+    assert "cut -d: -f6" in script  # home dir field
+    assert "cut -d: -f3" in script  # UID field
+    assert "cut -d: -f4" in script  # GID field
+
+
+def test_inject_chowns_ssh_for_nonroot():
+    """inject.sh chowns .ssh dir and authorized_keys for non-root users."""
+    script = generate_inject()
+    assert "chown" in script
 
 
 def test_authorized_keys_injection_uses_posix_commands():
@@ -288,3 +417,5 @@ def test_write_inject_chmod_755(tmp_path):
 def test_write_inject_content_matches_generate(tmp_path):
     out = write_inject(tmp_path)
     assert out.read_text() == generate_inject()
+
+

@@ -157,8 +157,33 @@ fi
 
 # --- SSH authorized_keys injection ---
 if [ -f "$CONTAINER_DIR/kento-authorized-keys" ]; then
-    mkdir -p "$ROOTFS/root/.ssh"
-    chmod 700 "$ROOTFS/root/.ssh"
-    cp "$CONTAINER_DIR/kento-authorized-keys" "$ROOTFS/root/.ssh/authorized_keys"
-    chmod 600 "$ROOTFS/root/.ssh/authorized_keys"
+    SSH_USER="root"
+    if [ -f "$CONTAINER_DIR/kento-ssh-user" ]; then
+        SSH_USER=$(cat "$CONTAINER_DIR/kento-ssh-user" | tr -d '[:space:]')
+    fi
+    if [ "$SSH_USER" = "root" ]; then
+        SSH_HOME="/root"
+        SSH_UID=0
+        SSH_GID=0
+    else
+        SSH_PASSWD_LINE=$(grep "^${SSH_USER}:" "$ROOTFS/etc/passwd" || true)
+        if [ -z "$SSH_PASSWD_LINE" ]; then
+            echo "Warning: SSH key user '$SSH_USER' not found in rootfs /etc/passwd, skipping key injection" >&2
+            SSH_HOME=""
+        else
+            SSH_HOME=$(echo "$SSH_PASSWD_LINE" | cut -d: -f6)
+            SSH_UID=$(echo "$SSH_PASSWD_LINE" | cut -d: -f3)
+            SSH_GID=$(echo "$SSH_PASSWD_LINE" | cut -d: -f4)
+        fi
+    fi
+    if [ -n "$SSH_HOME" ]; then
+        mkdir -p "$ROOTFS$SSH_HOME/.ssh"
+        chmod 700 "$ROOTFS$SSH_HOME/.ssh"
+        cp "$CONTAINER_DIR/kento-authorized-keys" "$ROOTFS$SSH_HOME/.ssh/authorized_keys"
+        chmod 600 "$ROOTFS$SSH_HOME/.ssh/authorized_keys"
+        if [ "$SSH_USER" != "root" ]; then
+            chown "$SSH_UID:$SSH_GID" "$ROOTFS$SSH_HOME/.ssh"
+            chown "$SSH_UID:$SSH_GID" "$ROOTFS$SSH_HOME/.ssh/authorized_keys"
+        fi
+    fi
 fi

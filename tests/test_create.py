@@ -438,6 +438,49 @@ class TestGuestConfig:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
+    def test_ssh_key_user_writes_metadata(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        """--ssh-key-user droste writes kento-ssh-user file."""
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-rsa AAAA user@host\n")
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test",
+                   ssh_keys=[str(key)], ssh_key_user="droste")
+
+        content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
+        assert content == "droste"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_key_user_root_no_file(self, mock_root, mock_layers,
+                                        mock_run, tmp_path):
+        """--ssh-key-user root (default) does not write kento-ssh-user file."""
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-rsa AAAA user@host\n")
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", ssh_keys=[str(key)])
+
+        assert not (tmp_path / "test" / "kento-ssh-user").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ssh_key_user_without_keys_still_writes(self, mock_root, mock_layers,
+                                                      mock_run, tmp_path):
+        """--ssh-key-user without --ssh-key still writes the metadata file."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", ssh_key_user="droste")
+
+        content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
+        assert content == "droste"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
     def test_searchdomain_without_ip_writes_metadata(self, mock_root, mock_layers,
                                                       mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \

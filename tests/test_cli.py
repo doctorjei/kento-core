@@ -745,3 +745,60 @@ class TestMacFlag:
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["mac"] == "52:54:00:11:22:33"
         assert mock_create.call_args[1]["start"] is True
+class TestSSHKeyUserFlag:
+    """Tests for the --ssh-key-user flag on create and run."""
+
+    def test_ssh_key_user_in_create_help(self, capsys):
+        """--ssh-key-user appears in create --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--ssh-key-user" in output
+
+    def test_ssh_key_user_in_run_help(self, capsys):
+        """--ssh-key-user appears in run --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--ssh-key-user" in output
+
+    def test_ssh_key_user_default_root(self):
+        """Without --ssh-key-user, ssh_key_user defaults to 'root'."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_key_user"] == "root"
+
+    def test_ssh_key_user_custom_value(self):
+        """--ssh-key-user droste passes through to create()."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--ssh-key-user", "droste", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_key_user"] == "droste"
+
+    def test_ssh_key_user_passes_through_from_run(self):
+        """--ssh-key-user reaches create() when used via run."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["run", "--ssh-key-user", "droste", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_key_user"] == "droste"
+        assert call_kwargs["start"] is True
+
+    def test_ssh_key_user_without_ssh_key_is_harmless(self):
+        """--ssh-key-user without --ssh-key doesn't error."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--ssh-key-user", "droste", "debian:12"])
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["ssh_keys"] is None
+        assert call_kwargs["ssh_key_user"] == "droste"
+

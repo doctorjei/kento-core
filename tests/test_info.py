@@ -158,6 +158,46 @@ def test_info_shows_environment(mock_running, tmp_path, capsys):
 
 
 @patch("kento.info.is_running", return_value=False)
+def test_info_shows_ssh_user_nonroot(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path, **{"kento-ssh-user": "droste\n"})
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    assert "SSH user:   droste" in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_hides_ssh_user_root(mock_running, tmp_path, capsys):
+    """ssh_user=root (default) should not clutter the output."""
+    d = _make_container(tmp_path)
+    info("mybox", container_dir=d, mode="lxc")
+
+    output = capsys.readouterr().out
+    assert "SSH user:" not in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_json_includes_ssh_user(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path, **{"kento-ssh-user": "droste\n"})
+    info("mybox", container_dir=d, mode="lxc", as_json=True)
+
+    import json as json_mod
+    data = json_mod.loads(capsys.readouterr().out)
+    assert data["ssh_user"] == "droste"
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_json_ssh_user_default_root(mock_running, tmp_path, capsys):
+    """JSON output includes ssh_user=root when no metadata file exists."""
+    d = _make_container(tmp_path)
+    info("mybox", container_dir=d, mode="lxc", as_json=True)
+
+    import json as json_mod
+    data = json_mod.loads(capsys.readouterr().out)
+    assert data["ssh_user"] == "root"
+
+
+@patch("kento.info.is_running", return_value=False)
 def test_info_hides_optional_when_absent(mock_running, tmp_path, capsys):
     """Optional fields should not appear when metadata files are missing."""
     d = _make_container(tmp_path)
@@ -457,3 +497,4 @@ class TestCliInfo:
         output = capsys.readouterr().out
         assert "info" in output
         assert "inspect" in output
+

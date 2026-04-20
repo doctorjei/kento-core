@@ -134,6 +134,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            timezone: str | None = None,
            env: list[str] | None = None,
            ssh_keys: list[str] | None = None,
+           ssh_key_user: str = "root",
            mac: str | None = None,
            net_type: str | None = None) -> None:
     require_root()
@@ -288,10 +289,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-env").write_text("\n".join(env) + "\n")
         _inject_env(state_dir, env)
 
-    # Write SSH authorized_keys metadata if requested. Hook copies this into
-    # the guest's /root/.ssh/authorized_keys on every start.
+    # Write SSH authorized_keys metadata if requested. inject.sh copies this into
+    # the guest's ~/.ssh/authorized_keys on every start (target user controlled
+    # by kento-ssh-user, defaulting to root).
     if ssh_key_contents is not None:
         (container_dir / "kento-authorized-keys").write_text(ssh_key_contents)
+    if ssh_key_user != "root":
+        (container_dir / "kento-ssh-user").write_text(ssh_key_user + "\n")
 
     if mode in ("vm", "pve-vm"):
         # Resolve MAC address for VM modes: user override wins, otherwise
