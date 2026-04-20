@@ -148,12 +148,16 @@ If the VM starts (QEMU launches) but you can't reach it via SSH:
 
 Disk-based images often have `PARTUUID=...` entries in `/etc/fstab`
 that stall the boot waiting for block devices that don't exist under
-virtiofs. The fstab should be empty:
+virtiofs. Either empty the fstab or add `nofail,x-systemd.device-timeout=1s`
+to each block-device entry:
 
 ```
 # Check inside the composed rootfs (while the container is stopped):
 sudo cat /var/lib/kento/vm/<name>/rootfs/etc/fstab
 ```
+
+Kento does not patch this at runtime — see the
+[image contract](image-contract.md) for what the image must provide.
 
 ### 2. Check network configuration
 

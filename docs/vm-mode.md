@@ -47,15 +47,21 @@ have:
 These are passed directly to QEMU via `-kernel` and `-initrd`. Without
 them, kento will refuse to start the VM.
 
-### Empty /etc/fstab
+### /etc/fstab must not hard-depend on absent devices
 
-The fstab must be empty (or contain only comments). Disk-based images
-often have `PARTUUID=...` entries that cause the boot to hang waiting
-for a block device that doesn't exist in a virtiofs-backed VM.
+Disk-based images often have `PARTUUID=...` entries that cause boot
+to hang 90s waiting for a block device that doesn't exist in a
+virtiofs-backed VM. The fstab should be empty, or every block-device
+entry should use `nofail,x-systemd.device-timeout=1s` to fail
+gracefully:
 
 ```
-# /etc/fstab should be empty or have no active entries
+UUID=abc-123  /boot/efi  vfat  defaults,nofail,x-systemd.device-timeout=1s  0  2
 ```
+
+This is part of the broader [image contract](image-contract.md) —
+kento does not patch images at runtime. If an image hangs on fstab,
+the image violates the contract.
 
 ### Network configuration
 
