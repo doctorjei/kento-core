@@ -342,6 +342,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             print(f"  Dir:     {container_dir}")
         else:
             # Plain VM mode (no PVE)
+            write_inject(container_dir)
             print(f"\nContainer created: {name}")
             print(f"  Image:   {image}")
             if network["type"] == "usermode":

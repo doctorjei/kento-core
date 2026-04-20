@@ -471,6 +471,8 @@ class TestVmCreate:
         assert (lxc_dir / "kento-mode").read_text().strip() == "vm"
         assert (lxc_dir / "kento-name").read_text().strip() == "test"
         assert (lxc_dir / "kento-port").is_file()
+        assert (lxc_dir / "kento-inject.sh").is_file()
+        assert (lxc_dir / "kento-inject.sh").stat().st_mode & 0o755 == 0o755
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")

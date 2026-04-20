@@ -150,11 +150,12 @@ class TestUnmountRootfs:
 
 
 class TestStartVm:
+    @patch("kento.vm.subprocess.run")
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_lifecycle(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+    def test_start_lifecycle(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -166,6 +167,7 @@ class TestStartVm:
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
         # Pre-create socket so wait loop exits immediately
         (lxc_dir / "virtiofsd.sock").write_text("")
 
@@ -182,11 +184,12 @@ class TestStartVm:
         assert (lxc_dir / "kento-virtiofsd-pid").read_text().strip() == "1001"
         assert (lxc_dir / "kento-qemu-pid").read_text().strip() == "1002"
 
+    @patch("kento.vm.subprocess.run")
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_passes_port(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+    def test_start_passes_port(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -198,6 +201,7 @@ class TestStartVm:
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         (lxc_dir / "kento-port").write_text("12345:2222\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
         (lxc_dir / "virtiofsd.sock").write_text("")
 
         mock_vfs = MagicMock()
@@ -229,11 +233,12 @@ class TestStartVm:
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
+    @patch("kento.vm.subprocess.run")
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_virtiofsd_args(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+    def test_start_virtiofsd_args(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         """Validate virtiofsd command-line arguments."""
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
@@ -246,6 +251,7 @@ class TestStartVm:
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
         (lxc_dir / "virtiofsd.sock").write_text("")
 
         mock_vfs = MagicMock()
@@ -268,11 +274,12 @@ class TestStartVm:
     @patch("kento.vm.VM_KVM", True)
     @patch("kento.vm.VM_MACHINE", "q35")
     @patch("kento.vm.VM_MEMORY", 512)
+    @patch("kento.vm.subprocess.run")
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_qemu_args(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+    def test_start_qemu_args(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         """Validate QEMU command-line arguments that are critical for boot."""
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
@@ -285,6 +292,7 @@ class TestStartVm:
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
         (lxc_dir / "virtiofsd.sock").write_text("")
 
         mock_vfs = MagicMock()
@@ -351,11 +359,12 @@ class TestStartVm:
         assert qemu_call[1]["stderr"] == subprocess.DEVNULL
 
     @patch("kento.vm.VM_KVM", False)
+    @patch("kento.vm.subprocess.run")
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
-    def test_start_qemu_no_kvm(self, mock_mount, mock_popen, mock_running, mock_find, tmp_path):
+    def test_start_qemu_no_kvm(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         """When VM_KVM is False, -enable-kvm and -cpu host must be absent."""
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
@@ -367,6 +376,7 @@ class TestStartVm:
         (boot / "initramfs.img").write_text("initramfs")
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
         (lxc_dir / "virtiofsd.sock").write_text("")
         # No kento-port file — no network args
 
@@ -405,6 +415,106 @@ class TestStartVm:
         # No initramfs.img
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+
+        with pytest.raises(SystemExit):
+            start_vm(lxc_dir, "testvm")
+        mock_unmount.assert_called_once()
+
+    @patch("kento.vm.subprocess.run")
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_invokes_inject_before_virtiofsd(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """inject.sh must run after mount_rootfs and before virtiofsd launches."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+        # Track call ordering across mock_mount, mock_run, mock_popen.
+        order: list[str] = []
+        mock_mount.side_effect = lambda *a, **kw: order.append("mount")
+        mock_run.side_effect = lambda *a, **kw: (order.append("inject"), MagicMock())[1]
+
+        def popen_side_effect(*a, **kw):
+            order.append("popen")
+            m = MagicMock()
+            m.pid = len(order)
+            return m
+        mock_popen.side_effect = popen_side_effect
+
+        start_vm(lxc_dir, "testvm")
+
+        # inject must happen after mount and before any Popen (virtiofsd/qemu).
+        assert order[0] == "mount"
+        assert order[1] == "inject"
+        assert order[2] == "popen"
+
+        # Verify the inject invocation shape.
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        cmd = args[0]
+        assert cmd[0] == "sh"
+        assert cmd[1] == str(lxc_dir / "kento-inject.sh")
+        assert cmd[2] == str(rootfs)
+        assert cmd[3] == str(lxc_dir)
+        assert kwargs.get("check") is True
+
+    @patch("kento.vm.subprocess.run",
+           side_effect=subprocess.CalledProcessError(1, ["sh", "kento-inject.sh"]))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_inject_failure_propagates(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """A failing inject.sh must abort start — virtiofsd/qemu never launch."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\nexit 1\n")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            start_vm(lxc_dir, "testvm")
+
+        # Neither virtiofsd nor qemu should have launched.
+        mock_popen.assert_not_called()
+
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.unmount_rootfs")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_missing_inject_script(
+            self, mock_mount, mock_unmount, mock_running, mock_find, tmp_path):
+        """Missing kento-inject.sh aborts start with an unmount + exit."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        # No kento-inject.sh
 
         with pytest.raises(SystemExit):
             start_vm(lxc_dir, "testvm")

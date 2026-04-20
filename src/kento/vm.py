@@ -135,6 +135,20 @@ def start_vm(container_dir: Path, name: str) -> None:
         print(f"Error: initramfs not found at {initramfs}", file=sys.stderr)
         sys.exit(1)
 
+    # Inject guest-side config (hostname/network/tz/env/ssh-key) into the
+    # mounted rootfs before virtiofsd starts. inject.sh reads kento metadata
+    # files and writes them into the overlayfs upper layer. A failing inject
+    # is a start failure — don't boot a misconfigured VM.
+    inject_script = container_dir / "kento-inject.sh"
+    if not inject_script.is_file():
+        unmount_rootfs(container_dir)
+        print(f"Error: inject script not found at {inject_script}", file=sys.stderr)
+        sys.exit(1)
+    subprocess.run(
+        ["sh", str(inject_script), str(rootfs), str(container_dir)],
+        check=True,
+    )
+
     # Read port mapping (usermode networking)
     port_file = container_dir / "kento-port"
     host_port = guest_port = None
