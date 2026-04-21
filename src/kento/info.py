@@ -92,6 +92,10 @@ def info(name: str, *, container_dir: Path, mode: str,
     data["state_directory"] = str(state_dir)
 
     # Optional metadata
+    config_mode = _read_meta(container_dir, "kento-config-mode")
+    if config_mode:
+        data["config_mode"] = config_mode
+
     vmid = _read_meta(container_dir, "kento-vmid")
     if vmid:
         data["vmid"] = int(vmid)
@@ -175,6 +179,9 @@ def _print_human(data: dict, verbose: bool, *,
     print(f"Created:    {data['created']}")
     print(f"Directory:  {data['directory']}")
     print(f"State:      {data['state_directory']}")
+
+    if "config_mode" in data:
+        print(f"Config:     {data['config_mode']}")
 
     if "vmid" in data:
         print(f"VMID:       {data['vmid']}")

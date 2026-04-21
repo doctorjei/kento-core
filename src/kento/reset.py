@@ -95,6 +95,40 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     if env_file.is_file():
         _inject_env(state_dir, env_file.read_text().strip().splitlines())
 
+    # Regenerate cloud-init seed if in cloudinit mode
+    config_mode_file = container_dir / "kento-config-mode"
+    if config_mode_file.is_file() and config_mode_file.read_text().strip() == "cloudinit":
+        from kento.cloudinit import write_seed
+        # Gather config from metadata files
+        net_file_ci = container_dir / "kento-net"
+        net_cfg_ci = {}
+        if net_file_ci.is_file():
+            for line in net_file_ci.read_text().strip().splitlines():
+                k, v = line.split("=", 1)
+                net_cfg_ci[k] = v
+        tz_file_ci = container_dir / "kento-tz"
+        env_file_ci = container_dir / "kento-env"
+        ci_ssh_keys = None
+        auth_keys_file = container_dir / "kento-authorized-keys"
+        if auth_keys_file.is_file():
+            ci_ssh_keys = auth_keys_file.read_text()
+        ssh_user_file = container_dir / "kento-ssh-user"
+        ci_ssh_user = ssh_user_file.read_text().strip() if ssh_user_file.is_file() else "root"
+        ci_host_key_dir = container_dir / "ssh-host-keys"
+        name_file_ci = container_dir / "kento-name"
+        write_seed(
+            container_dir,
+            name=name_file_ci.read_text().strip() if name_file_ci.is_file() else name,
+            ip=net_cfg_ci.get("ip"),
+            gateway=net_cfg_ci.get("gateway"),
+            dns=net_cfg_ci.get("dns"),
+            searchdomain=net_cfg_ci.get("searchdomain"),
+            timezone=tz_file_ci.read_text().strip() if tz_file_ci.is_file() else None,
+            env=env_file_ci.read_text().strip().splitlines() if env_file_ci.is_file() else None,
+            ssh_keys=ci_ssh_keys, ssh_key_user=ci_ssh_user,
+            ssh_host_key_dir=ci_host_key_dir if ci_host_key_dir.is_dir() else None,
+        )
+
     # Re-resolve layers from image
     image = (container_dir / "kento-image").read_text().strip()
     layers = resolve_layers(image)

@@ -12,6 +12,26 @@ set -eu
 ROOTFS="$1"
 CONTAINER_DIR="$2"
 
+# Check config mode — cloud-init seed delivery or file injection
+CONFIG_MODE="injection"
+CONFIG_MODE_FILE="$CONTAINER_DIR/kento-config-mode"
+if [ -f "$CONFIG_MODE_FILE" ]; then
+    CONFIG_MODE=$(cat "$CONFIG_MODE_FILE" | tr -d '[:space:]')
+fi
+
+if [ "$CONFIG_MODE" = "cloudinit" ]; then
+    # Copy pre-generated NoCloud seed files to guest rootfs
+    SEED_SRC="$CONTAINER_DIR/cloud-seed"
+    SEED_DST="$ROOTFS/var/lib/cloud/seed/nocloud"
+    if [ -d "$SEED_SRC" ]; then
+        mkdir -p "$SEED_DST"
+        cp -f "$SEED_SRC/meta-data" "$SEED_DST/" 2>/dev/null || true
+        cp -f "$SEED_SRC/user-data" "$SEED_DST/" 2>/dev/null || true
+        cp -f "$SEED_SRC/network-config" "$SEED_DST/" 2>/dev/null || true
+    fi
+    exit 0
+fi
+
 STATIC_IP=""
 STATIC_GW=""
 STATIC_DNS=""

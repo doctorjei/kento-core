@@ -1091,3 +1091,111 @@ class TestLxcPortForwarding:
         port = (lxc_base / "test" / "kento-port").read_text().strip()
         assert port == "10022:22"
 
+
+class TestCloudInitMode:
+    """Tests for --config-mode cloud-init integration in create."""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers")
+    @patch("kento.create.require_root")
+    def test_cloudinit_mode_auto_detected(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        """Auto-detect cloudinit mode when image has cloud-init."""
+        # Create layer dir with cloud-init marker
+        layer = tmp_path / "layer"
+        (layer / "usr" / "bin").mkdir(parents=True)
+        (layer / "usr" / "bin" / "cloud-init").write_text("")
+        mock_layers.return_value = str(layer)
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test")
+
+        mode_file = tmp_path / "test" / "kento-config-mode"
+        assert mode_file.is_file()
+        assert mode_file.read_text().strip() == "cloudinit"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_injection_mode_when_no_cloudinit(self, mock_root, mock_layers,
+                                              mock_run, tmp_path):
+        """Default to injection mode when image lacks cloud-init."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test")
+
+        mode_file = tmp_path / "test" / "kento-config-mode"
+        assert mode_file.is_file()
+        assert mode_file.read_text().strip() == "injection"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers")
+    @patch("kento.create.require_root")
+    def test_config_mode_forced_injection(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        """Forced injection mode even when cloud-init is present."""
+        layer = tmp_path / "layer"
+        (layer / "usr" / "bin").mkdir(parents=True)
+        (layer / "usr" / "bin" / "cloud-init").write_text("")
+        mock_layers.return_value = str(layer)
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", config_mode="injection")
+
+        mode_file = tmp_path / "test" / "kento-config-mode"
+        assert mode_file.read_text().strip() == "injection"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers")
+    @patch("kento.create.require_root")
+    def test_cloudinit_writes_seed_dir(self, mock_root, mock_layers,
+                                       mock_run, tmp_path):
+        """Cloud-init mode creates cloud-seed/ with meta-data and user-data."""
+        layer = tmp_path / "layer"
+        (layer / "etc" / "cloud").mkdir(parents=True)
+        (layer / "etc" / "cloud" / "cloud.cfg").write_text("")
+        mock_layers.return_value = str(layer)
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", timezone="UTC",
+                   env=["FOO=bar"])
+
+        seed_dir = tmp_path / "test" / "cloud-seed"
+        assert seed_dir.is_dir()
+        assert (seed_dir / "meta-data").is_file()
+        assert (seed_dir / "user-data").is_file()
+        # Verify content
+        user_data = (seed_dir / "user-data").read_text()
+        assert "#cloud-config" in user_data
+        assert "timezone: UTC" in user_data
+        assert "FOO=bar" in user_data
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_injection_mode_no_seed_dir(self, mock_root, mock_layers,
+                                         mock_run, tmp_path):
+        """Injection mode does not create cloud-seed/ directory."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", config_mode="injection")
+
+        assert not (tmp_path / "test" / "cloud-seed").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_cloudinit_forced_warns_no_cloud_init(self, mock_root, mock_layers,
+                                                    mock_run, tmp_path, capsys):
+        """Forcing cloudinit mode without cloud-init in image prints a warning."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", config_mode="cloudinit")
+
+        captured = capsys.readouterr()
+        assert "cloud-init not detected" in captured.err
+        # Still creates the seed dir
+        assert (tmp_path / "test" / "cloud-seed").is_dir()

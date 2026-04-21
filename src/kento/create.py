@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from kento import LXC_BASE, VM_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
+from kento.cloudinit import detect_cloudinit, write_seed
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
 from kento.inject import write_inject
@@ -164,6 +165,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            ssh_host_keys: bool = False,
            ssh_host_key_dir: str | None = None,
            mac: str | None = None,
+           config_mode: str = "auto",
            net_type: str | None = None) -> None:
     require_root()
 
@@ -351,6 +353,32 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         _generate_ssh_host_keys(container_dir / "ssh-host-keys")
     elif ssh_host_key_dir is not None:
         _copy_ssh_host_keys(Path(ssh_host_key_dir), container_dir / "ssh-host-keys")
+
+    # Determine config mode (injection vs cloud-init)
+    if config_mode == "auto":
+        if detect_cloudinit(layers):
+            effective_config_mode = "cloudinit"
+        else:
+            effective_config_mode = "injection"
+    else:
+        effective_config_mode = config_mode
+        if config_mode == "cloudinit" and not detect_cloudinit(layers):
+            print("Warning: --config-mode cloudinit specified but cloud-init not detected in image",
+                  file=sys.stderr)
+
+    # Write config mode metadata
+    (container_dir / "kento-config-mode").write_text(effective_config_mode + "\n")
+
+    # Generate cloud-init seed if in cloudinit mode
+    if effective_config_mode == "cloudinit":
+        host_key_dir = container_dir / "ssh-host-keys"
+        write_seed(
+            container_dir, name=name,
+            ip=ip, gateway=gateway, dns=dns, searchdomain=searchdomain,
+            timezone=timezone, env=env,
+            ssh_keys=ssh_key_contents, ssh_key_user=ssh_key_user,
+            ssh_host_key_dir=host_key_dir if host_key_dir.is_dir() else None,
+        )
 
     if mode in ("vm", "pve-vm"):
         # Resolve MAC address for VM modes: user override wins, otherwise
