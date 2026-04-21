@@ -116,7 +116,8 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         nameserver: str | None = None,
                         searchdomain: str | None = None,
                         timezone: str | None = None,
-                        env: list[str] | None = None) -> str:
+                        env: list[str] | None = None,
+                        port: str | None = None) -> str:
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
@@ -157,6 +158,9 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append("lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
     lines.append(f"lxc.hook.pre-mount: {hook}")
+    if port is not None:
+        lines.append(f"lxc.hook.start-host: {hook}")
+        lines.append(f"lxc.hook.post-stop: {hook}")
     mount_auto = LXC_MOUNT_AUTO_NESTING if nesting else LXC_MOUNT_AUTO
     lines.append(f"lxc.mount.auto: {mount_auto}")
     lines.append(f"lxc.tty.max: {LXC_TTY}")

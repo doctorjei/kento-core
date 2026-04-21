@@ -20,61 +20,132 @@ from kento.vm import (
 class TestAllocatePort:
     @patch("kento.vm._port_is_free", return_value=True)
     def test_empty_dir(self, mock_free, tmp_path):
-        assert allocate_port(tmp_path) == 10022
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10022
 
     @patch("kento.vm._port_is_free", return_value=True)
     def test_skips_used_ports(self, mock_free, tmp_path):
-        d = tmp_path / "vm1"
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        d = vm_base / "vm1"
         d.mkdir()
         (d / "kento-port").write_text("10022:22\n")
-        assert allocate_port(tmp_path) == 10023
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10023
 
     @patch("kento.vm._port_is_free", return_value=True)
     def test_fills_gaps(self, mock_free, tmp_path):
-        d1 = tmp_path / "vm1"
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        d1 = vm_base / "vm1"
         d1.mkdir()
         (d1 / "kento-port").write_text("10022:22\n")
-        d2 = tmp_path / "vm2"
+        d2 = vm_base / "vm2"
         d2.mkdir()
         (d2 / "kento-port").write_text("10024:22\n")
-        assert allocate_port(tmp_path) == 10023
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10023
 
     @patch("kento.vm._port_is_free", return_value=True)
     def test_multiple_consecutive(self, mock_free, tmp_path):
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
         for i in range(3):
-            d = tmp_path / f"vm{i}"
+            d = vm_base / f"vm{i}"
             d.mkdir()
             (d / "kento-port").write_text(f"{10022 + i}:22\n")
-        assert allocate_port(tmp_path) == 10025
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10025
 
     @patch("kento.vm._port_is_free", return_value=True)
     def test_nonexistent_dir(self, mock_free, tmp_path):
-        assert allocate_port(tmp_path / "nope") == 10022
+        vm_base = tmp_path / "vm-nope"
+        lxc_base = tmp_path / "lxc-nope"
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10022
 
     @patch("kento.vm._port_is_free", return_value=True)
     def test_ignores_malformed_port(self, mock_free, tmp_path):
-        d = tmp_path / "vm1"
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        d = vm_base / "vm1"
         d.mkdir()
         (d / "kento-port").write_text("bad\n")
-        assert allocate_port(tmp_path) == 10022
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10022
 
     @patch("kento.vm._port_is_free", return_value=True)
     def test_custom_guest_port(self, mock_free, tmp_path):
-        d = tmp_path / "vm1"
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        d = vm_base / "vm1"
         d.mkdir()
         (d / "kento-port").write_text("10022:2222\n")
-        assert allocate_port(tmp_path) == 10023
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10023
 
     @patch("kento.vm._port_is_free", side_effect=lambda p: p != 10022)
     def test_skips_port_in_use_on_host(self, mock_free, tmp_path):
         """Port 10022 not in kento-port files but bound on host — skip it."""
-        assert allocate_port(tmp_path) == 10023
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10023
 
     @patch("kento.vm._port_is_free", return_value=False)
     def test_all_ports_exhausted(self, mock_free, tmp_path):
         """Every port in range is busy — should exit with error."""
-        with pytest.raises(SystemExit):
-            allocate_port(tmp_path)
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            with pytest.raises(SystemExit):
+                allocate_port()
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    def test_scans_both_vm_and_lxc_bases(self, mock_free, tmp_path):
+        """allocate_port scans both VM_BASE and LXC_BASE for used ports."""
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        # Port in VM namespace
+        d_vm = vm_base / "vm1"
+        d_vm.mkdir()
+        (d_vm / "kento-port").write_text("10022:22\n")
+        # Port in LXC namespace
+        d_lxc = lxc_base / "lxc1"
+        d_lxc.mkdir()
+        (d_lxc / "kento-port").write_text("10023:22\n")
+        with patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            assert allocate_port() == 10024
 
     def test_port_range_constants(self):
         assert _PORT_MIN == 10022

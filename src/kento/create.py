@@ -15,7 +15,8 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     net_type: str | None = None,
                     nesting: bool = True,
                     ip: str | None = None, gateway: str | None = None,
-                    env: list[str] | None = None) -> str:
+                    env: list[str] | None = None,
+                    port: str | None = None) -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
         f"lxc.uts.name = {name}",
@@ -25,6 +26,8 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         f"lxc.hook.pre-start = {hook}",
         f"lxc.hook.post-stop = {hook}",
     ]
+    if port is not None:
+        lines.append(f"lxc.hook.start-host = {hook}")
     # Network config based on net_type
     if net_type == "bridge" and bridge:
         lines += [
@@ -224,9 +227,16 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     if vmid and mode not in ("pve", "pve-vm"):
         print(f"Error: --vmid cannot be used with {mode.upper()} mode", file=sys.stderr)
         sys.exit(1)
-    if port is not None and mode not in ("vm", "pve-vm"):
-        print(f"Error: --port cannot be used with {mode.upper()} mode", file=sys.stderr)
-        sys.exit(1)
+    if port is not None and mode in ("lxc", "pve"):
+        if network["type"] != "bridge":
+            print("Error: --port requires bridge networking for LXC/PVE mode",
+                  file=sys.stderr)
+            sys.exit(1)
+    if port is not None and mode in ("vm", "pve-vm"):
+        if network["type"] == "bridge":
+            print("Error: --port cannot be used with bridge networking in VM mode",
+                  file=sys.stderr)
+            sys.exit(1)
     if ip is not None and mode in ("vm", "pve-vm"):
         print("Error: --ip cannot be used with VM mode", file=sys.stderr)
         sys.exit(1)
@@ -361,7 +371,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         if network["type"] == "usermode":
             from kento.vm import allocate_port
             if port is None:
-                host_port = allocate_port(base_dir)
+                host_port = allocate_port()
                 guest_port = 22
             else:
                 host_port, guest_port = port.split(":")
@@ -416,7 +426,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 print(f"  Port:    {host_port}:{guest_port}")
             print(f"  Dir:     {container_dir}")
     else:
-        # Generate hook (LXC/PVE only) + inject.sh (shared with future VM/PVE-VM modes)
+        # Port forwarding for LXC/PVE modes
+        if port is not None:
+            from kento.vm import allocate_port
+            if port == "auto":
+                host_port = allocate_port()
+                guest_port = 22
+            else:
+                host_port, guest_port = port.split(":")
+                host_port, guest_port = int(host_port), int(guest_port)
+            (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+
+        # Generate hook (LXC/PVE only) + inject.sh (shared with VM/PVE-VM modes)
         write_hook(container_dir, layers, name, state_dir)
         write_inject(container_dir)
 
@@ -429,7 +450,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                     nesting=nesting, ip=ip,
                                     gateway=gateway, nameserver=dns,
                                     searchdomain=searchdomain,
-                                    timezone=timezone, env=env)
+                                    timezone=timezone, env=env,
+                                    port=port)
             )
             config_path = str(pve_conf)
         else:
@@ -437,7 +459,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 generate_config(name, container_dir, bridge=bridge,
                                 net_type=network.get("type"),
                                 nesting=nesting,
-                                ip=ip, gateway=gateway, env=env)
+                                ip=ip, gateway=gateway, env=env,
+                                port=port)
             )
             config_path = f"{container_dir}/config"
 
@@ -446,6 +469,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         print(f"  Bridge:  {bridge}")
         if mode == "pve":
             print(f"  VMID:    {vmid}")
+        if port is not None:
+            print(f"  Port:    {host_port}:{guest_port}")
         print(f"  Nesting: {nesting}")
         print(f"  Config:  {config_path}")
 

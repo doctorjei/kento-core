@@ -333,3 +333,28 @@ def test_reset_vm_refuses_running(mock_root, tmp_path):
          patch("kento.vm.is_vm_running", return_value=True):
         with pytest.raises(SystemExit):
             reset("testvm")
+
+
+# --- Port forwarding state cleanup (Phase 3) ---
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_removes_portfwd_active(mock_root, mock_layers, mock_run,
+                                       tmp_path):
+    """scrub removes stale kento-portfwd-active file."""
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "kento-portfwd-active").write_text("10022:22:10.0.0.5\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    assert not (lxc_dir / "kento-portfwd-active").exists()

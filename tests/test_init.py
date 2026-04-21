@@ -481,8 +481,28 @@ class TestResolveNetwork:
         with pytest.raises(SystemExit):
             resolve_network("bridge", None, "lxc")
 
-    def test_port_implies_usermode(self):
+    def test_port_implies_usermode_for_vm(self):
+        """Port implies usermode for VM mode."""
         result = resolve_network(None, None, "vm", port="10022:22")
+        assert result == {"type": "usermode", "bridge": None, "port": "10022:22"}
+
+    @patch("kento.detect_bridge", return_value="lxcbr0")
+    def test_port_does_not_imply_usermode_for_lxc(self, mock_detect):
+        """Port does NOT imply usermode for LXC — auto-detects bridge instead."""
+        result = resolve_network(None, None, "lxc", port="10022:22")
+        assert result["type"] == "bridge"
+        assert result["port"] == "10022:22"
+
+    @patch("kento.detect_bridge", return_value=None)
+    def test_port_lxc_no_bridge_falls_to_none(self, mock_detect):
+        """Port for LXC with no bridge found falls to 'none' (validation elsewhere)."""
+        result = resolve_network(None, None, "lxc", port="10022:22")
+        assert result["type"] == "none"
+        assert result["port"] == "10022:22"
+
+    def test_port_implies_usermode_for_pve_vm(self):
+        """Port implies usermode for PVE-VM mode."""
+        result = resolve_network(None, None, "pve-vm", port="10022:22")
         assert result == {"type": "usermode", "bridge": None, "port": "10022:22"}
 
     def test_explicit_none(self):

@@ -66,24 +66,25 @@ def _port_is_free(port: int) -> bool:
         return False
 
 
-def allocate_port(scan_dir: Path | None = None) -> int:
+def allocate_port() -> int:
     """Return the next free host port in range 10022-10999.
 
-    Scans kento-port files in the VM base directory to find used ports,
-    then verifies the candidate port is actually free on the host.
+    Scans kento-port files in both LXC and VM base directories to find used
+    ports, then verifies the candidate port is actually free on the host.
     """
-    base = scan_dir or VM_BASE
+    from kento import LXC_BASE
     used_ports: set[int] = set()
-    if base.is_dir():
-        for d in base.iterdir():
-            if d.is_dir():
-                port_file = d / "kento-port"
-                if port_file.is_file():
-                    try:
-                        host_port = int(port_file.read_text().strip().split(":")[0])
-                        used_ports.add(host_port)
-                    except (ValueError, IndexError):
-                        continue
+    for base in (VM_BASE, LXC_BASE):
+        if base.is_dir():
+            for d in base.iterdir():
+                if d.is_dir():
+                    port_file = d / "kento-port"
+                    if port_file.is_file():
+                        try:
+                            host_port = int(port_file.read_text().strip().split(":")[0])
+                            used_ports.add(host_port)
+                        except (ValueError, IndexError):
+                            continue
     for port in range(_PORT_MIN, _PORT_MAX + 1):
         if port not in used_ports and _port_is_free(port):
             return port

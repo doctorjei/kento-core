@@ -50,6 +50,10 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     upper.mkdir(parents=True)
     work.mkdir(parents=True)
 
+    # Clean up stale port forwarding state (safety net)
+    portfwd_active = container_dir / "kento-portfwd-active"
+    portfwd_active.unlink(missing_ok=True)
+
     # Re-inject guest config from kento metadata
     from kento.create import (_inject_network_config, _inject_hostname,
                               _inject_timezone, _inject_env)

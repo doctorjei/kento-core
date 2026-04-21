@@ -414,3 +414,29 @@ class TestDeleteQmConfig:
         with patch("kento.pve.PVE_DIR", pve), \
              patch("kento.pve._pve_node_name", return_value="mynode"):
             delete_qm_config(999)  # should not raise
+
+
+class TestPveConfigPortForwarding:
+    """Tests for PVE config with port forwarding (Phase 3)."""
+
+    def test_pve_config_has_hooks_when_port_set(self):
+        """When port is set, PVE config has lxc.hook.start-host and post-stop."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  bridge="vmbr0", net_type="bridge",
+                                  port="10022:22")
+        assert "lxc.hook.start-host: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
+
+    def test_pve_config_omits_hooks_when_no_port(self):
+        """Without port, only lxc.hook.pre-mount is present."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "lxc.hook.pre-mount" in cfg
+        assert "lxc.hook.start-host" not in cfg
+        assert "lxc.hook.post-stop" not in cfg
+
+    def test_pve_config_pre_mount_always_present(self):
+        """pre-mount hook is always present regardless of port setting."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  bridge="vmbr0", net_type="bridge",
+                                  port="10022:22")
+        assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg

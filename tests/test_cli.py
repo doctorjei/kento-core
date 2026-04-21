@@ -895,3 +895,42 @@ class TestMacFlag:
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["mac"] == "52:54:00:11:22:33"
         assert mock_create.call_args[1]["start"] is True
+
+
+class TestPortNetworkValidation:
+    """Tests for --port + --network CLI-level validation (Phase 3)."""
+
+    def test_port_with_host_errors(self, capsys):
+        """--port with --network host exits with error."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--port", "10022:22", "--network", "host",
+                  "debian:12"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "host" in err or "none" in err
+
+    def test_port_with_none_errors(self, capsys):
+        """--port with --network none exits with error."""
+        with pytest.raises(SystemExit) as exc:
+            main(["create", "--port", "10022:22", "--network", "none",
+                  "debian:12"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "host" in err or "none" in err
+
+    def test_port_with_bridge_passes_to_create(self):
+        """--port with --network bridge reaches create() (valid for LXC)."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--port", "10022:22", "--network", "bridge=lxcbr0",
+                  "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["port"] == "10022:22"
+
+    def test_port_without_network_passes_to_create(self):
+        """--port without --network reaches create() (auto-detect)."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["create", "--port", "10022:22", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["port"] == "10022:22"

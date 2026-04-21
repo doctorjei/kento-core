@@ -979,3 +979,115 @@ class TestPveVmCreate:
                    net_type="bridge", bridge="vmbr0")
 
         assert not (vm_dir / "test" / "kento-port").exists()
+
+
+class TestLxcPortForwarding:
+    """Tests for --port in LXC/PVE modes (Phase 3: nftables DNAT)."""
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_writes_kento_port(self, mock_root, mock_layers,
+                                         mock_run, mock_free, tmp_path):
+        """create(mode=lxc, port=10022:22, bridge) writes kento-port file."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="lxc",
+                   port="10022:22", net_type="bridge", bridge="lxcbr0")
+
+        port_file = tmp_path / "test" / "kento-port"
+        assert port_file.is_file()
+        assert port_file.read_text().strip() == "10022:22"
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_config_has_start_host_hook(self, mock_root, mock_layers,
+                                             mock_run, mock_free, tmp_path):
+        """When port is set, LXC config includes lxc.hook.start-host."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="lxc",
+                   port="10022:22", net_type="bridge", bridge="lxcbr0")
+
+        cfg = (tmp_path / "test" / "config").read_text()
+        assert "lxc.hook.start-host" in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_config_omits_start_host_no_port(self, mock_root, mock_layers,
+                                                   mock_run, tmp_path):
+        """Without port, LXC config does NOT include lxc.hook.start-host."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+
+        cfg = (tmp_path / "test" / "config").read_text()
+        assert "lxc.hook.start-host" not in cfg
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_requires_bridge(self, mock_root, mock_layers, tmp_path):
+        """--port with net_type=none errors for LXC mode."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc",
+                       port="10022:22", net_type="none")
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_with_bridge_ok(self, mock_root, mock_layers,
+                                      mock_run, mock_free, tmp_path):
+        """--port + --network bridge is valid for LXC mode."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            # Should not raise
+            create("myimage:latest", name="test", mode="lxc",
+                   port="10022:22", net_type="bridge", bridge="lxcbr0")
+
+        assert (tmp_path / "test" / "kento-port").is_file()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_port_with_bridge_errors(self, mock_root, mock_layers, tmp_path):
+        """--port + --network bridge is invalid for VM mode."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       port="10022:22", net_type="bridge", bridge="vmbr0")
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_auto_allocates(self, mock_root, mock_layers,
+                                      mock_run, mock_free, tmp_path):
+        """--port auto allocates a port and defaults guest to 22."""
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base", return_value=lxc_base / "test"), \
+             patch("kento._bridge_exists", return_value=True), \
+             patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            create("myimage:latest", name="test", mode="lxc",
+                   port="auto", net_type="bridge", bridge="lxcbr0")
+
+        port = (lxc_base / "test" / "kento-port").read_text().strip()
+        assert port == "10022:22"
+

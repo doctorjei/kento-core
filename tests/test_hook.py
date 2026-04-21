@@ -84,3 +84,38 @@ def test_write_hook(tmp_path):
     content = hook.read_text()
     assert 'NAME="mycontainer"' in content
     assert 'LAYERS="/a:/b"' in content
+
+
+# --- Port forwarding (Phase 3) ---
+
+
+def test_generate_hook_has_start_host_case():
+    """Hook template includes start-host case for port forwarding."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "start-host)" in script
+
+
+def test_generate_hook_has_portfwd_active_cleanup():
+    """Hook template cleans up kento-portfwd-active in post-stop."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-portfwd-active" in script
+
+
+def test_generate_hook_start_host_reads_kento_port():
+    """start-host case reads kento-port file."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-port" in script
+
+
+def test_generate_hook_start_host_uses_nftables():
+    """start-host case uses nftables for DNAT."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "nft" in script
+    assert "dnat to" in script
+
+
+def test_generate_hook_start_host_has_ip_discovery():
+    """start-host case tries kento-net then lxc-info for IP discovery."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-net" in script
+    assert "lxc-info" in script

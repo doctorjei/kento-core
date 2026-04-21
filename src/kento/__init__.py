@@ -37,9 +37,11 @@ def resolve_network(net_type: str | None, bridge_name: str | None,
     - bridge: bridge name (str) or None
     - port: "host:guest" (str) or None
     """
-    # Port implies usermode if no explicit network set
+    # Port implies usermode if no explicit network set (VM/PVE-VM only).
+    # For LXC/PVE, port forwarding uses iptables DNAT which requires bridge.
     if port is not None and net_type is None:
-        net_type = "usermode"
+        if mode in ("vm", "pve-vm"):
+            net_type = "usermode"
 
     # Auto-detect if no network type specified
     if net_type is None:
