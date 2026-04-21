@@ -155,8 +155,7 @@ class TestGeneratePveConfig:
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
         assert "lxc.mount.auto: proc:rw sys:rw cgroup:rw" in cfg
         assert "lxc.tty.max: 2" in cfg
-        # Dropped fields should not appear
-        assert "arch: amd64" not in cfg
+        assert "arch: amd64" in cfg
         assert "memory:" not in cfg
         assert "swap:" not in cfg
         assert "cores:" not in cfg
@@ -233,6 +232,16 @@ class TestGeneratePveConfig:
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "lxc.hook.pre-start" not in cfg
         assert "lxc.hook.pre-mount" in cfg
+
+    def test_arch_arm64(self):
+        with patch("kento.pve.platform.machine", return_value="aarch64"):
+            cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "arch: arm64" in cfg
+
+    def test_arch_unknown_passthrough(self):
+        with patch("kento.pve.platform.machine", return_value="riscv64"):
+            cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "arch: riscv64" in cfg
 
 
 class TestWritePveConfig:

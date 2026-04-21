@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import socket
 import sys
 from pathlib import Path
@@ -11,6 +12,18 @@ from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 PVE_DIR = Path("/etc/pve")
 PVE_LXC_DIR = PVE_DIR / "lxc"
 PVE_QEMU_DIR = PVE_DIR / "qemu-server"
+
+_ARCH_MAP = {
+    "x86_64": "amd64",
+    "aarch64": "arm64",
+    "i686": "i386",
+    "i386": "i386",
+}
+
+
+def _pve_arch() -> str:
+    m = platform.machine()
+    return _ARCH_MAP.get(m, m)
 
 
 def _pve_node_name() -> str:
@@ -121,6 +134,7 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
+        f"arch: {_pve_arch()}",
         "ostype: unmanaged",
         f"hostname: {name}",
         f"rootfs: {container_dir}/rootfs",
