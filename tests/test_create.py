@@ -136,8 +136,11 @@ class TestCreate:
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", start=True)
 
-        mock_run.assert_called_once_with(
-            ["lxc-start", "-n", "test"], check=True,
+        lxc_calls = [c for c in mock_run.call_args_list
+                     if c[0][0][0] == "lxc-start"]
+        assert len(lxc_calls) == 1
+        assert lxc_calls[0] == (
+            (["lxc-start", "-n", "test"],), {"check": True},
         )
 
     @patch("kento.create.subprocess.run")
@@ -209,8 +212,11 @@ class TestCreate:
              patch("kento.pve.write_pve_config", return_value=Path("/etc/pve/lxc/100.conf")):
             create("myimage:latest", name="test", mode="pve", start=True)
 
-        mock_run.assert_called_once_with(
-            ["pct", "start", "100"], check=True,
+        pct_calls = [c for c in mock_run.call_args_list
+                     if c[0][0][0] == "pct"]
+        assert len(pct_calls) == 1
+        assert pct_calls[0] == (
+            (["pct", "start", "100"],), {"check": True},
         )
 
     @patch("kento.create.subprocess.run")
@@ -618,7 +624,11 @@ class TestSSHHostKeys:
     def test_ssh_keygen_not_found_errors(self, mock_root, mock_layers,
                                           mock_run, tmp_path):
         """If ssh-keygen is missing, a clear error is printed."""
-        mock_run.side_effect = FileNotFoundError("ssh-keygen")
+        def _side_effect(args, **kwargs):
+            if args[0] == "ssh-keygen":
+                raise FileNotFoundError("ssh-keygen")
+            return MagicMock(returncode=0)
+        mock_run.side_effect = _side_effect
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:

@@ -200,10 +200,14 @@ def test_destroy_vm_podman_unmount(mock_root, mock_run, tmp_path):
          patch("kento.vm.is_vm_running", return_value=False):
         destroy("testvm")
 
-    # VM mode should also unmount podman image
+    # VM mode should unmount podman image and remove hold container
     podman_calls = [c for c in mock_run.call_args_list
                     if c[0][0][0] in ("podman", "runuser")]
-    assert len(podman_calls) == 1
+    assert len(podman_calls) == 2
+    unmount_calls = [c for c in podman_calls if "unmount" in c[0][0]]
+    assert len(unmount_calls) == 1
+    hold_calls = [c for c in podman_calls if "rm" in c[0][0]]
+    assert len(hold_calls) == 1
 
 
 # --- PVE-VM mode tests ---
@@ -279,7 +283,11 @@ class TestDestroyPveVm:
              patch("kento.vm_hook.delete_snippets_wrapper"):
             destroy("test")
 
-        # PVE-VM mode should also unmount podman image
+        # PVE-VM mode should unmount podman image and remove hold container
         podman_calls = [c for c in mock_run.call_args_list
                         if c[0][0][0] in ("podman", "runuser")]
-        assert len(podman_calls) == 1
+        assert len(podman_calls) == 2
+        unmount_calls = [c for c in podman_calls if "unmount" in c[0][0]]
+        assert len(unmount_calls) == 1
+        hold_calls = [c for c in podman_calls if "rm" in c[0][0]]
+        assert len(hold_calls) == 1

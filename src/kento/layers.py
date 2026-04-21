@@ -40,3 +40,23 @@ def resolve_layers(image: str) -> str:
     if lower and lower != "<no value>":
         return f"{upper}:{lower}"
     return upper
+
+
+def create_image_hold(image: str, name: str) -> None:
+    """Create a stopped podman container to pin the image against pruning."""
+    hold_name = f"kento-hold.{name}"
+    subprocess.run(
+        [*_podman_cmd(), "create", "--name", hold_name,
+         "--label", f"io.kento.hold-for={name}",
+         image, "/bin/true"],
+        capture_output=True,
+    )
+
+
+def remove_image_hold(name: str) -> None:
+    """Remove the podman hold container for the given kento container."""
+    hold_name = f"kento-hold.{name}"
+    subprocess.run(
+        [*_podman_cmd(), "rm", hold_name],
+        capture_output=True,
+    )

@@ -79,6 +79,11 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
         delete_qm_config(int(vmid_str))
         delete_snippets_wrapper(int(vmid_str))
 
+    from kento.layers import remove_image_hold
+    name_file = container_dir / "kento-name"
+    hold_name = name_file.read_text().strip() if name_file.is_file() else name
+    remove_image_hold(hold_name)
+
     # Remove state dir if separate from container_dir
     if state_dir != container_dir and state_dir.is_dir():
         shutil.rmtree(state_dir)

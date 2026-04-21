@@ -287,6 +287,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
               file=sys.stderr)
         sys.exit(1)
 
+    from kento.layers import create_image_hold
+    create_image_hold(image, name)
+
     # Create directory structure — upper/work may be outside container_dir for sudo users
     state_dir = upper_base(container_id, base_dir if mode in ("vm", "pve-vm") else None)
     (container_dir / "rootfs").mkdir(parents=True)
