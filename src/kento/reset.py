@@ -1,4 +1,4 @@
-"""Scrub a kento-managed container back to clean OCI state."""
+"""Scrub a kento-managed instance back to clean OCI state."""
 
 import shutil
 import subprocess
@@ -22,7 +22,7 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
 
     # Refuse if running
     if is_running(container_dir, mode):
-        print(f"Error: container is running. Stop it first: kento container shutdown {name}",
+        print(f"Error: instance is running. Stop it first: kento stop {name}",
               file=sys.stderr)
         sys.exit(1)
 

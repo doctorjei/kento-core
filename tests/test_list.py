@@ -61,7 +61,7 @@ def test_list_empty(mock_run, tmp_path, capsys):
         list_containers()
 
     output = capsys.readouterr().out
-    assert "no kento-managed containers found" in output
+    assert "no instances found" in output
 
 
 # --- PVE mode tests ---
@@ -104,7 +104,7 @@ def test_list_pve_container(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "webbox" in output
-    assert "LXC" in output
+    assert "pve-lxc" in output
     assert "running" in output
 
 
@@ -135,8 +135,9 @@ def test_list_mixed_lxc_and_pve(mock_run, tmp_path, capsys):
     output = capsys.readouterr().out
     assert "mybox" in output
     assert "webbox" in output
-    # Both lxc and pve modes should show as TYPE "LXC"
-    assert "LXC" in output
+    # lxc mode shows as "lxc", pve mode shows as "pve-lxc"
+    assert "lxc" in output
+    assert "pve-lxc" in output
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
@@ -189,7 +190,7 @@ def test_list_vm_container(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "testvm" in output
-    assert "VM" in output
+    assert "vm" in output
     assert "stopped" in output
 
 
@@ -257,9 +258,9 @@ def test_list_mixed_lxc_pve_vm(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "mybox" in output
-    assert "LXC" in output
+    assert "lxc" in output
     assert "testvm" in output
-    assert "VM" in output
+    assert "vm" in output
 
 
 # --- TYPE column tests ---
@@ -267,7 +268,7 @@ def test_list_mixed_lxc_pve_vm(mock_run, tmp_path, capsys):
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
 def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
-    """Containers with mode 'lxc' should display TYPE 'LXC'."""
+    """Containers with mode 'lxc' should display TYPE 'lxc'."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("debian:12\n")
@@ -284,12 +285,12 @@ def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
     lines = output.strip().split("\n")
     # Data line (skip header + separator)
     data_line = lines[2]
-    assert "LXC" in data_line
+    assert "lxc" in data_line
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_pve_mode_shows_type_lxc(mock_run, tmp_path, capsys):
-    """Containers with mode 'pve' should display TYPE 'LXC'."""
+def test_pve_mode_shows_type_pve_lxc(mock_run, tmp_path, capsys):
+    """Containers with mode 'pve' should display TYPE 'pve-lxc'."""
     lxc_dir = tmp_path / "100"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("ubuntu:22.04\n")
@@ -306,13 +307,13 @@ def test_pve_mode_shows_type_lxc(mock_run, tmp_path, capsys):
     output = capsys.readouterr().out
     lines = output.strip().split("\n")
     data_line = lines[2]
-    assert "LXC" in data_line
-    assert "VM" not in data_line
+    assert "pve-lxc" in data_line
+    assert "pve-vm" not in data_line
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
 def test_vm_mode_shows_type_vm(mock_run, tmp_path, capsys):
-    """Containers with mode 'vm' should display TYPE 'VM'."""
+    """Containers with mode 'vm' should display TYPE 'vm'."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
     vm = tmp_path / "vm"
@@ -333,7 +334,7 @@ def test_vm_mode_shows_type_vm(mock_run, tmp_path, capsys):
     output = capsys.readouterr().out
     lines = output.strip().split("\n")
     data_line = lines[2]
-    assert "VM" in data_line
+    assert "vm" in data_line
 
 
 # --- Scope filtering tests ---
@@ -373,8 +374,8 @@ def test_scope_none_shows_all(mock_run, tmp_path, capsys):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
-def test_scope_container_shows_only_lxc(mock_run, tmp_path, capsys):
-    """scope='container' should show only LXC/PVE entries, not VMs."""
+def test_scope_lxc_shows_only_lxc(mock_run, tmp_path, capsys):
+    """scope='lxc' should show only LXC/PVE entries, not VMs."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
     vm = tmp_path / "vm"
@@ -398,7 +399,7 @@ def test_scope_container_shows_only_lxc(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers(scope="container")
+        list_containers(scope="lxc")
 
     output = capsys.readouterr().out
     assert "mybox" in output
@@ -412,7 +413,7 @@ class TestListPveVm:
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
     @patch("kento.list.is_running", return_value=False)
     def test_pve_vm_shows_as_vm_type(self, mock_is_running, mock_run, tmp_path, capsys):
-        """Containers with mode 'pve-vm' should display TYPE 'VM'."""
+        """Containers with mode 'pve-vm' should display TYPE 'pve-vm'."""
         lxc = tmp_path / "lxc"
         vm = tmp_path / "vm"
         lxc.mkdir()
@@ -434,7 +435,7 @@ class TestListPveVm:
         assert "test" in output
         lines = output.strip().split("\n")
         data_line = lines[2]
-        assert "VM" in data_line
+        assert "pve-vm" in data_line
 
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
     @patch("kento.list.is_running", return_value=False)
@@ -461,8 +462,8 @@ class TestListPveVm:
         assert "test" in output
 
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
-    def test_pve_vm_excluded_from_container_scope(self, mock_run, tmp_path, capsys):
-        """Containers with mode 'pve-vm' should NOT appear with scope='container'."""
+    def test_pve_vm_excluded_from_lxc_scope(self, mock_run, tmp_path, capsys):
+        """Containers with mode 'pve-vm' should NOT appear with scope='lxc'."""
         lxc = tmp_path / "lxc"
         vm = tmp_path / "vm"
         lxc.mkdir()
@@ -477,10 +478,10 @@ class TestListPveVm:
 
         with patch("kento.list.LXC_BASE", lxc), \
              patch("kento.list.VM_BASE", vm):
-            list_containers(scope="container")
+            list_containers(scope="lxc")
 
         output = capsys.readouterr().out
-        assert "test" not in output or "no kento-managed" in output
+        assert "test" not in output or "no instances found" in output
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)

@@ -1,4 +1,4 @@
-"""List kento-managed containers."""
+"""List kento-managed instances."""
 
 import subprocess
 from pathlib import Path
@@ -7,14 +7,10 @@ from kento import LXC_BASE, VM_BASE, is_running, read_mode
 
 
 def list_containers(scope: str | None = None) -> None:
-    found = False
+    rows = []
 
-    print(f"{'NAME':<20} {'TYPE':<6} {'IMAGE':<30} {'STATUS':<10} UPPER SIZE")
-    print(f"{'----':<20} {'----':<6} {'-----':<30} {'------':<10} ----------")
-
-    # Collect kento-image files from the relevant base directories
     image_files = []
-    if scope in (None, "container"):
+    if scope in (None, "lxc"):
         if LXC_BASE.is_dir():
             image_files.extend(LXC_BASE.glob("*/kento-image"))
     if scope in (None, "vm"):
@@ -22,20 +18,16 @@ def list_containers(scope: str | None = None) -> None:
             image_files.extend(VM_BASE.glob("*/kento-image"))
 
     for image_file in sorted(image_files, key=lambda f: f.parent.name):
-        found = True
         container_dir = image_file.parent
         container_id = container_dir.name
         image = image_file.read_text().strip()
 
-        # Display name from kento-name file (falls back to dir name)
         name_file = container_dir / "kento-name"
         display_name = name_file.read_text().strip() if name_file.is_file() else container_id
 
-        # Detect mode and derive TYPE
         mode = read_mode(container_dir)
-        ctype = "VM" if mode in ("vm", "pve-vm") else "LXC"
+        ctype = "pve-lxc" if mode == "pve" else mode
 
-        # Status check
         status = "running" if is_running(container_dir, mode) else "stopped"
 
         state_file = container_dir / "kento-state"
@@ -50,7 +42,19 @@ def list_containers(scope: str | None = None) -> None:
         else:
             upper_size = "0"
 
-        print(f"{display_name:<20} {ctype:<6} {image:<30} {status:<10} {upper_size}")
+        rows.append((display_name, ctype, image, status, upper_size))
 
-    if not found:
-        print("(no kento-managed containers found)")
+    if not rows:
+        print("(no instances found)")
+        return
+
+    headers = ("NAME", "TYPE", "IMAGE", "STATUS", "UPPER SIZE")
+    widths = []
+    for i, header in enumerate(headers):
+        col_max = max((len(row[i]) for row in rows), default=0)
+        widths.append(max(len(header), col_max))
+
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print("  ".join(val.ljust(w) for val, w in zip(row, widths)))

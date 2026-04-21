@@ -1,4 +1,4 @@
-"""Start a kento-managed container."""
+"""Start a kento-managed instance."""
 
 import subprocess
 from pathlib import Path

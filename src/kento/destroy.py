@@ -1,4 +1,4 @@
-"""Remove a kento-managed container."""
+"""Remove a kento-managed instance."""
 
 import shutil
 import subprocess
@@ -27,8 +27,8 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
     running = is_running(container_dir, mode)
 
     if running and not force:
-        print(f"Error: container {name} is running. "
-              f"Use 'kento container destroy -f {name}' to force removal.",
+        print(f"Error: instance {name} is running. "
+              f"Use 'kento lxc destroy -f {name}' or 'kento vm destroy -f {name}' to force removal.",
               file=sys.stderr)
         sys.exit(1)
 

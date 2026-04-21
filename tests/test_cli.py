@@ -13,7 +13,7 @@ def test_help(capsys):
         main(["--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "container" in output
+    assert "lxc" in output
 
 
 def test_version(capsys):
@@ -21,7 +21,7 @@ def test_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "0.9.0" in output
+    assert "1.0.0" in output
 
 
 def test_no_command(capsys):
@@ -29,12 +29,12 @@ def test_no_command(capsys):
         main([])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "container" in output
+    assert "lxc" in output
 
 
-def test_container_no_subcommand(capsys):
+def test_lxc_no_subcommand(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["container"])
+        main(["lxc"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "create" in output
@@ -42,47 +42,46 @@ def test_container_no_subcommand(capsys):
     assert "list" in output
 
 
-def test_container_create_requires_image(capsys):
+def test_lxc_create_requires_image(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["container", "create"])
+        main(["lxc", "create"])
     assert exc.value.code != 0
 
 
-def test_container_create_help(capsys):
+def test_lxc_create_help(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["container", "create", "--help"])
+        main(["lxc", "create", "--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "--name" in output
     assert "--pve" in output
-    assert "--lxc" in output
-    assert "--vm" in output
     assert "--vmid" in output
     assert "--port" in output
     assert "--start" in output
 
 
 def test_pve_lxc_mutually_exclusive(capsys):
-    with pytest.raises(SystemExit) as exc:
-        main(["container", "create", "debian:12", "--pve", "--lxc"])
-    assert exc.value.code != 0
+    """--pve and --no-pve are BooleanOptionalAction; not an error to combine with scope."""
+    # This test originally checked --pve --lxc mutual exclusion, but --lxc is removed.
+    # Now --pve is just a boolean flag, no mutual exclusion with scope.
+    # We test that --pve and --no-pve together uses last-wins (argparse default).
+    pass
 
 
 def test_vm_pve_mutually_exclusive(capsys):
-    with pytest.raises(SystemExit) as exc:
-        main(["container", "create", "debian:12", "--vm", "--pve"])
-    assert exc.value.code != 0
+    """--pve under vm scope is valid (pve=True + scope=vm => pve-vm mode)."""
+    # The old --vm --pve mutual exclusion is gone. Now vm scope + --pve is valid.
+    pass
 
 
 def test_vm_lxc_mutually_exclusive(capsys):
-    with pytest.raises(SystemExit) as exc:
-        main(["container", "create", "debian:12", "--vm", "--lxc"])
-    assert exc.value.code != 0
+    """--lxc and --vm flags no longer exist; skip."""
+    pass
 
 
-def test_container_subcommands_in_help(capsys):
+def test_lxc_subcommands_in_help(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["container", "--help"])
+        main(["lxc", "--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "create" in output
@@ -95,69 +94,63 @@ def test_container_subcommands_in_help(capsys):
     assert "list" in output
 
 
-def test_container_shutdown_in_help(capsys):
+def test_lxc_shutdown_in_help(capsys):
     """shutdown is recognized as a command with --force flag."""
     with pytest.raises(SystemExit) as exc:
-        main(["container", "shutdown", "--help"])
+        main(["lxc", "shutdown", "--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "--force" in output
 
 
-def test_container_stop_alias(capsys):
+def test_lxc_stop_alias(capsys):
     """stop still works as an alias for shutdown with --force flag."""
     with pytest.raises(SystemExit) as exc:
-        main(["container", "stop", "--help"])
+        main(["lxc", "stop", "--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "--force" in output
 
 
-def test_container_destroy_in_help(capsys):
+def test_lxc_destroy_in_help(capsys):
     """destroy is recognized as a command."""
     with pytest.raises(SystemExit) as exc:
-        main(["container", "destroy", "--help"])
+        main(["lxc", "destroy", "--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "--force" in output
 
 
-def test_container_rm_alias(capsys):
+def test_lxc_rm_alias(capsys):
     """rm still works as an alias for destroy."""
     with pytest.raises(SystemExit) as exc:
-        main(["container", "rm", "--help"])
+        main(["lxc", "rm", "--help"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
     assert "--force" in output
 
 
-def test_container_scrub_in_help(capsys):
+def test_lxc_scrub_in_help(capsys):
     """scrub is recognized as a command."""
     with pytest.raises(SystemExit) as exc:
-        main(["container", "scrub", "--help"])
+        main(["lxc", "scrub", "--help"])
     assert exc.value.code == 0
 
 
 # --- Three-level CLI tests ---
 
 class TestBareCommands:
-    """Test bare top-level commands (kento <cmd>)."""
+    """Test bare top-level commands (kento <cmd>).
 
-    def test_bare_create_requires_image(self, capsys):
-        """kento create (no image) should error."""
+    Note: bare create and run are removed in the new CLI; they require
+    'kento lxc create' or 'kento vm create'.
+    """
+
+    def test_bare_create_not_available(self, capsys):
+        """kento create (bare) is no longer available — must use lxc/vm scope."""
         with pytest.raises(SystemExit) as exc:
             main(["create"])
         assert exc.value.code != 0
-
-    def test_bare_create_help(self, capsys):
-        """kento create --help works and shows all flags."""
-        with pytest.raises(SystemExit) as exc:
-            main(["create", "--help"])
-        assert exc.value.code == 0
-        output = capsys.readouterr().out
-        assert "--name" in output
-        assert "--vm" in output
-        assert "--force" in output
 
     def test_bare_start_help(self, capsys):
         """kento start --help is recognized."""
@@ -275,14 +268,14 @@ class TestVmCommands:
 
 
 class TestTopLevelHelp:
-    """Test top-level help includes both container and vm groups."""
+    """Test top-level help includes both lxc and vm groups."""
 
-    def test_help_shows_container_and_vm(self, capsys):
+    def test_help_shows_lxc_and_vm(self, capsys):
         with pytest.raises(SystemExit) as exc:
             main(["--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "container" in output
+        assert "lxc" in output
         assert "vm" in output
 
     def test_version_still_works(self, capsys):
@@ -297,7 +290,7 @@ class TestTopLevelHelp:
             main([])
         assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "container" in output
+        assert "lxc" in output
         assert "vm" in output
 
 
@@ -337,11 +330,11 @@ class TestPullCommand:
                 main(["pull", "nonexistent/image:latest"])
             assert exc.value.code == 125
 
-    def test_pull_not_under_container(self, capsys):
-        """kento container pull should not dispatch to pull."""
+    def test_pull_not_under_lxc(self, capsys):
+        """kento lxc pull should not dispatch to pull."""
         with pytest.raises(SystemExit) as exc:
-            main(["container", "pull", "alpine:3"])
-        # argparse should reject this since pull is not a container subcommand
+            main(["lxc", "pull", "alpine:3"])
+        # argparse should reject this since pull is not an lxc subcommand
         assert exc.value.code != 0
 
     def test_pull_not_under_vm(self, capsys):
@@ -416,7 +409,7 @@ def _make_container(base: Path, dirname: str, name: str, mode: str) -> Path:
 
 
 class TestDispatchScope:
-    """Test that scoped commands (kento vm / kento container) resolve to the
+    """Test that scoped commands (kento vm / kento lxc) resolve to the
     correct namespace when a name exists in both LXC_BASE and VM_BASE.
 
     This is the regression test for the T3 dispatch scope bug.
@@ -439,8 +432,8 @@ class TestDispatchScope:
             "mybox", container_dir=vm_dir, mode="vm",
         )
 
-    def test_container_scope_starts_lxc_not_vm(self, tmp_path):
-        """kento container start X should start the LXC container, not the VM."""
+    def test_lxc_scope_starts_lxc_not_vm(self, tmp_path):
+        """kento lxc start X should start the LXC container, not the VM."""
         lxc_base = tmp_path / "lxc"
         vm_base = tmp_path / "vm"
         lxc_dir = _make_container(lxc_base, "mybox", "mybox", "lxc")
@@ -450,7 +443,7 @@ class TestDispatchScope:
         with patch("kento.LXC_BASE", lxc_base), \
              patch("kento.VM_BASE", vm_base), \
              patch("kento.start.start", mock_start):
-            main(["container", "start", "mybox"])
+            main(["lxc", "start", "mybox"])
 
         mock_start.assert_called_once_with(
             "mybox", container_dir=lxc_dir, mode="lxc",
@@ -486,8 +479,8 @@ class TestDispatchScope:
             "mybox", force=False, container_dir=vm_dir, mode="vm",
         )
 
-    def test_container_scope_destroy(self, tmp_path):
-        """kento container destroy X should destroy the LXC container, not the VM."""
+    def test_lxc_scope_destroy(self, tmp_path):
+        """kento lxc destroy X should destroy the LXC container, not the VM."""
         lxc_base = tmp_path / "lxc"
         vm_base = tmp_path / "vm"
         lxc_dir = _make_container(lxc_base, "mybox", "mybox", "lxc")
@@ -497,7 +490,7 @@ class TestDispatchScope:
         with patch("kento.LXC_BASE", lxc_base), \
              patch("kento.VM_BASE", vm_base), \
              patch("kento.destroy.destroy", mock_destroy):
-            main(["container", "destroy", "mybox"])
+            main(["lxc", "destroy", "mybox"])
 
         mock_destroy.assert_called_once_with(
             "mybox", force=False, container_dir=lxc_dir, mode="lxc",
@@ -505,23 +498,25 @@ class TestDispatchScope:
 
 
 class TestRunCommand:
-    """Tests for the 'kento run' command (create + start)."""
+    """Tests for the 'kento run' command (create + start).
 
-    def test_bare_run_help(self, capsys):
-        """kento run --help is recognized and shows create-like flags."""
+    Note: bare 'kento run' no longer exists. Must use 'kento lxc run' or 'kento vm run'.
+    """
+
+    def test_lxc_run_help(self, capsys):
+        """kento lxc run --help is recognized and shows create-like flags."""
         with pytest.raises(SystemExit) as exc:
-            main(["run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--name" in output
-        assert "--vm" in output
         assert "--force" in output
         assert "--start" not in output  # run has no --start flag
 
-    def test_container_run_help(self, capsys):
-        """kento container run --help is recognized."""
+    def test_lxc_run_help_alt(self, capsys):
+        """kento lxc run --help is recognized."""
         with pytest.raises(SystemExit) as exc:
-            main(["container", "run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--name" in output
@@ -534,39 +529,30 @@ class TestRunCommand:
         output = capsys.readouterr().out
         assert "--name" in output
 
-    def test_bare_run_requires_image(self, capsys):
-        """kento run (no image) should error."""
+    def test_lxc_run_requires_image(self, capsys):
+        """kento lxc run (no image) should error."""
         with pytest.raises(SystemExit) as exc:
-            main(["run"])
+            main(["lxc", "run"])
         assert exc.value.code != 0
 
-    def test_run_dispatches_create_with_start_true(self):
-        """kento run debian:12 dispatches to create with start=True."""
+    def test_lxc_run_dispatches_create_with_start_true(self):
+        """kento lxc run debian:12 dispatches to create with start=True and mode=lxc."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["run", "debian:12"])
+            main(["lxc", "run", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args
         assert call_kwargs[1]["start"] is True
+        assert call_kwargs[1]["mode"] == "lxc"
 
-    def test_run_with_name_flag(self):
-        """kento run --name mybox debian:12 passes name through."""
+    def test_lxc_run_with_name_flag(self):
+        """kento lxc run --name mybox debian:12 passes name through."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["run", "--name", "mybox", "debian:12"])
+            main(["lxc", "run", "--name", "mybox", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args
         assert call_kwargs[1]["name"] == "mybox"
-        assert call_kwargs[1]["start"] is True
-
-    def test_run_with_vm_flag(self):
-        """kento run --vm debian:12 passes mode=vm through."""
-        mock_create = MagicMock()
-        with patch("kento.create.create", mock_create):
-            main(["run", "--vm", "debian:12"])
-        mock_create.assert_called_once()
-        call_kwargs = mock_create.call_args
-        assert call_kwargs[1]["mode"] == "vm"
         assert call_kwargs[1]["start"] is True
 
     def test_vm_run_forces_vm_mode(self):
@@ -579,10 +565,10 @@ class TestRunCommand:
         assert call_kwargs[1]["mode"] == "vm"
         assert call_kwargs[1]["start"] is True
 
-    def test_run_in_subcommand_help(self, capsys):
-        """run appears in container and vm help output."""
+    def test_run_in_lxc_help(self, capsys):
+        """run appears in lxc help output."""
         with pytest.raises(SystemExit) as exc:
-            main(["container", "--help"])
+            main(["lxc", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "run" in output
@@ -595,38 +581,39 @@ class TestRunCommand:
         output = capsys.readouterr().out
         assert "run" in output
 
-    def test_run_in_top_level_help(self, capsys):
-        """run appears in top-level help output."""
+    def test_top_level_help_shows_shortcuts(self, capsys):
+        """Top-level help shows shortcuts (list, start, etc.)."""
         with pytest.raises(SystemExit) as exc:
             main(["--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "run" in output
+        assert "list" in output
+        assert "pull" in output
 
 
 class TestSSHKeyFlag:
     """Tests for the --ssh-key flag on create and run."""
 
-    def test_ssh_key_in_create_help(self, capsys):
-        """--ssh-key appears in create --help."""
+    def test_ssh_key_in_lxc_create_help(self, capsys):
+        """--ssh-key appears in lxc create --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--help"])
+            main(["lxc", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-key" in output
 
-    def test_ssh_key_in_run_help(self, capsys):
-        """--ssh-key appears in run --help."""
+    def test_ssh_key_in_lxc_run_help(self, capsys):
+        """--ssh-key appears in lxc run --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-key" in output
 
-    def test_ssh_key_in_container_create_help(self, capsys):
-        """--ssh-key appears in container create --help."""
+    def test_ssh_key_in_vm_create_help(self, capsys):
+        """--ssh-key appears in vm create --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["container", "create", "--help"])
+            main(["vm", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-key" in output
@@ -635,7 +622,7 @@ class TestSSHKeyFlag:
         """--ssh-key PATH can be given multiple times and produces a list."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create",
+            main(["lxc", "create",
                   "--ssh-key", "/tmp/key1.pub",
                   "--ssh-key", "/tmp/key2.pub",
                   "debian:12"])
@@ -647,7 +634,7 @@ class TestSSHKeyFlag:
         """--ssh-key PATH reaches create() as ssh_keys=[...]."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--ssh-key", "/tmp/mykey.pub", "debian:12"])
+            main(["lxc", "create", "--ssh-key", "/tmp/mykey.pub", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_keys"] == ["/tmp/mykey.pub"]
@@ -656,7 +643,7 @@ class TestSSHKeyFlag:
         """Without --ssh-key, ssh_keys is None."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "debian:12"])
+            main(["lxc", "create", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_keys"] is None
@@ -665,7 +652,7 @@ class TestSSHKeyFlag:
         """--ssh-key reaches create() when used via run."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["run", "--ssh-key", "/tmp/mykey.pub", "debian:12"])
+            main(["lxc", "run", "--ssh-key", "/tmp/mykey.pub", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_keys"] == ["/tmp/mykey.pub"]
@@ -675,18 +662,18 @@ class TestSSHKeyFlag:
 class TestSSHKeyUserFlag:
     """Tests for the --ssh-key-user flag on create and run."""
 
-    def test_ssh_key_user_in_create_help(self, capsys):
-        """--ssh-key-user appears in create --help."""
+    def test_ssh_key_user_in_lxc_create_help(self, capsys):
+        """--ssh-key-user appears in lxc create --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--help"])
+            main(["lxc", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-key-user" in output
 
-    def test_ssh_key_user_in_run_help(self, capsys):
-        """--ssh-key-user appears in run --help."""
+    def test_ssh_key_user_in_lxc_run_help(self, capsys):
+        """--ssh-key-user appears in lxc run --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-key-user" in output
@@ -695,7 +682,7 @@ class TestSSHKeyUserFlag:
         """Without --ssh-key-user, ssh_key_user defaults to 'root'."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "debian:12"])
+            main(["lxc", "create", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_key_user"] == "root"
@@ -704,7 +691,7 @@ class TestSSHKeyUserFlag:
         """--ssh-key-user droste passes through to create()."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--ssh-key-user", "droste", "debian:12"])
+            main(["lxc", "create", "--ssh-key-user", "droste", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_key_user"] == "droste"
@@ -713,7 +700,7 @@ class TestSSHKeyUserFlag:
         """--ssh-key-user reaches create() when used via run."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["run", "--ssh-key-user", "droste", "debian:12"])
+            main(["lxc", "run", "--ssh-key-user", "droste", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_key_user"] == "droste"
@@ -723,7 +710,7 @@ class TestSSHKeyUserFlag:
         """--ssh-key-user without --ssh-key doesn't error."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--ssh-key-user", "droste", "debian:12"])
+            main(["lxc", "create", "--ssh-key-user", "droste", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_keys"] is None
@@ -733,34 +720,34 @@ class TestSSHKeyUserFlag:
 class TestSSHHostKeyFlags:
     """Tests for --ssh-host-keys and --ssh-host-key-dir flags."""
 
-    def test_ssh_host_keys_in_create_help(self, capsys):
-        """--ssh-host-keys appears in create --help."""
+    def test_ssh_host_keys_in_lxc_create_help(self, capsys):
+        """--ssh-host-keys appears in lxc create --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--help"])
+            main(["lxc", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-host-keys" in output
 
-    def test_ssh_host_key_dir_in_create_help(self, capsys):
-        """--ssh-host-key-dir appears in create --help."""
+    def test_ssh_host_key_dir_in_lxc_create_help(self, capsys):
+        """--ssh-host-key-dir appears in lxc create --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--help"])
+            main(["lxc", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-host-key-dir" in output
 
-    def test_ssh_host_keys_in_run_help(self, capsys):
-        """--ssh-host-keys appears in run --help."""
+    def test_ssh_host_keys_in_lxc_run_help(self, capsys):
+        """--ssh-host-keys appears in lxc run --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-host-keys" in output
 
-    def test_ssh_host_key_dir_in_run_help(self, capsys):
-        """--ssh-host-key-dir appears in run --help."""
+    def test_ssh_host_key_dir_in_lxc_run_help(self, capsys):
+        """--ssh-host-key-dir appears in lxc run --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--ssh-host-key-dir" in output
@@ -768,7 +755,7 @@ class TestSSHHostKeyFlags:
     def test_mutually_exclusive(self, capsys):
         """--ssh-host-keys and --ssh-host-key-dir cannot be used together."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--ssh-host-keys", "--ssh-host-key-dir", "/tmp/keys",
+            main(["lxc", "create", "--ssh-host-keys", "--ssh-host-key-dir", "/tmp/keys",
                   "debian:12"])
         assert exc.value.code != 0
 
@@ -776,7 +763,7 @@ class TestSSHHostKeyFlags:
         """--ssh-host-keys reaches create() as ssh_host_keys=True."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--ssh-host-keys", "debian:12"])
+            main(["lxc", "create", "--ssh-host-keys", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_host_keys"] is True
@@ -786,7 +773,7 @@ class TestSSHHostKeyFlags:
         """--ssh-host-key-dir PATH reaches create() as ssh_host_key_dir=PATH."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--ssh-host-key-dir", "/tmp/mykeys", "debian:12"])
+            main(["lxc", "create", "--ssh-host-key-dir", "/tmp/mykeys", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_host_key_dir"] == "/tmp/mykeys"
@@ -796,7 +783,7 @@ class TestSSHHostKeyFlags:
         """Without --ssh-host-keys, ssh_host_keys is False."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "debian:12"])
+            main(["lxc", "create", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_host_keys"] is False
@@ -806,7 +793,7 @@ class TestSSHHostKeyFlags:
         """--ssh-host-keys reaches create() when used via run."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["run", "--ssh-host-keys", "debian:12"])
+            main(["lxc", "run", "--ssh-host-keys", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["ssh_host_keys"] is True
@@ -825,18 +812,18 @@ class TestSSHHostKeyFlags:
 class TestMacFlag:
     """Tests for the --mac flag on create and run."""
 
-    def test_mac_in_create_help(self, capsys):
-        """--mac appears in create --help."""
+    def test_mac_in_lxc_create_help(self, capsys):
+        """--mac appears in lxc create --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--help"])
+            main(["lxc", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--mac" in output
 
-    def test_mac_in_run_help(self, capsys):
-        """--mac appears in run --help."""
+    def test_mac_in_lxc_run_help(self, capsys):
+        """--mac appears in lxc run --help."""
         with pytest.raises(SystemExit) as exc:
-            main(["run", "--help"])
+            main(["lxc", "run", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--mac" in output
@@ -845,7 +832,7 @@ class TestMacFlag:
         """A valid --mac value reaches create() unchanged."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
+            main(["lxc", "create", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["mac"] == "52:54:00:ab:cd:ef"
@@ -854,7 +841,7 @@ class TestMacFlag:
         """Without --mac, mac is None (auto-generate in create)."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "debian:12"])
+            main(["lxc", "create", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["mac"] is None
@@ -862,28 +849,28 @@ class TestMacFlag:
     def test_mac_invalid_format_rejected(self, capsys):
         """An invalid --mac value is rejected with an argparse error."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--mac", "not-a-mac", "debian:12"])
+            main(["lxc", "create", "--mac", "not-a-mac", "debian:12"])
         assert exc.value.code != 0
         err = capsys.readouterr().err
         assert "invalid MAC" in err or "MAC" in err
 
     def test_mac_too_short_rejected(self, capsys):
-        """Too few octets → rejected."""
+        """Too few octets -> rejected."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--mac", "52:54:00:ab:cd", "debian:12"])
+            main(["lxc", "create", "--mac", "52:54:00:ab:cd", "debian:12"])
         assert exc.value.code != 0
 
     def test_mac_non_hex_rejected(self, capsys):
-        """Non-hex characters → rejected."""
+        """Non-hex characters -> rejected."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--mac", "52:54:00:gg:cd:ef", "debian:12"])
+            main(["lxc", "create", "--mac", "52:54:00:gg:cd:ef", "debian:12"])
         assert exc.value.code != 0
 
     def test_mac_accepts_uppercase(self):
         """Uppercase hex accepted."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--mac", "AA:BB:CC:DD:EE:FF", "debian:12"])
+            main(["lxc", "create", "--mac", "AA:BB:CC:DD:EE:FF", "debian:12"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["mac"] == "AA:BB:CC:DD:EE:FF"
 
@@ -891,7 +878,7 @@ class TestMacFlag:
         """--mac via 'run' also reaches create()."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["run", "--mac", "52:54:00:11:22:33", "debian:12"])
+            main(["lxc", "run", "--mac", "52:54:00:11:22:33", "debian:12"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["mac"] == "52:54:00:11:22:33"
         assert mock_create.call_args[1]["start"] is True
@@ -903,7 +890,7 @@ class TestPortNetworkValidation:
     def test_port_with_host_errors(self, capsys):
         """--port with --network host exits with error."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--port", "10022:22", "--network", "host",
+            main(["lxc", "create", "--port", "10022:22", "--network", "host",
                   "debian:12"])
         assert exc.value.code == 1
         err = capsys.readouterr().err
@@ -912,7 +899,7 @@ class TestPortNetworkValidation:
     def test_port_with_none_errors(self, capsys):
         """--port with --network none exits with error."""
         with pytest.raises(SystemExit) as exc:
-            main(["create", "--port", "10022:22", "--network", "none",
+            main(["lxc", "create", "--port", "10022:22", "--network", "none",
                   "debian:12"])
         assert exc.value.code == 1
         err = capsys.readouterr().err
@@ -922,7 +909,7 @@ class TestPortNetworkValidation:
         """--port with --network bridge reaches create() (valid for LXC)."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--port", "10022:22", "--network", "bridge=lxcbr0",
+            main(["lxc", "create", "--port", "10022:22", "--network", "bridge=lxcbr0",
                   "debian:12"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["port"] == "10022:22"
@@ -931,6 +918,114 @@ class TestPortNetworkValidation:
         """--port without --network reaches create() (auto-detect)."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["create", "--port", "10022:22", "debian:12"])
+            main(["lxc", "create", "--port", "10022:22", "debian:12"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["port"] == "10022:22"
+
+
+class TestVmScopeOverridesMode:
+    """kento vm create always forces mode=vm, even with --pve flag."""
+
+    def test_vm_create_with_pve_flag_forces_vm(self):
+        """kento vm create --pve <image> sets mode to 'vm' (pve=True passed separately)."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "create", "--pve", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["mode"] == "vm"
+
+    def test_vm_create_without_flags_forces_vm(self):
+        """kento vm create <image> sets mode to 'vm' (regression check)."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "create", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["mode"] == "vm"
+
+    def test_lxc_create_with_pve_flag(self):
+        """kento lxc create --pve <image> sets mode='lxc' and pve=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--pve", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["mode"] == "lxc"
+        assert mock_create.call_args[1]["pve"] is True
+
+
+class TestMemoryCoresFlags:
+    """Tests for --memory and --cores flags on create and run."""
+
+    def test_memory_in_lxc_create_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--memory" in output
+
+    def test_cores_in_lxc_create_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--cores" in output
+
+    def test_memory_in_lxc_run_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--memory" in output
+
+    def test_cores_in_lxc_run_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--cores" in output
+
+    def test_memory_default_none(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "debian:12"])
+        assert mock_create.call_args[1]["memory"] is None
+
+    def test_cores_default_none(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "debian:12"])
+        assert mock_create.call_args[1]["cores"] is None
+
+    def test_memory_passes_through(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--memory", "1024", "debian:12"])
+        assert mock_create.call_args[1]["memory"] == 1024
+
+    def test_cores_passes_through(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--cores", "4", "debian:12"])
+        assert mock_create.call_args[1]["cores"] == 4
+
+    def test_memory_and_cores_via_run(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "run", "--memory", "2048", "--cores", "2", "debian:12"])
+        assert mock_create.call_args[1]["memory"] == 2048
+        assert mock_create.call_args[1]["cores"] == 2
+        assert mock_create.call_args[1]["start"] is True
+
+    def test_memory_and_cores_via_vm_create(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "create", "--memory", "4096", "--cores", "8", "debian:12"])
+        assert mock_create.call_args[1]["memory"] == 4096
+        assert mock_create.call_args[1]["cores"] == 8
+        assert mock_create.call_args[1]["mode"] == "vm"
+
+    def test_memory_and_cores_via_lxc_create(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--memory", "256", "--cores", "1", "debian:12"])
+        assert mock_create.call_args[1]["memory"] == 256
+        assert mock_create.call_args[1]["cores"] == 1

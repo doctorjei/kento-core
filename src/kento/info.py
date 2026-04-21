@@ -1,4 +1,4 @@
-"""Show container details."""
+"""Show instance details."""
 
 import json
 import os

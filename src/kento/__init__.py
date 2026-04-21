@@ -5,7 +5,7 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "0.10.0"
+__version__ = "1.0.0"
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
@@ -208,7 +208,7 @@ def resolve_container(name: str, scan_dir: Path | None = None) -> Path:
                     if (d / "kento-image").is_file():
                         return d
 
-    print(f"Error: container not found: {name}", file=sys.stderr)
+    print(f"Error: instance not found: {name}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -235,12 +235,12 @@ def _scan_namespace(name: str, base: Path) -> Path | None:
 
 
 def resolve_in_namespace(name: str, namespace: str) -> Path:
-    """Resolve a name within a specific namespace ('container' or 'vm').
+    """Resolve a name within a specific namespace ('lxc'/'container' or 'vm').
 
-    Searches only LXC_BASE (for 'container') or VM_BASE (for 'vm').
+    Searches only LXC_BASE (for 'lxc'/'container') or VM_BASE (for 'vm').
     Exits with error if not found.
     """
-    base = LXC_BASE if namespace == "container" else VM_BASE
+    base = LXC_BASE if namespace in ("container", "lxc") else VM_BASE
     result = _scan_namespace(name, base)
     if result is not None:
         return result
@@ -259,8 +259,8 @@ def resolve_any(name: str) -> tuple[Path, str]:
 
     if lxc_hit and vm_hit:
         print(
-            f"Ambiguous: '{name}' exists as both LXC container and VM. "
-            "Use 'kento container <cmd>' or 'kento vm <cmd>'.",
+            f"Ambiguous: '{name}' exists as both LXC and VM instance. "
+            "Use 'kento lxc <cmd>' or 'kento vm <cmd>'.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -271,7 +271,7 @@ def resolve_any(name: str) -> tuple[Path, str]:
     if vm_hit:
         return vm_hit, read_mode(vm_hit, "vm")
 
-    print(f"Error: No container or VM named '{name}'", file=sys.stderr)
+    print(f"Error: no instance named '{name}'", file=sys.stderr)
     sys.exit(1)
 
 
@@ -281,7 +281,7 @@ def check_name_conflict(name: str, target_namespace: str) -> bool:
     Returns True if a conflict exists, False otherwise.
     Does not error — the caller decides what to do.
     """
-    if target_namespace == "container":
+    if target_namespace in ("container", "lxc"):
         other_base = VM_BASE
     else:
         other_base = LXC_BASE

@@ -1,10 +1,10 @@
-"""Create a container backed by an OCI image."""
+"""Create an instance backed by an OCI image."""
 
 import subprocess
 import sys
 from pathlib import Path
 
-from kento import LXC_BASE, VM_BASE, require_root, upper_base, detect_mode, sanitize_image_name, next_instance_name
+from kento import LXC_BASE, VM_BASE, require_root, upper_base, sanitize_image_name, next_instance_name
 from kento.cloudinit import detect_cloudinit, write_seed
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
@@ -17,7 +17,9 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     nesting: bool = True,
                     ip: str | None = None, gateway: str | None = None,
                     env: list[str] | None = None,
-                    port: str | None = None) -> str:
+                    port: str | None = None,
+                    memory: int | None = None,
+                    cores: int | None = None) -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
         f"lxc.uts.name = {name}",
@@ -72,6 +74,10 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
     if env:
         for e in env:
             lines.append(f"lxc.environment = {e}")
+    if memory is not None:
+        lines.append(f"lxc.cgroup2.memory.max = {memory * 1048576}")
+    if cores is not None:
+        lines.append(f"lxc.cgroup2.cpu.max = {cores * 100000} 100000")
 
     return "\n".join(lines) + "\n"
 
@@ -154,8 +160,10 @@ def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
 
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
            nesting: bool = True,
-           start: bool = False, mode: str | None = None,
-           vmid: int = 0, port: str | None = None,
+           start: bool = False, mode: str,
+           pve: bool | None = None,
+           vmid: int = 0, memory: int | None = None, cores: int | None = None,
+           port: str | None = None,
            ip: str | None = None, gateway: str | None = None,
            dns: str | None = None, searchdomain: str | None = None,
            timezone: str | None = None,
@@ -198,14 +206,24 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                   file=sys.stderr)
             sys.exit(1)
 
-    # Resolve mode
-    mode = detect_mode(mode)
-
-    # Auto-detect pve-vm: VM mode on a PVE host
-    if mode == "vm":
-        from kento.pve import is_pve
-        if is_pve():
+    # Resolve PVE promotion
+    from kento.pve import is_pve
+    if pve is True:
+        if not is_pve():
+            print("Error: --pve specified but this is not a PVE host", file=sys.stderr)
+            sys.exit(1)
+        if mode == "vm":
             mode = "pve-vm"
+        else:
+            mode = "pve"
+    elif pve is False:
+        pass
+    else:
+        if is_pve():
+            if mode == "vm":
+                mode = "pve-vm"
+            else:
+                mode = "pve"
 
     # Resolve network configuration
     from kento import resolve_network
@@ -222,7 +240,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
         name = next_instance_name(base_name, base_dir, other_dir=other_dir)
     elif (base_dir / name).exists():
-        print(f"Error: container name already taken: {name}", file=sys.stderr)
+        print(f"Error: instance name already taken: {name}", file=sys.stderr)
         sys.exit(1)
 
     # Validate mode-specific flags
@@ -239,9 +257,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             print("Error: --port cannot be used with bridge networking in VM mode",
                   file=sys.stderr)
             sys.exit(1)
-    if ip is not None and mode in ("vm", "pve-vm"):
-        print("Error: --ip cannot be used with VM mode", file=sys.stderr)
-        sys.exit(1)
     if gateway and not ip:
         print("Error: --gateway requires --ip", file=sys.stderr)
         sys.exit(1)
@@ -277,7 +292,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     container_dir = base_dir / container_id
 
     if container_dir.exists():
-        print(f"Error: container already exists: {container_id}", file=sys.stderr)
+        print(f"Error: instance already exists: {container_id}", file=sys.stderr)
         sys.exit(1)
 
     # Resolve layers (validates image exists)
@@ -398,6 +413,14 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             mac_value = mac
         (container_dir / "kento-mac").write_text(mac_value + "\n")
 
+        # Resolve memory/cores: CLI > config file > hardcoded defaults
+        from kento.defaults import get_vm_defaults
+        vm_defaults = get_vm_defaults()
+        effective_memory = memory if memory is not None else vm_defaults["memory"]
+        effective_cores = cores if cores is not None else vm_defaults["cores"]
+        (container_dir / "kento-memory").write_text(str(effective_memory) + "\n")
+        (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
+
         # Write port mapping (usermode networking only)
         if network["type"] == "usermode":
             from kento.vm import allocate_port
@@ -422,15 +445,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             (container_dir / "kento-vmid").write_text(str(vmid) + "\n")
 
             # Generate and write QM config
-            from kento.defaults import get_vm_defaults
-            vm_defaults = get_vm_defaults()
             qm_conf = write_qm_config(
                 vmid,
                 generate_qm_config(
                     name, vmid, container_dir,
                     hookscript_ref=hookscript_ref,
-                    memory=vm_defaults["memory"],
-                    cores=vm_defaults["cores"],
+                    memory=effective_memory,
+                    cores=effective_cores,
                     machine=vm_defaults["machine"],
                     kvm=vm_defaults["kvm"],
                     bridge=bridge,
@@ -482,7 +503,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                     gateway=gateway, nameserver=dns,
                                     searchdomain=searchdomain,
                                     timezone=timezone, env=env,
-                                    port=port)
+                                    port=port,
+                                    memory=memory, cores=cores)
             )
             config_path = str(pve_conf)
         else:
@@ -491,7 +513,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                 net_type=network.get("type"),
                                 nesting=nesting,
                                 ip=ip, gateway=gateway, env=env,
-                                port=port)
+                                port=port,
+                                memory=memory, cores=cores)
             )
             config_path = f"{container_dir}/config"
 

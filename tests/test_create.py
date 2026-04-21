@@ -67,7 +67,7 @@ class TestCreate:
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         lxc_dir = tmp_path / "test"
         assert (lxc_dir / "rootfs").is_dir()
@@ -91,7 +91,7 @@ class TestCreate:
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "myimage_latest-0"):
-            create("myimage:latest")
+            create("myimage:latest", mode="lxc")
 
         lxc_dir = tmp_path / "myimage_latest-0"
         assert (lxc_dir / "rootfs").is_dir()
@@ -106,7 +106,7 @@ class TestCreate:
         state = tmp_path / "user-state" / "test"
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=state):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         lxc_dir = tmp_path / "test"
         assert (state / "upper").is_dir()
@@ -123,9 +123,9 @@ class TestCreate:
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
             with pytest.raises(SystemExit):
-                create("myimage:latest", name="test")
+                create("myimage:latest", name="test", mode="lxc")
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -134,7 +134,7 @@ class TestCreate:
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", start=True)
+            create("myimage:latest", name="test", mode="lxc", start=True)
 
         lxc_calls = [c for c in mock_run.call_args_list
                      if c[0][0][0] == "lxc-start"]
@@ -258,7 +258,8 @@ class TestStaticIp:
                                                    mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ip="192.168.0.160/22",
+            create("myimage:latest", name="test", mode="lxc",
+                   ip="192.168.0.160/22",
                    gateway="192.168.0.1", dns="8.8.8.8")
 
         lxc_dir = tmp_path / "test"
@@ -284,7 +285,7 @@ class TestStaticIp:
                                      mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ip="10.0.0.5/24")
+            create("myimage:latest", name="test", mode="lxc", ip="10.0.0.5/24")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
                 "10-static.network").read_text()
@@ -294,15 +295,24 @@ class TestStaticIp:
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_ip_with_vm_mode_errors(self, mock_root, mock_layers, tmp_path):
+    def test_ip_with_vm_mode_accepted(self, mock_root, mock_layers, tmp_path):
+        """--ip is valid for VM mode (inject.sh uses Type=ether match)."""
         vm_dir = tmp_path / "vm"
         vm_dir.mkdir()
 
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
-            with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="vm",
-                       ip="192.168.0.160/22")
+            create("myimage:latest", name="test", mode="vm",
+                   ip="192.168.0.160/22", gateway="192.168.0.1")
+
+        net = (vm_dir / "test" / "kento-net").read_text()
+        assert "ip=192.168.0.160/22" in net
+        assert "gateway=192.168.0.1" in net
+        unit = (vm_dir / "test" / "upper" / "etc" / "systemd" / "network" /
+                "10-static.network").read_text()
+        assert "Address=192.168.0.160/22" in unit
+        assert "Gateway=192.168.0.1" in unit
+        assert "Type=ether" in unit
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -312,7 +322,7 @@ class TestStaticIp:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", gateway="192.168.0.1")
+                create("myimage:latest", name="test", mode="lxc", gateway="192.168.0.1")
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -321,7 +331,7 @@ class TestStaticIp:
                                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", dns="8.8.8.8")
+            create("myimage:latest", name="test", mode="lxc", dns="8.8.8.8")
 
         dropin = (tmp_path / "test" / "upper" / "etc" / "systemd" /
                   "resolved.conf.d" / "90-kento.conf")
@@ -338,7 +348,7 @@ class TestGuestConfig:
     def test_hostname_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         hostname = (tmp_path / "test" / "upper" / "etc" / "hostname").read_text()
         assert hostname.strip() == "test"
@@ -350,8 +360,8 @@ class TestGuestConfig:
                                            mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ip="10.0.0.5/24",
-                   searchdomain="example.com")
+            create("myimage:latest", name="test", mode="lxc",
+                   ip="10.0.0.5/24", searchdomain="example.com")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
                 "10-static.network").read_text()
@@ -365,7 +375,7 @@ class TestGuestConfig:
     def test_timezone_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", timezone="Asia/Tokyo")
+            create("myimage:latest", name="test", mode="lxc", timezone="Asia/Tokyo")
 
         lxc_dir = tmp_path / "test"
         assert (lxc_dir / "kento-tz").read_text().strip() == "Asia/Tokyo"
@@ -380,7 +390,7 @@ class TestGuestConfig:
     def test_env_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", env=["FOO=bar", "BAZ=qux"])
+            create("myimage:latest", name="test", mode="lxc", env=["FOO=bar", "BAZ=qux"])
 
         lxc_dir = tmp_path / "test"
         env_content = (lxc_dir / "kento-env").read_text()
@@ -406,7 +416,7 @@ class TestGuestConfig:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test",
+            create("myimage:latest", name="test", mode="lxc",
                    ssh_keys=[str(key1), str(key2)])
 
         content = (tmp_path / "test" / "kento-authorized-keys").read_text()
@@ -423,7 +433,7 @@ class TestGuestConfig:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test",
+                create("myimage:latest", name="test", mode="lxc",
                        ssh_keys=[str(missing)])
             assert exc.value.code == 1
         # Container dir should not have been created yet
@@ -437,7 +447,7 @@ class TestGuestConfig:
         """ssh_keys=None means no kento-authorized-keys file."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         assert not (tmp_path / "test" / "kento-authorized-keys").exists()
 
@@ -451,7 +461,7 @@ class TestGuestConfig:
         key.write_text("ssh-rsa AAAA user@host\n")
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test",
+            create("myimage:latest", name="test", mode="lxc",
                    ssh_keys=[str(key)], ssh_key_user="droste")
 
         content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
@@ -467,7 +477,7 @@ class TestGuestConfig:
         key.write_text("ssh-rsa AAAA user@host\n")
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ssh_keys=[str(key)])
+            create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
 
         assert not (tmp_path / "test" / "kento-ssh-user").exists()
 
@@ -479,7 +489,7 @@ class TestGuestConfig:
         """--ssh-key-user without --ssh-key still writes the metadata file."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ssh_key_user="droste")
+            create("myimage:latest", name="test", mode="lxc", ssh_key_user="droste")
 
         content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
         assert content == "droste"
@@ -491,7 +501,7 @@ class TestGuestConfig:
                                                       mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", searchdomain="example.com")
+            create("myimage:latest", name="test", mode="lxc", searchdomain="example.com")
 
         net = (tmp_path / "test" / "kento-net").read_text()
         assert "searchdomain=example.com" in net
@@ -511,7 +521,7 @@ class TestSSHHostKeys:
         """--ssh-host-keys calls ssh-keygen for 3 key types."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ssh_host_keys=True)
+            create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
 
         key_dir = tmp_path / "test" / "ssh-host-keys"
         assert key_dir.is_dir()
@@ -541,7 +551,7 @@ class TestSSHHostKeys:
         """Generated keys are placed in ssh-host-keys/ with correct filenames."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", ssh_host_keys=True)
+            create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
 
         key_dir = tmp_path / "test" / "ssh-host-keys"
         keygen_calls = [c for c in mock_run.call_args_list
@@ -568,7 +578,7 @@ class TestSSHHostKeys:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test",
+            create("myimage:latest", name="test", mode="lxc",
                    ssh_host_key_dir=str(src))
 
         key_dir = tmp_path / "test" / "ssh-host-keys"
@@ -587,7 +597,7 @@ class TestSSHHostKeys:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test",
+                create("myimage:latest", name="test", mode="lxc",
                        ssh_host_key_dir=str(tmp_path / "nonexistent"))
             assert exc.value.code == 1
 
@@ -602,7 +612,7 @@ class TestSSHHostKeys:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test",
+                create("myimage:latest", name="test", mode="lxc",
                        ssh_host_key_dir=str(src))
             assert exc.value.code == 1
 
@@ -614,7 +624,7 @@ class TestSSHHostKeys:
         """Without either flag, no ssh-host-keys/ directory is created."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         assert not (tmp_path / "test" / "ssh-host-keys").exists()
 
@@ -632,7 +642,7 @@ class TestSSHHostKeys:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", ssh_host_keys=True)
+                create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
             assert exc.value.code == 1
 
 
@@ -1119,7 +1129,7 @@ class TestCloudInitMode:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.is_file()
@@ -1133,7 +1143,7 @@ class TestCloudInitMode:
         """Default to injection mode when image lacks cloud-init."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test")
+            create("myimage:latest", name="test", mode="lxc")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.is_file()
@@ -1152,7 +1162,7 @@ class TestCloudInitMode:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", config_mode="injection")
+            create("myimage:latest", name="test", mode="lxc", config_mode="injection")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.read_text().strip() == "injection"
@@ -1170,7 +1180,7 @@ class TestCloudInitMode:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", timezone="UTC",
+            create("myimage:latest", name="test", mode="lxc", timezone="UTC",
                    env=["FOO=bar"])
 
         seed_dir = tmp_path / "test" / "cloud-seed"
@@ -1191,7 +1201,7 @@ class TestCloudInitMode:
         """Injection mode does not create cloud-seed/ directory."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", config_mode="injection")
+            create("myimage:latest", name="test", mode="lxc", config_mode="injection")
 
         assert not (tmp_path / "test" / "cloud-seed").exists()
 
@@ -1203,9 +1213,131 @@ class TestCloudInitMode:
         """Forcing cloudinit mode without cloud-init in image prints a warning."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", config_mode="cloudinit")
+            create("myimage:latest", name="test", mode="lxc", config_mode="cloudinit")
 
         captured = capsys.readouterr()
         assert "cloud-init not detected" in captured.err
         # Still creates the seed dir
         assert (tmp_path / "test" / "cloud-seed").is_dir()
+
+
+class TestGenerateConfigMemoryCores:
+    """Tests for --memory and --cores in generate_config (plain LXC)."""
+
+    def test_memory_adds_cgroup_line(self, tmp_path):
+        cfg = generate_config("test", tmp_path, memory=512)
+        assert "lxc.cgroup2.memory.max = 536870912" in cfg
+
+    def test_cores_adds_cgroup_line(self, tmp_path):
+        cfg = generate_config("test", tmp_path, cores=2)
+        assert "lxc.cgroup2.cpu.max = 200000 100000" in cfg
+
+    def test_memory_and_cores(self, tmp_path):
+        cfg = generate_config("test", tmp_path, memory=1024, cores=4)
+        assert "lxc.cgroup2.memory.max = 1073741824" in cfg
+        assert "lxc.cgroup2.cpu.max = 400000 100000" in cfg
+
+    def test_no_memory_no_cores(self, tmp_path):
+        cfg = generate_config("test", tmp_path)
+        assert "cgroup2.memory.max" not in cfg
+        assert "cgroup2.cpu.max" not in cfg
+
+    def test_memory_none_omitted(self, tmp_path):
+        cfg = generate_config("test", tmp_path, memory=None)
+        assert "cgroup2.memory.max" not in cfg
+
+    def test_cores_none_omitted(self, tmp_path):
+        cfg = generate_config("test", tmp_path, cores=None)
+        assert "cgroup2.cpu.max" not in cfg
+
+
+class TestLxcCreateMemoryCores:
+    """Tests for --memory and --cores in LXC create."""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_memory_in_config(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", memory=256)
+
+        cfg = (tmp_path / "test" / "config").read_text()
+        assert "lxc.cgroup2.memory.max = 268435456" in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_cores_in_config(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", cores=2)
+
+        cfg = (tmp_path / "test" / "config").read_text()
+        assert "lxc.cgroup2.cpu.max = 200000 100000" in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_no_memory_cores_by_default(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+
+        cfg = (tmp_path / "test" / "config").read_text()
+        assert "cgroup2.memory.max" not in cfg
+        assert "cgroup2.cpu.max" not in cfg
+
+
+class TestVmCreateMemoryCores:
+    """Tests for --memory and --cores metadata files in VM create."""
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_default_memory_cores_metadata(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm")
+
+        assert (vm_dir / "test" / "kento-memory").read_text().strip() == "512"
+        assert (vm_dir / "test" / "kento-cores").read_text().strip() == "1"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_custom_memory_cores_metadata(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm", memory=2048, cores=4)
+
+        assert (vm_dir / "test" / "kento-memory").read_text().strip() == "2048"
+        assert (vm_dir / "test" / "kento-cores").read_text().strip() == "4"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_memory_only_defaults_cores(self, mock_root, mock_layers, tmp_path):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm", memory=1024)
+
+        assert (vm_dir / "test" / "kento-memory").read_text().strip() == "1024"
+        assert (vm_dir / "test" / "kento-cores").read_text().strip() == "1"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_no_memory_cores_metadata(self, mock_root, mock_layers, tmp_path):
+        """LXC mode does not write kento-memory/kento-cores metadata files."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+
+        assert not (tmp_path / "test" / "kento-memory").exists()
+        assert not (tmp_path / "test" / "kento-cores").exists()

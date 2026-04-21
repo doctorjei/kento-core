@@ -437,7 +437,7 @@ class TestCliInfo:
             main(["info", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "CONTAINER" in output
+        assert "NAME" in output
         assert "--json" in output
         assert "--verbose" in output
 
@@ -447,13 +447,13 @@ class TestCliInfo:
             main(["inspect", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "CONTAINER" in output
+        assert "NAME" in output
         assert "--json" in output
 
-    def test_container_info_help(self, capsys):
+    def test_lxc_info_help(self, capsys):
         from kento.cli import main
         with pytest.raises(SystemExit) as exc:
-            main(["container", "info", "--help"])
+            main(["lxc", "info", "--help"])
         assert exc.value.code == 0
 
     def test_vm_info_help(self, capsys):
@@ -462,10 +462,10 @@ class TestCliInfo:
             main(["vm", "info", "--help"])
         assert exc.value.code == 0
 
-    def test_container_inspect_help(self, capsys):
+    def test_lxc_inspect_help(self, capsys):
         from kento.cli import main
         with pytest.raises(SystemExit) as exc:
-            main(["container", "inspect", "--help"])
+            main(["lxc", "inspect", "--help"])
         assert exc.value.code == 0
 
     def test_vm_inspect_help(self, capsys):
@@ -480,10 +480,10 @@ class TestCliInfo:
             main(["info"])
         assert exc.value.code != 0
 
-    def test_info_in_container_help(self, capsys):
+    def test_info_in_lxc_help(self, capsys):
         from kento.cli import main
         with pytest.raises(SystemExit) as exc:
-            main(["container", "--help"])
+            main(["lxc", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "info" in output

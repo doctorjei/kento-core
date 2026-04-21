@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from kento import VM_BASE
-from kento.defaults import VM_MEMORY, VM_KVM, VM_MACHINE
+from kento.defaults import VM_MEMORY, VM_CORES, VM_KVM, VM_MACHINE
 
 # Locally-administered MAC prefix (QEMU's standard block).
 MAC_PREFIX = "52:54:00"
@@ -200,11 +200,21 @@ def start_vm(container_dir: Path, name: str) -> None:
         time.sleep(0.1)
 
     # Start QEMU
-    memory = str(VM_MEMORY)
+    memory_file = container_dir / "kento-memory"
+    if memory_file.is_file():
+        memory = memory_file.read_text().strip()
+    else:
+        memory = str(VM_MEMORY)
+    cores_file = container_dir / "kento-cores"
+    if cores_file.is_file():
+        cores = cores_file.read_text().strip()
+    else:
+        cores = str(VM_CORES)
     qemu_cmd = ["qemu-system-x86_64",
          "-kernel", str(kernel),
          "-initrd", str(initramfs),
          "-m", memory,
+         "-smp", cores,
          "-machine", VM_MACHINE,
     ]
     if VM_KVM:
@@ -282,7 +292,7 @@ def stop_vm(container_dir: Path, *, force: bool = False) -> None:
     if _is_mountpoint(rootfs):
         result = subprocess.run(["umount", str(rootfs)])
         if result.returncode != 0:
-            print(f"Error: failed to unmount {rootfs}. Is the container still running?",
+            print(f"Error: failed to unmount {rootfs}. Is the instance still running?",
                   file=sys.stderr)
             sys.exit(1)
 
