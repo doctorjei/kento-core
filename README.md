@@ -37,14 +37,15 @@ a clean image state.
 - LXC (for LXC/PVE modes)
 - util-linux 2.39+ (for `LIBMOUNT_FORCE_MOUNT2` support)
 - QEMU + virtiofsd (for VM mode)
+- nftables (for `--port` with LXC/PVE modes)
 
 ## Install
 
 ```
-pipx install .
+pip install kento
 ```
 
-Or with pip:
+Or from source:
 
 ```
 pip install .
@@ -78,13 +79,18 @@ Options:
 | `--network MODE` | auto | Network mode: `bridge`, `bridge=<name>`, `host`, `usermode`, `none` |
 | `--nesting / --no-nesting` | on | Enable LXC nesting |
 | `--vmid N` | auto | PVE VMID (PVE mode only) |
-| `--port H:G` | `auto:22` | Port forwarding (VM mode only) |
+| `--port H:G` | none | Port forwarding (all modes: usermode for VM, nftables for LXC) |
 | `--ip CIDR` | none | Static IP address (e.g. `192.168.1.10/24`) |
 | `--gateway IP` | none | Default gateway (requires `--ip`) |
-| `--dns IP` | none | DNS server (requires `--ip`) |
+| `--dns IP` | none | DNS server |
 | `--searchdomain DOMAIN` | none | DNS search domain |
 | `--timezone TZ` | none | Timezone (e.g. `America/New_York`) |
 | `--env KEY=VALUE` | none | Environment variable (repeatable) |
+| `--ssh-key PATH` | none | SSH public key file (repeatable) |
+| `--ssh-key-user NAME` | root | User for SSH key injection |
+| `--ssh-host-keys` | off | Auto-generate SSH host keys at create time |
+| `--config-mode MODE` | auto | Config delivery: `injection`, `cloudinit`, or `auto` |
+| `--mac XX:XX:...` | auto | Override MAC address (VM modes only) |
 | `--start` | off | Start container after creation |
 
 ### Run (create + start)
