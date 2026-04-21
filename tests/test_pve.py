@@ -449,3 +449,38 @@ class TestPveConfigPortForwarding:
                                   bridge="vmbr0", net_type="bridge",
                                   port="10022:22")
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
+
+
+class TestPveConfigMemoryCores:
+    """Tests for memory/cores in generate_pve_config."""
+
+    def test_memory_included(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  memory=1024)
+        assert "memory: 1024" in cfg
+
+    def test_cores_included(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  cores=4)
+        assert "cores: 4" in cfg
+
+    def test_memory_and_cores(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  memory=2048, cores=8)
+        assert "memory: 2048" in cfg
+        assert "cores: 8" in cfg
+
+    def test_no_memory_no_cores_by_default(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "memory:" not in cfg
+        assert "cores:" not in cfg
+
+    def test_memory_none_omitted(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  memory=None)
+        assert "memory:" not in cfg
+
+    def test_cores_none_omitted(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  cores=None)
+        assert "cores:" not in cfg
