@@ -225,6 +225,12 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             else:
                 mode = "pve"
 
+    # Pre-validate PVE-VM snippets storage (before any filesystem writes)
+    _snippets_info = None
+    if mode == "pve-vm":
+        from kento.vm_hook import find_snippets_dir
+        _snippets_info = find_snippets_dir()
+
     # Resolve network configuration
     from kento import resolve_network
     network = resolve_network(net_type, bridge, mode, port)
@@ -439,7 +445,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             write_inject(container_dir)
 
             # Write snippets wrapper and get PVE reference
-            hookscript_ref = write_snippets_wrapper(vmid, container_dir / "kento-hook")
+            hookscript_ref = write_snippets_wrapper(
+                vmid, container_dir / "kento-hook",
+                snippets_dir=_snippets_info[0],
+                storage_name=_snippets_info[1],
+            )
 
             # Write VMID reference
             (container_dir / "kento-vmid").write_text(str(vmid) + "\n")

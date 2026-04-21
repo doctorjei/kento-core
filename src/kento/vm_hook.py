@@ -95,7 +95,8 @@ case "$PHASE" in
         fi
 
         SOCKET="$CONTAINER_DIR/virtiofsd.sock"
-        $VIRTIOFSD --socket-path="$SOCKET" --shared-dir="$ROOTFS" --cache=auto &
+        $VIRTIOFSD --socket-path="$SOCKET" --shared-dir="$ROOTFS" --cache=auto \
+            </dev/null >"$CONTAINER_DIR/virtiofsd.log" 2>&1 &
         VFS_PID=$!
         echo "$VFS_PID" > "$CONTAINER_DIR/kento-virtiofsd-pid"
 
@@ -171,24 +172,38 @@ def find_snippets_dir() -> tuple[Path, str]:
     storage_name = config.get("snippets_storage")
 
     if not storage_name:
-        # Scan storage.cfg for first snippets-capable storage
+        first_dir_storage = None
+        first_dir_content = None
         if _STORAGE_CFG.is_file():
             current_storage = None
+            current_type = None
             for line in _STORAGE_CFG.read_text().splitlines():
                 stripped = line.strip()
                 if stripped.startswith(("dir:", "nfs:", "cifs:", "glusterfs:",
                                        "zfspool:", "btrfs:", "lvmthin:", "lvm:")):
+                    current_type = stripped.split(":")[0]
                     current_storage = stripped.split(":", 1)[1].strip().split()[0]
                 elif stripped.startswith("content") and current_storage:
                     content = stripped.split(None, 1)[1] if len(stripped.split(None, 1)) > 1 else ""
                     if "snippets" in content.split(","):
                         storage_name = current_storage
                         break
+                    if first_dir_storage is None and current_type == "dir":
+                        first_dir_storage = current_storage
+                        first_dir_content = content.strip()
 
         if not storage_name:
-            print("Error: no snippets-capable storage found in PVE. "
-                  "Set 'snippets_storage = <name>' in /etc/kento/vm.conf",
-                  file=sys.stderr)
+            msg = "Error: no PVE storage has 'snippets' in its content types.\n"
+            if first_dir_storage and first_dir_content:
+                msg += (f"\nEnable snippets on your '{first_dir_storage}' storage:\n"
+                        f"  pvesm set {first_dir_storage} --content "
+                        f"{first_dir_content},snippets\n")
+            else:
+                msg += ("\nEnable snippets on a storage (e.g. 'local'):\n"
+                        "  pvesm set local --content iso,vztmpl,backup,snippets\n")
+            msg += (f"\nOr set a specific storage in /etc/kento/vm.conf:\n"
+                    f"  snippets_storage = <name>\n")
+            print(msg, file=sys.stderr)
             sys.exit(1)
 
     # Resolve the filesystem path via pvesm
@@ -207,12 +222,15 @@ def find_snippets_dir() -> tuple[Path, str]:
     return snippets_path, storage_name
 
 
-def write_snippets_wrapper(vmid: int, hook_path: Path) -> str:
+def write_snippets_wrapper(vmid: int, hook_path: Path, *,
+                           snippets_dir: Path | None = None,
+                           storage_name: str | None = None) -> str:
     """Write a snippets wrapper and return the PVE storage reference.
 
     Returns e.g. "local:snippets/kento-vm-100.sh"
     """
-    snippets_dir, storage_name = find_snippets_dir()
+    if snippets_dir is None or storage_name is None:
+        snippets_dir, storage_name = find_snippets_dir()
     wrapper_name = f"kento-vm-{vmid}.sh"
     wrapper_path = snippets_dir / wrapper_name
     wrapper_path.write_text(generate_snippets_wrapper(str(hook_path)))

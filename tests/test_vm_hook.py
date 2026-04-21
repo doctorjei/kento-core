@@ -68,6 +68,12 @@ class TestGenerateVmHook:
         hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
         assert 'sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"' in hook
 
+    def test_virtiofsd_stdio_redirected(self):
+        """virtiofsd must redirect stdio so PVE hookscript pipes close."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        assert '</dev/null >' in hook
+        assert 'virtiofsd.log' in hook
+
     def test_inject_call_between_mount_and_virtiofsd(self):
         """inject.sh must be called after overlayfs mount but before virtiofsd starts."""
         hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
@@ -159,6 +165,26 @@ class TestFindSnippetsDir:
             with pytest.raises(SystemExit):
                 find_snippets_dir()
 
+    def test_no_snippets_error_message_actionable(self, tmp_path, capsys):
+        """Error message includes pvesm set command when dir storage found."""
+        config = tmp_path / "vm.conf"
+        config.write_text("")
+        storage_cfg = tmp_path / "storage.cfg"
+        storage_cfg.write_text(
+            "dir: local\n"
+            "\tpath /var/lib/vz\n"
+            "\tcontent iso,vztmpl,backup\n"
+        )
+
+        with patch("kento.vm_hook.VM_CONFIG_FILE", config), \
+             patch("kento.vm_hook._STORAGE_CFG", storage_cfg):
+            with pytest.raises(SystemExit):
+                find_snippets_dir()
+
+        captured = capsys.readouterr()
+        assert "pvesm set local --content iso,vztmpl,backup,snippets" in captured.err
+        assert "/etc/kento/vm.conf" in captured.err
+
 
 class TestWriteSnippetsWrapper:
     def test_writes_wrapper_and_returns_ref(self, tmp_path):
@@ -174,6 +200,21 @@ class TestWriteSnippetsWrapper:
         assert wrapper.is_file()
         assert wrapper.stat().st_mode & 0o755 == 0o755
         assert str(hook_path) in wrapper.read_text()
+
+
+    def test_writes_wrapper_with_preresolved_params(self, tmp_path):
+        """write_snippets_wrapper accepts pre-resolved snippets_dir and storage_name."""
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        hook_path = Path("/var/lib/kento/vm/test/kento-hook")
+
+        ref = write_snippets_wrapper(100, hook_path,
+                                      snippets_dir=snippets,
+                                      storage_name="mystore")
+
+        assert ref == "mystore:snippets/kento-vm-100.sh"
+        wrapper = snippets / "kento-vm-100.sh"
+        assert wrapper.is_file()
 
 
 class TestDeleteSnippetsWrapper:

@@ -1001,6 +1001,27 @@ class TestPveVmCreate:
         assert not (vm_dir / "test" / "kento-port").exists()
 
 
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_no_snippets_exits_clean(self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode exits before writing state if no snippets storage."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", side_effect=SystemExit(1)):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm")
+
+        # No state should have been written
+        assert not (vm_dir / "test").exists()
+
+
 class TestLxcPortForwarding:
     """Tests for --port in LXC/PVE modes (Phase 3: nftables DNAT)."""
 
