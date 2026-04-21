@@ -21,7 +21,7 @@ def test_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "0.8.0" in output
+    assert "0.9.0" in output
 
 
 def test_no_command(capsys):
