@@ -54,7 +54,7 @@ pipx install .
 
 This installs the `kento` command.
 
-## Your first container
+## Your first instance
 
 All kento commands require root. Run with `sudo`.
 
@@ -70,30 +70,30 @@ store where kento can find it.
 > **Note:** You can skip this step if the image is already in podman's
 > store. `create` will use it directly.
 
-### 2. Create a container
+### 2. Create an instance
 
 ```
-sudo kento container create docker.io/library/debian:12 --name my-first
+sudo kento lxc create docker.io/library/debian:12 --name my-first
 ```
 
 Kento inspects the image, resolves the layer paths from podman's store,
 and writes the LXC config and hook script. No image data is copied.
 
-### 3. Start the container
+### 3. Start the instance
 
 ```
-sudo kento container start my-first
+sudo kento lxc start my-first
 ```
 
-### 3.5. Check container info
+### 3.5. Check instance info
 
 ```
 sudo kento info my-first
 ```
 
-Shows the container's image, mode, status, and metadata.
+Shows the instance's image, mode, status, and metadata.
 
-### 4. Attach to the container
+### 4. Attach to the instance
 
 For LXC mode:
 
@@ -101,12 +101,13 @@ For LXC mode:
 sudo lxc-attach -n my-first
 ```
 
-You're now inside a full system container running systemd.
+You're now inside a full system container running systemd (LXC mode).
+For VM mode, connect via SSH instead.
 
-### 5. Stop the container
+### 5. Stop the instance
 
 ```
-sudo kento container shutdown my-first
+sudo kento lxc shutdown my-first
 ```
 
 (`stop` also works as an alias.)
@@ -114,38 +115,38 @@ sudo kento container shutdown my-first
 ### 6. Scrub to clean state
 
 ```
-sudo kento container scrub my-first
+sudo kento lxc scrub my-first
 ```
 
 This clears all writable changes and re-resolves image layers from
-podman. The container returns to a pristine state matching the OCI
+podman. The instance returns to a pristine state matching the OCI
 image.
 
-### 7. Remove the container
+### 7. Remove the instance
 
 ```
-sudo kento container destroy my-first
+sudo kento lxc destroy my-first
 ```
 
-Removes the container, its config, hook, and writable layer. (`rm` also
+Removes the instance, its config, hook, and writable layer. (`rm` also
 works as an alias.)
 
-> **Tip:** `sudo kento run docker.io/library/debian:12 --name my-first`
+> **Tip:** `sudo kento lxc run docker.io/library/debian:12 --name my-first`
 > combines create and start in one step.
 
-## List containers
+## List instances
 
 ```
-sudo kento container list
-sudo kento container ls
+sudo kento list
+sudo kento ls
 ```
 
-Shows all kento-managed containers across all modes (LXC, PVE, VM)
-with their name, image, status, mode, and writable layer size.
+Shows all kento-managed instances across all modes (lxc, pve-lxc, vm,
+pve-vm) with their name, image, status, mode, and writable layer size.
 
 ## Next steps
 
-- [Modes](modes.md) — understand LXC vs PVE vs VM mode
+- [Modes](modes.md) — understand lxc vs pve-lxc vs vm vs pve-vm modes
 - [VM Mode](vm-mode.md) — boot OCI images as QEMU VMs
-- [Container Lifecycle](container-lifecycle.md) — naming, state, scrub behavior
+- [Instance Lifecycle](container-lifecycle.md) — naming, state, scrub behavior
 - [Troubleshooting](troubleshooting.md) — common errors and fixes

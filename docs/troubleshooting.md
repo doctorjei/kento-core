@@ -7,7 +7,7 @@
 All kento commands require root privileges. Run with `sudo`:
 
 ```
-sudo kento container create <image>
+sudo kento lxc create <image>
 ```
 
 ### "Error: image not found: \<image\>"
@@ -23,25 +23,25 @@ If you're running kento via `sudo`, kento queries the invoking user's
 podman store (not root's). Pull the image as your normal user, not as
 root.
 
-### "Error: container name already taken: \<name\>"
+### "Error: instance name already taken: \<name\>"
 
-A container with that name already exists. Choose a different name or
-remove the existing container:
-
-```
-sudo kento container rm <name>
-```
-
-### "Error: container not found: \<name\>"
-
-No kento-managed container matches that name. Check available
-containers:
+An instance with that name already exists. Choose a different name or
+remove the existing instance:
 
 ```
-sudo kento container list
+sudo kento rm <name>
 ```
 
-### "Error: container already exists: \<id\>"
+### "Error: instance not found: \<name\>"
+
+No kento-managed instance matches that name. Check available
+instances:
+
+```
+sudo kento list
+```
+
+### "Error: instance already exists: \<id\>"
 
 The underlying directory already exists. This can happen if a previous
 removal was interrupted. Manually check and clean up:
@@ -51,12 +51,12 @@ ls /var/lib/lxc/<id>/         # LXC/PVE
 ls /var/lib/kento/vm/<id>/    # VM
 ```
 
-### "Error: container is running. Stop it first: kento container stop \<name\>"
+### "Error: instance is running. Stop it first: kento stop \<name\>"
 
-Scrub requires the container to be stopped. Stop it first:
+Scrub requires the instance to be stopped. Stop it first:
 
 ```
-sudo kento container shutdown <name>
+sudo kento shutdown <name>
 ```
 
 ### "Error: failed to resolve layer paths for \<image\>"
@@ -65,25 +65,25 @@ Podman returned empty or invalid layer paths. This can happen if the
 image store is corrupted. Try:
 
 ```
-podman image inspect <image>
+sudo podman image inspect <image>
 ```
 
-If the image looks fine, try `kento container scrub <name>` to
-re-resolve layers.
+If the image looks fine, try `sudo kento scrub <name>` to re-resolve
+layers.
 
 ### "Error: VMID must be >= 100"
 
 PVE requires VMIDs to be 100 or greater. Use a valid VMID:
 
 ```
-sudo kento container create <image> --pve --vmid 200
+sudo kento lxc create <image> --pve --vmid 200
 ```
 
 Or omit `--vmid` to let kento auto-assign one.
 
 ### "Error: VMID \<N\> is already in use"
 
-Another PVE container or VM already uses that VMID. Omit `--vmid` for
+Another PVE instance already uses that VMID. Omit `--vmid` for
 auto-assignment, or check used IDs:
 
 ```
@@ -92,7 +92,7 @@ cat /etc/pve/.vmlist
 
 ### "Error: --vmid cannot be used with \<MODE\> mode"
 
-The `--vmid` flag only works with PVE mode. Remove `--vmid` or use
+The `--vmid` flag only works with PVE modes. Remove `--vmid` or add
 `--pve`.
 
 ### "Error: virtiofsd not found"
@@ -120,10 +120,10 @@ These must be baked into the OCI image at build time. See
 ### "Error: rootfs already mounted"
 
 The rootfs mount was not cleaned up from a previous start. Stop the
-container to unmount:
+instance to unmount:
 
 ```
-sudo kento container stop <name>
+sudo kento stop <name>
 ```
 
 If stop doesn't work (e.g., PID files are stale), unmount manually:
@@ -137,7 +137,7 @@ sudo umount /var/lib/kento/vm/<name>/rootfs
 The VM is already started. Stop it before starting again:
 
 ```
-sudo kento container stop <name>
+sudo kento vm stop <name>
 ```
 
 ## VM boot issues
@@ -152,7 +152,7 @@ virtiofs. Either empty the fstab or add `nofail,x-systemd.device-timeout=1s`
 to each block-device entry:
 
 ```
-# Check inside the composed rootfs (while the container is stopped):
+# Check inside the composed rootfs (while the instance is stopped):
 sudo cat /var/lib/kento/vm/<name>/rootfs/etc/fstab
 ```
 
@@ -208,12 +208,12 @@ mount --version
 
 If podman removes or reorganizes image layers (e.g., after `podman
 image prune`), the pre-resolved paths in `kento-layers` become invalid.
-The hook script will report missing layer paths at container start.
+The hook script will report missing layer paths at instance start.
 
 Fix by scrubbing:
 
 ```
-sudo kento container scrub <name>
+sudo kento scrub <name>
 ```
 
 This re-resolves layers from the current podman store.

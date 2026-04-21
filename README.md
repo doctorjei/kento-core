@@ -10,25 +10,36 @@ woodblock printing blocks that ensure each color layer aligns perfectly.
 
 ## How it works
 
-1. `kento container create <image>` inspects an OCI image via podman,
-   resolves the layer paths, and writes the appropriate config + hook.
-2. At container start, overlayfs is mounted using the image layers as
+1. `kento lxc create <image>` (or `kento vm create <image>`) inspects an
+   OCI image via podman, resolves the layer paths, and writes the
+   appropriate config + hook.
+2. At instance start, overlayfs is mounted using the image layers as
    read-only lower dirs, plus a writable upper layer.
-3. The container boots with systemd as PID 1 — a full system container.
+3. The instance boots with systemd as PID 1 — a full system container
+   or QEMU VM.
 
 The OCI image layers are read-only. All writes go to a separate upper
-directory. `kento container scrub` clears the upper layer to revert to
-a clean image state.
+directory. `kento lxc scrub` (or `kento vm scrub`) clears the upper
+layer to revert to a clean image state.
 
-## Three modes
+## Four modes
 
-- **LXC** (default on plain LXC) — standard LXC containers via
-  `lxc-start`. Auto-detected.
-- **PVE** (default on Proxmox VE) — containers visible in Proxmox web UI
-  via `pct`. Auto-detected when `/etc/pve` exists.
-- **VM** (explicit `--vm` only) — boots OCI images as QEMU VMs via
-  virtiofs. Kernel and initramfs come from inside the OCI image
-  (`/boot/vmlinuz`, `/boot/initramfs.img`).
+The CLI uses a noun-verb pattern: `kento lxc <cmd>` for LXC instances,
+`kento vm <cmd>` for VM instances. The noun selects the type.
+
+- **lxc** (default on plain LXC) — standard LXC containers via
+  `lxc-start`. Use `kento lxc create`.
+- **pve-lxc** (default on Proxmox VE) — containers visible in Proxmox
+  web UI via `pct`. Auto-detected when `/etc/pve` exists.
+  Use `kento lxc create` on a PVE host.
+- **vm** — boots OCI images as QEMU VMs via virtiofs.
+  Use `kento vm create`. Kernel and initramfs come from inside the OCI
+  image (`/boot/vmlinuz`, `/boot/initramfs.img`).
+- **pve-vm** — QEMU VMs managed through PVE (hookscript + qm config).
+  Auto-detected when using `kento vm create` on a PVE host.
+
+PVE is auto-detected. Override with `--pve` to force PVE integration
+or `--no-pve` to disable it.
 
 ## Requirements
 
@@ -64,23 +75,28 @@ sudo kento pull <image>
 Fetches an OCI image via podman. This is optional — `create` will use
 images already in podman's store.
 
-### Create a container
+### Create an instance
 
 ```
-sudo kento container create <image> [--name <name>]
+sudo kento lxc create <image> [--name <name>]
+sudo kento vm create <image> [--name <name>]
 ```
+
+The noun (`lxc` or `vm`) selects the instance type.
 
 Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--name NAME` | auto | Container name (auto-generated if omitted) |
-| `--pve` / `--lxc` / `--vm` | auto | Force mode |
+| `--name NAME` | auto | Instance name (auto-generated if omitted) |
+| `--pve` / `--no-pve` | auto | Force or disable PVE integration (auto-detected by default) |
 | `--network MODE` | auto | Network mode: `bridge`, `bridge=<name>`, `host`, `usermode`, `none` |
 | `--nesting / --no-nesting` | on | Enable LXC nesting |
-| `--vmid N` | auto | PVE VMID (PVE mode only) |
+| `--vmid N` | auto | PVE VMID (PVE modes only) |
+| `--memory MB` | varies | Memory limit in MB (default depends on mode) |
+| `--cores N` | varies | Number of CPU cores (default depends on mode) |
 | `--port H:G` | none | Port forwarding (all modes: usermode for VM, nftables for LXC) |
-| `--ip CIDR` | none | Static IP address (e.g. `192.168.1.10/24`) |
+| `--ip CIDR` | none | Static IP address (e.g. `192.168.1.10/24`; works for all modes) |
 | `--gateway IP` | none | Default gateway (requires `--ip`) |
 | `--dns IP` | none | DNS server |
 | `--searchdomain DOMAIN` | none | DNS search domain |
@@ -91,33 +107,36 @@ Options:
 | `--ssh-host-keys` | off | Auto-generate SSH host keys at create time |
 | `--config-mode MODE` | auto | Config delivery: `injection`, `cloudinit`, or `auto` |
 | `--mac XX:XX:...` | auto | Override MAC address (VM modes only) |
-| `--start` | off | Start container after creation |
+| `--start` | off | Start instance after creation |
 
 ### Run (create + start)
 
 ```
-sudo kento run <image> [--name <name>]
+sudo kento lxc run <image> [--name <name>]
+sudo kento vm run <image> [--name <name>]
 ```
 
-Creates and starts a container in one step. Accepts all the same flags
+Creates and starts an instance in one step. Accepts all the same flags
 as `create` (except `--start`).
 
 ### Start
 
 ```
-sudo kento container start <name> [<name> ...]
+sudo kento start <name> [<name> ...]
 ```
 
-Multiple containers can be started in one command.
+Multiple instances can be started in one command. The `start` command
+works across all modes (it reads the mode from metadata). You can also
+use `kento lxc start` or `kento vm start` explicitly.
 
-For LXC/PVE containers, you can also use `lxc-attach` / `pct exec` directly.
-For VM containers, use `ssh -p <port> root@localhost`.
+For LXC/PVE instances, you can also use `lxc-attach` / `pct exec` directly.
+For VM instances, use `ssh -p <port> root@localhost`.
 
 ### Shutdown / stop
 
 ```
-sudo kento container shutdown <name> [<name> ...]
-sudo kento container stop <name> [<name> ...]
+sudo kento shutdown <name> [<name> ...]
+sudo kento stop <name> [<name> ...]
 ```
 
 `shutdown` is the primary command; `stop` is an alias. Pass `-f` / `--force`
@@ -126,12 +145,12 @@ to force an immediate stop (kill) instead of a graceful shutdown.
 ### List
 
 ```
-sudo kento container list
-sudo kento container ls
+sudo kento list
+sudo kento ls
 ```
 
-Shows name, image, status, mode, and writable layer size. Lists containers
-from all modes (LXC, PVE, VM). `ls` is an alias for `list`.
+Shows name, image, status, mode, and writable layer size. Lists instances
+from all modes (lxc, pve-lxc, vm, pve-vm). `ls` is an alias for `list`.
 
 ### Info / inspect
 
@@ -140,7 +159,7 @@ sudo kento info <name>
 sudo kento inspect <name>
 ```
 
-Shows container details: image, mode, status, directory paths, network
+Shows instance details: image, mode, status, directory paths, network
 config, layer count, and more. `inspect` is an alias for `info`.
 
 | Flag | Description |
@@ -148,25 +167,25 @@ config, layer count, and more. `inspect` is an alias for `info`.
 | `--json` | Machine-readable JSON output |
 | `-v` / `--verbose` | Include layer sizes and paths |
 
-### Scrub a container
+### Scrub an instance
 
 ```
-sudo kento container scrub <name> [<name> ...]
+sudo kento scrub <name> [<name> ...]
 ```
 
 Clears the writable layer and re-resolves image layers from podman.
-The container must be stopped first.
+The instance must be stopped first.
 
 ### Destroy / rm
 
 ```
-sudo kento container destroy <name> [<name> ...]
-sudo kento container rm <name> [<name> ...]
-sudo kento container destroy -f <name>
+sudo kento destroy <name> [<name> ...]
+sudo kento rm <name> [<name> ...]
+sudo kento destroy -f <name>
 ```
 
-`destroy` is the primary command; `rm` is an alias. Removes a container
-and its writable layer. Errors if the container is running unless
+`destroy` is the primary command; `rm` is an alias. Removes an instance
+and its writable layer. Errors if the instance is running unless
 `-f` / `--force` is passed (which stops it first).
 
 ## Runtime layout
@@ -178,8 +197,8 @@ and its writable layer. Errors if the container is running unless
 ├── kento-image                 # OCI image name
 ├── kento-layers                # Pre-resolved layer paths
 ├── kento-state                 # Path to writable layer directory
-├── kento-mode                  # "lxc", "pve", or "vm"
-├── kento-name                  # Container name
+├── kento-mode                  # "lxc", "pve-lxc", "vm", or "pve-vm"
+├── kento-name                  # Instance name
 └── rootfs/                     # Overlayfs mount point
 
 /var/lib/kento/vm/<name>/       (VM mode)
@@ -192,10 +211,10 @@ and its writable layer. Errors if the container is running unless
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md) — install, first container walkthrough
-- [Modes](docs/modes.md) — LXC vs PVE vs VM, auto-detection, defaults
+- [Getting Started](docs/getting-started.md) — install, first instance walkthrough
+- [Modes](docs/modes.md) — lxc vs pve-lxc vs vm vs pve-vm, auto-detection, defaults
 - [VM Mode](docs/vm-mode.md) — image requirements, SSH access, port forwarding
-- [Container Lifecycle](docs/container-lifecycle.md) — naming, state, scrub, sudo behavior
+- [Instance Lifecycle](docs/container-lifecycle.md) — naming, state, scrub, sudo behavior
 - [Troubleshooting](docs/troubleshooting.md) — error messages and fixes
 - [Architecture](docs/architecture.md) — overlayfs, hooks, startup sequences, internals
 

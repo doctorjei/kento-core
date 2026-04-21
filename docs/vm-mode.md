@@ -100,13 +100,31 @@ RUN echo 'myuser:mypassword' | chpasswd
 RUN usermod -aG sudo myuser
 ```
 
-## Creating a VM container
+## Creating a VM instance
 
 ```
-sudo kento container create <image> --vm [--name <name>] [--port H:G]
+sudo kento vm create <image> [--name <name>] [--port H:G]
 ```
 
-The `--vm` flag is required — VM mode is never auto-detected.
+VM mode is selected by using the `vm` noun. On a PVE host, this
+automatically uses pve-vm mode; use `--no-pve` to force plain vm mode.
+
+### Static IP
+
+The `--ip` flag works for VM mode too, injecting a static network
+configuration into the guest:
+
+```
+sudo kento vm create <image> --ip 192.168.1.50/24 --gateway 192.168.1.1
+```
+
+### Memory and CPU
+
+Use `--memory` and `--cores` to override the defaults:
+
+```
+sudo kento vm create <image> --memory 1024 --cores 2
+```
 
 ### Port forwarding
 
@@ -117,13 +135,13 @@ and forwards it to guest port 22 (SSH). The allocation scans existing
 Override with `--port`:
 
 ```
-sudo kento container create myimage --vm --port 2222:22
+sudo kento vm create myimage --port 2222:22
 ```
 
 ## Starting and connecting
 
 ```
-sudo kento container start my-vm
+sudo kento vm start my-vm
 ```
 
 The start sequence:
@@ -158,7 +176,7 @@ sshpass -p <password> ssh -o StrictHostKeyChecking=no -p <host-port> <user>@loca
 ## Stopping
 
 ```
-sudo kento container stop my-vm
+sudo kento vm stop my-vm
 ```
 
 Sends SIGTERM to QEMU and virtiofsd, waits for them to exit (with
@@ -189,7 +207,7 @@ and for error message reference.
 ├── kento-layers         # Pre-resolved layer paths
 ├── kento-state          # Path to writable layer directory
 ├── kento-mode           # "vm"
-├── kento-name           # Container name
+├── kento-name           # Instance name
 ├── kento-port           # Host:guest port mapping (e.g., "10022:22")
 ├── kento-qemu-pid       # QEMU PID (present when running)
 ├── kento-virtiofsd-pid  # virtiofsd PID (present when running)

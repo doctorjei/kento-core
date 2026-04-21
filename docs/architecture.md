@@ -6,12 +6,12 @@ This document explains how kento works under the hood.
 
 - **Zero pip dependencies** — stdlib-only Python (argparse, json,
   subprocess, pathlib, shutil, pwd)
-- **Hook is pure shell** — no Python runtime needed at container start
+- **Hook is pure shell** — no Python runtime needed at instance start
 - **Podman is the only runtime dependency** (for OCI layer storage)
 - **Don't duplicate layers** — read podman's store directly
 - **Pre-resolve at create time** — the hook must be fast and
   self-contained
-- **Per-container hooks** — each container gets its own script with
+- **Per-instance hooks** — each instance gets its own script with
   baked-in paths
 
 ## Overlayfs layering
@@ -60,26 +60,26 @@ lowerdir strings with many layers.
 
 ### 1. kento CLI (Python)
 
-The management tool. Handles container create, run, pull, start,
-shutdown, scrub, destroy, info, and list. Runs as root.
+The management tool. Handles create, run, pull, start, shutdown, scrub,
+destroy, info, and list. Runs as root.
 
 Key operations at create time:
 
 - Queries podman for image layer paths (`podman image inspect`)
-- Creates the container directory and metadata files
-- Generates a per-container hook script with baked-in layer paths
+- Creates the instance directory and metadata files
+- Generates a per-instance hook script with baked-in layer paths
 - Writes the LXC or PVE config
 
 ### 2. kento-hook (shell script)
 
-A per-container shell script generated at create time, stored at
-`<container-dir>/kento-hook`. Called by LXC at container start and stop.
+A per-instance shell script generated at create time, stored at
+`<instance-dir>/kento-hook`. Called by LXC at instance start and stop.
 
 The hook:
 
 - Validates that all layer paths still exist
 - Mounts overlayfs at the rootfs path
-- Unmounts on container stop
+- Unmounts on instance stop
 
 The hook is pure POSIX shell with no dependencies beyond `mount` and
 `mountpoint`. It runs in LXC's restricted mount namespace where podman
@@ -92,18 +92,18 @@ pre-resolved at create time rather than looked up at start time.
 
 1. `lxc-start -n <name>` reads the config at `<dir>/config`
 2. The hook fires (`pre-start`) — mounts overlayfs at `<dir>/rootfs`
-3. Container boots with systemd as PID 1
+3. Instance boots with systemd as PID 1
 
 ### PVE mode
 
 1. `pct start <VMID>` triggers PVE's LXC machinery
 2. PVE generates LXC config with hardcoded
    `lxc.rootfs.path = /var/lib/lxc/<VMID>/rootfs`
-3. `lxc-pve-prestart-hook` runs (harmless no-op for kento containers)
+3. `lxc-pve-prestart-hook` runs (harmless no-op for kento instances)
 4. Kento's hook fires (`pre-mount`) — mounts overlayfs at
    `$LXC_ROOTFS_PATH`
 5. LXC bind-mounts the now-populated rootfs to `$LXC_ROOTFS_MOUNT`
-6. Container boots with systemd
+6. Instance boots with systemd
 
 The hook uses `$LXC_ROOTFS_PATH` (the source path) for the mount
 target, not `$LXC_ROOTFS_MOUNT`. LXC bind-mounts the source to the
@@ -115,8 +115,8 @@ type comes from `$3`. The hook handles both formats:
 
 ### VM mode
 
-1. `kento container start <name>` mounts overlayfs at `<dir>/rootfs`
-   on the host (no hook — this is done directly by the CLI)
+1. `kento vm start <name>` mounts overlayfs at `<dir>/rootfs`
+   on the host (no hook -- this is done directly by the CLI)
 2. Validates `/boot/vmlinuz` and `/boot/initramfs.img` exist in rootfs
 3. Starts virtiofsd, sharing the rootfs via a Unix socket
 4. Starts QEMU with `-kernel` and `-initrd` from the rootfs, virtiofs
@@ -135,7 +135,7 @@ console=ttyS0 rootfstype=virtiofs root=rootfs
 When kento is run via `sudo`, it detects `SUDO_USER` and splits
 storage:
 
-- **Container directory** (`/var/lib/lxc/<name>/` or
+- **Instance directory** (`/var/lib/lxc/<name>/` or
   `/var/lib/kento/vm/<name>/`) — owned by root, contains config,
   hook, metadata, and rootfs mountpoint
 - **State directory** (`~user/.local/share/kento/<name>/`) — owned
