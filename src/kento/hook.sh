@@ -144,8 +144,15 @@ case "$HOOK_TYPE" in
         # PVE-LXC: install port-forwarding rules here because PVE's
         # config parser drops `lxc.hook.start-host` (not in its allow-list),
         # so the start-host branch below never fires for pve-lxc. For
-        # plain LXC this is a no-op when start-host ran first thanks to
+        # plain LXC this is a no-op when start-host later runs, thanks to
         # the kento-portfwd-active guard in setup_port_forwarding.
+        setup_port_forwarding "$1"
+        ;;
+    port-forward-only)
+        # Internal re-entry point: the pre-mount branch invokes the hook
+        # script again with this pseudo hook-type inside pid-1's network
+        # namespace (via nsenter) to install nftables rules on the host.
+        # See the NETNS comment in the pre-start/pre-mount branch.
         setup_port_forwarding "$1"
         ;;
     start-host)
