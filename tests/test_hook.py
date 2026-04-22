@@ -232,3 +232,26 @@ def test_generate_hook_pve_lxc_runs_portfwd_from_pre_mount():
     fn_start = script.index("setup_port_forwarding()")
     fn_body = script[fn_start:script.index("\n}\n", fn_start) + 2]
     assert 'kento-portfwd-active" ] && return 0' in fn_body
+
+
+def test_generate_hook_pve_pre_mount_switches_to_host_netns():
+    """PVE invokes pre-mount hooks AFTER unsharing the container's network
+    namespace, so nft rules installed from there land in the soon-to-be-torn-
+    down guest netns rather than on the host. setup_port_forwarding must
+    detect the netns mismatch and re-exec itself inside pid-1's netns via
+    nsenter (which all recent util-linux builds provide)."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    fn_start = script.index("setup_port_forwarding()")
+    fn_body = script[fn_start:script.index("\n}\n", fn_start) + 2]
+    # Netns mismatch detection
+    assert "/proc/self/ns/net" in fn_body
+    assert "/proc/1/ns/net" in fn_body
+    # Re-exec primitive
+    assert "nsenter --target 1 --net" in fn_body
+    # Must clear LXC_HOOK_TYPE so the child resolves the pseudo hook type
+    # from its positional args rather than inheriting pre-mount/pre-start.
+    assert "env -u LXC_HOOK_TYPE" in fn_body
+    # Pseudo hook type for the re-entrant invocation.
+    assert "port-forward-only" in script
+    # Case branch handles it.
+    assert "port-forward-only)" in script
