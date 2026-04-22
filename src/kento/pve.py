@@ -186,7 +186,11 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     if memory is not None:
         lines.append(f"memory: {memory}")
     if cores is not None:
+        # PVE's `cores` sets cpuset affinity only (restrict which CPUs).
+        # `cpulimit` is the quota field that translates to cgroup cpu.max,
+        # matching plain-LXC's `lxc.cgroup2.cpu.max = N*100000 100000`.
         lines.append(f"cores: {cores}")
+        lines.append(f"cpulimit: {cores}")
     return "\n".join(lines) + "\n"
 
 

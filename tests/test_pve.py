@@ -464,11 +464,23 @@ class TestPveConfigMemoryCores:
                                   cores=4)
         assert "cores: 4" in cfg
 
+    def test_cores_emits_cpulimit(self):
+        # cores alone sets cpuset affinity; cpulimit sets the cpu.max quota
+        # that matches plain-LXC behavior. Both must be emitted.
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  cores=4)
+        assert "cpulimit: 4" in cfg
+
+    def test_cpulimit_omitted_without_cores(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "cpulimit:" not in cfg
+
     def test_memory_and_cores(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   memory=2048, cores=8)
         assert "memory: 2048" in cfg
         assert "cores: 8" in cfg
+        assert "cpulimit: 8" in cfg
 
     def test_no_memory_no_cores_by_default(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
@@ -484,3 +496,4 @@ class TestPveConfigMemoryCores:
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   cores=None)
         assert "cores:" not in cfg
+        assert "cpulimit:" not in cfg
