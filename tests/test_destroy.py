@@ -155,6 +155,57 @@ def test_destroy_pve_deletes_pve_config(mock_root, mock_run, tmp_path):
     assert not conf.exists()
 
 
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_pve_deletes_snippets_wrapper(mock_root, mock_run, tmp_path):
+    """pve destroy should remove the kento-lxc-<vmid>.sh snippets wrapper."""
+    _make_container(tmp_path, name="100", mode="pve")
+    snippets = tmp_path / "snippets"
+    snippets.mkdir()
+    wrapper = snippets / "kento-lxc-100.sh"
+    wrapper.write_text("#!/bin/sh\n")
+
+    with patch("kento.destroy.resolve_container", return_value=tmp_path / "100"), \
+         patch("kento.pve.delete_pve_config"), \
+         patch("kento.vm_hook.find_snippets_dir",
+               return_value=(snippets, "local")):
+        destroy("mybox")
+
+    assert not wrapper.exists()
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_pve_calls_delete_lxc_snippets_wrapper(mock_root, mock_run, tmp_path):
+    """pve destroy invokes delete_lxc_snippets_wrapper with the vmid."""
+    _make_container(tmp_path, name="100", mode="pve")
+
+    with patch("kento.destroy.resolve_container", return_value=tmp_path / "100"), \
+         patch("kento.pve.delete_pve_config"), \
+         patch("kento.lxc_hook.delete_lxc_snippets_wrapper") as mock_delete:
+        destroy("mybox")
+
+    mock_delete.assert_called_once_with(100)
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_pve_without_wrapper_is_idempotent(mock_root, mock_run, tmp_path):
+    """pve destroy succeeds even when no snippets wrapper was ever written."""
+    lxc_dir = _make_container(tmp_path, name="100", mode="pve")
+    snippets = tmp_path / "snippets"
+    snippets.mkdir()
+    # No kento-lxc-100.sh exists
+
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+         patch("kento.pve.delete_pve_config"), \
+         patch("kento.vm_hook.find_snippets_dir",
+               return_value=(snippets, "local")):
+        destroy("mybox")
+
+    assert not lxc_dir.exists()
+
+
 # --- VM mode tests ---
 
 

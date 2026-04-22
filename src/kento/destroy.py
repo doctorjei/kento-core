@@ -72,7 +72,9 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
     # Clean up platform-specific config BEFORE removing container_dir
     if mode == "pve":
         from kento.pve import delete_pve_config
+        from kento.lxc_hook import delete_lxc_snippets_wrapper
         delete_pve_config(int(container_id))
+        delete_lxc_snippets_wrapper(int(container_id))
     elif mode == "pve-vm" and vmid_str:
         from kento.pve import delete_qm_config
         from kento.vm_hook import delete_snippets_wrapper
