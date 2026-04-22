@@ -127,7 +127,10 @@ class TestShutdownPveVm:
         with patch("kento.stop.resolve_container", return_value=d):
             shutdown("test")
 
-        mock_run.assert_called_once_with(["qm", "shutdown", "100"], check=True)
+        mock_run.assert_called_once_with(
+            ["qm", "shutdown", "100", "--timeout", "60", "--forceStop", "1"],
+            check=True,
+        )
 
     @patch("kento.stop.subprocess.run")
     @patch("kento.stop.require_root")

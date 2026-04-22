@@ -24,7 +24,15 @@ def shutdown(name: str, *, force: bool = False, container_dir: Path | None = Non
         if force:
             subprocess.run(["qm", "stop", vmid], check=True)
         else:
-            subprocess.run(["qm", "shutdown", vmid], check=True)
+            # qm shutdown's default timeout is short and relies on ACPI.
+            # Guests without acpid (or that ignore the power button) hang
+            # until PVE aborts with "got timeout". --timeout extends the
+            # graceful window; --forceStop 1 falls through to qm stop
+            # once the timeout elapses so the VM reliably stops.
+            subprocess.run(
+                ["qm", "shutdown", vmid, "--timeout", "60", "--forceStop", "1"],
+                check=True,
+            )
     elif mode == "pve":
         if force:
             subprocess.run(["pct", "stop", container_id], check=True)
