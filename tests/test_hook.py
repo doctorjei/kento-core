@@ -154,6 +154,19 @@ def test_generate_hook_ns_cgroup_guarded_by_existence_check():
     assert '[ -d "$NS_CGROUP" ]' in script
 
 
+def test_generate_hook_start_host_container_id_safe_under_set_u():
+    """start-host resolves container id from LXC_NAME with a $1 fallback. LXC
+    hook.version=1 (plain LXC) passes no positional args — env vars only — so
+    a bare $1 under `set -u` aborts the hook. The pve-lxc snippets wrapper
+    passes VMID as $1 and leaves LXC_NAME unset. Both must work."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert 'CONTAINER_ID="${LXC_NAME:-${1:-}}"' in script
+    # start-host body should use $CONTAINER_ID, not bare $1, for the cgroup
+    # path and the port-forwarding call.
+    assert 'NS_CGROUP="/sys/fs/cgroup/lxc/$CONTAINER_ID/ns"' in script
+    assert 'setup_port_forwarding "$CONTAINER_ID"' in script
+
+
 def test_generate_hook_ns_cgroup_writes_are_best_effort():
     """If the cgroup write fails (permissions, controller not enabled,
     concurrent teardown), don't abort the hook — the outer ceiling still

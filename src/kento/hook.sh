@@ -142,16 +142,20 @@ case "$HOOK_TYPE" in
         sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"
         ;;
     start-host)
-        # PVE-LXC: propagate memory/cores limits into the inner `ns` cgroup so
-        # the guest sees its own limit at /sys/fs/cgroup/memory.max instead of
-        # "max". PVE nests the container cgroup via `lxc.cgroup.dir.container.inner = ns`,
-        # which means `lxc.cgroup2.*` keys land on the outer (accounting) cgroup
-        # at /sys/fs/cgroup/lxc/<vmid>/ while processes run in
-        # /sys/fs/cgroup/lxc/<vmid>/ns/ — cgroup v2 enforces the outer ceiling,
-        # but the inner file literally has "max" written on it. Apps like JVMs
-        # that read memory.max to size themselves get misled. Skip cleanly if
-        # PVE changes the nesting name (no `ns/`) or the write fails.
-        NS_CGROUP="/sys/fs/cgroup/lxc/$1/ns"
+        # Container identifier: plain LXC with hook.version=1 passes args via
+        # env vars only ($LXC_NAME); pve-lxc arrives via the snippets wrapper
+        # which passes VMID as $1. Handle both safely under `set -u`.
+        CONTAINER_ID="${LXC_NAME:-${1:-}}"
+
+        # pve-lxc only: propagate memory/cores limits into the inner `ns` cgroup
+        # so the guest sees its own limit at /sys/fs/cgroup/memory.max instead
+        # of "max". PVE nests the container cgroup via
+        # `lxc.cgroup.dir.container.inner = ns`, so `lxc.cgroup2.*` keys land
+        # on the outer (accounting) cgroup at /sys/fs/cgroup/lxc/<vmid>/ while
+        # processes run in /sys/fs/cgroup/lxc/<vmid>/ns/. Plain LXC has no
+        # inner nesting; /sys/fs/cgroup/lxc/<name>/ns/ won't exist, so the
+        # is-dir check below silently skips.
+        NS_CGROUP="/sys/fs/cgroup/lxc/$CONTAINER_ID/ns"
         if [ -d "$NS_CGROUP" ]; then
             if [ -f "$CONTAINER_DIR/kento-memory" ]; then
                 MEM_MB=$(cat "$CONTAINER_DIR/kento-memory" | tr -d '[:space:]')
@@ -173,7 +177,7 @@ case "$HOOK_TYPE" in
 
         # Port forwarding via nftables DNAT. For pve-lxc, this branch is
         # reached via the snippets hookscript wrapper (post-start phase).
-        setup_port_forwarding "$1"
+        setup_port_forwarding "$CONTAINER_ID"
         ;;
     post-stop)
         # Tear down nftables port forwarding rules by comment tag
