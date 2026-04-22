@@ -27,6 +27,26 @@ setup_port_forwarding() {
     # Already configured for this boot (another hook point beat us to it)?
     [ -f "$CONTAINER_DIR/kento-portfwd-active" ] && return 0
 
+    # If we're running inside the container's netns (this happens when we're
+    # invoked from PVE's pre-mount hook — LXC has already unshared the net
+    # namespace by that point), re-exec ourselves inside pid-1's netns so the
+    # nftables rules land on the host. pre-start (plain LXC) and start-host
+    # (plain LXC) already run in host netns; the check is a cheap no-op there.
+    if [ "$(readlink /proc/self/ns/net 2>/dev/null)" != "$(readlink /proc/1/ns/net 2>/dev/null)" ]; then
+        if command -v nsenter >/dev/null 2>&1; then
+            HOOK_SCRIPT="$CONTAINER_DIR/kento-hook"
+            # Use the port-forward-only pseudo hook type so the re-entrant
+            # invocation skips the pre-mount overlayfs work and jumps
+            # straight back into this function (inside host netns). Unset
+            # LXC_HOOK_TYPE so the child resolves HOOK_TYPE from $3.
+            env -u LXC_HOOK_TYPE nsenter --target 1 --net sh "$HOOK_SCRIPT" \
+                "$CONTAINER_ID_ARG" "" "port-forward-only" 2>/dev/null || true
+        else
+            echo "kento: warning: port forwarding requires nsenter when invoked from pre-mount; skipping" >&2
+        fi
+        return 0
+    fi
+
     PORT_SPEC=$(cat "$PORT_FILE" | tr -d '[:space:]')
     HOST_PORT="${PORT_SPEC%%:*}"
     GUEST_PORT="${PORT_SPEC##*:}"
