@@ -249,6 +249,55 @@ class TestCreate:
         cfg = (tmp_path / "test" / "config").read_text()
         assert "lxc.net.0" not in cfg
 
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_refuses_duplicate_name_across_vmids(self, mock_root,
+                                                     mock_layers, mock_run,
+                                                     tmp_path):
+        """PVE-LXC must reject a reused --name even when VMIDs differ.
+
+        Before the fix the check was `(LXC_BASE / name).exists()`, which
+        never matched because PVE-LXC directories are named after the VMID,
+        not the kento name. So two `kento lxc create --name foo --pve` calls
+        would both succeed with different VMID dirs.
+        """
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.VM_BASE", tmp_path / "vm"), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or tmp_path) / n), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.write_pve_config",
+                   side_effect=lambda vmid, content:
+                   Path(f"/etc/pve/lxc/{vmid}.conf")):
+            (tmp_path / "vm").mkdir()
+            create("myimage:latest", name="dup", mode="pve", vmid=100)
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="dup", mode="pve", vmid=101)
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_refuses_duplicate_name_across_namespaces(self, mock_root,
+                                                     mock_layers, mock_run,
+                                                     tmp_path):
+        """An LXC instance name must block a VM with the same name."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="shared", mode="lxc")
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="shared", mode="vm")
+
 
 class TestStaticIp:
     @patch("kento.create.subprocess.run")

@@ -4,7 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kento import LXC_BASE, VM_BASE, require_root, upper_base, sanitize_image_name, next_instance_name
+from kento import (LXC_BASE, VM_BASE, _scan_namespace, next_instance_name,
+                   require_root, sanitize_image_name, upper_base)
 from kento.cloudinit import detect_cloudinit, write_seed
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
@@ -245,7 +246,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         base_name = sanitize_image_name(image)
         other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
         name = next_instance_name(base_name, base_dir, other_dir=other_dir)
-    elif (base_dir / name).exists():
+    elif (_scan_namespace(name, LXC_BASE) is not None
+          or _scan_namespace(name, VM_BASE) is not None):
+        # Scan both namespaces: for PVE-LXC/PVE-VM, container_id is the VMID
+        # while `name` lives in kento-name, so a bare (base_dir / name).exists()
+        # misses same-name duplicates across VMIDs.
         print(f"Error: instance name already taken: {name}", file=sys.stderr)
         sys.exit(1)
 
