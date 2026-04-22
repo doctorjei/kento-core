@@ -185,12 +185,19 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
             lines.append(f"lxc.environment: {e}")
     if memory is not None:
         lines.append(f"memory: {memory}")
+        # Also write the raw cgroup field so the guest's cgroup namespace
+        # sees the limit. PVE's `memory:` shorthand propagates to the host
+        # cgroup, but older PVE versions don't always mirror the value
+        # into the guest's cgroup root — so `cat /sys/fs/cgroup/memory.max`
+        # inside the container still reads "max". Emitting both is safe.
+        lines.append(f"lxc.cgroup2.memory.max: {memory * 1048576}")
     if cores is not None:
         # PVE's `cores` sets cpuset affinity only (restrict which CPUs).
         # `cpulimit` is the quota field that translates to cgroup cpu.max,
         # matching plain-LXC's `lxc.cgroup2.cpu.max = N*100000 100000`.
         lines.append(f"cores: {cores}")
         lines.append(f"cpulimit: {cores}")
+        lines.append(f"lxc.cgroup2.cpu.max: {cores * 100000} 100000")
     return "\n".join(lines) + "\n"
 
 

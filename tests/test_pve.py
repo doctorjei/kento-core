@@ -471,9 +471,24 @@ class TestPveConfigMemoryCores:
                                   cores=4)
         assert "cpulimit: 4" in cfg
 
+    def test_cores_emits_lxc_cgroup2_cpu_max(self):
+        # The cgroup v2 raw key is what the guest's cgroup namespace reads
+        # at /sys/fs/cgroup/cpu.max. PVE's `cpulimit` does not always
+        # reach the guest namespace, so emit the raw key directly.
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  cores=4)
+        assert "lxc.cgroup2.cpu.max: 400000 100000" in cfg
+
+    def test_memory_emits_lxc_cgroup2_memory_max(self):
+        # 256 MiB in bytes.
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  memory=256)
+        assert "lxc.cgroup2.memory.max: 268435456" in cfg
+
     def test_cpulimit_omitted_without_cores(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "cpulimit:" not in cfg
+        assert "lxc.cgroup2.cpu.max" not in cfg
 
     def test_memory_and_cores(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
@@ -491,6 +506,7 @@ class TestPveConfigMemoryCores:
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   memory=None)
         assert "memory:" not in cfg
+        assert "lxc.cgroup2.memory.max" not in cfg
 
     def test_cores_none_omitted(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
