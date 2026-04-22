@@ -8,12 +8,12 @@ LAYERS="@@LAYERS@@"
 HOOK_TYPE="${LXC_HOOK_TYPE:-$3}"
 
 # ---------------------------------------------------------------------------
-# Port forwarding setup — idempotent, safe to call from multiple hook points.
+# Port forwarding setup — idempotent.
 #
-# Called from `start-host` for plain LXC (normal path) AND from `pre-mount`
-# for PVE-LXC (because PVE's config parser silently drops the
-# `lxc.hook.start-host` directive — it is not in PVE's allow-list —
-# so start-host is never invoked for PVE containers).
+# Called from `start-host` for both plain LXC and pve-lxc. For pve-lxc,
+# start-host fires via PVE's snippets hookscript at post-start phase (PVE's
+# config parser strips `lxc.hook.start-host:`, so we route it through a
+# snippets wrapper that execs this script with $3="start-host").
 #
 # Guard: once $CONTAINER_DIR/kento-portfwd-active exists the hook has already
 # installed rules for this boot, so subsequent invocations are no-ops.
@@ -26,26 +26,6 @@ setup_port_forwarding() {
 
     # Already configured for this boot (another hook point beat us to it)?
     [ -f "$CONTAINER_DIR/kento-portfwd-active" ] && return 0
-
-    # If we're running inside the container's netns (this happens when we're
-    # invoked from PVE's pre-mount hook — LXC has already unshared the net
-    # namespace by that point), re-exec ourselves inside pid-1's netns so the
-    # nftables rules land on the host. pre-start (plain LXC) and start-host
-    # (plain LXC) already run in host netns; the check is a cheap no-op there.
-    if [ "$(readlink /proc/self/ns/net 2>/dev/null)" != "$(readlink /proc/1/ns/net 2>/dev/null)" ]; then
-        if command -v nsenter >/dev/null 2>&1; then
-            HOOK_SCRIPT="$CONTAINER_DIR/kento-hook"
-            # Use the port-forward-only pseudo hook type so the re-entrant
-            # invocation skips the pre-mount overlayfs work and jumps
-            # straight back into this function (inside host netns). Unset
-            # LXC_HOOK_TYPE so the child resolves HOOK_TYPE from $3.
-            env -u LXC_HOOK_TYPE nsenter --target 1 --net sh "$HOOK_SCRIPT" \
-                "$CONTAINER_ID_ARG" "" "port-forward-only" 2>/dev/null || true
-        else
-            echo "kento: warning: port forwarding requires nsenter when invoked from pre-mount; skipping" >&2
-        fi
-        return 0
-    fi
 
     PORT_SPEC=$(cat "$PORT_FILE" | tr -d '[:space:]')
     HOST_PORT="${PORT_SPEC%%:*}"
@@ -160,20 +140,6 @@ case "$HOOK_TYPE" in
 
         # Guest config injection — shared with VM / PVE-VM modes.
         sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"
-
-        # PVE-LXC: install port-forwarding rules here because PVE's
-        # config parser drops `lxc.hook.start-host` (not in its allow-list),
-        # so the start-host branch below never fires for pve-lxc. For
-        # plain LXC this is a no-op when start-host later runs, thanks to
-        # the kento-portfwd-active guard in setup_port_forwarding.
-        setup_port_forwarding "$1"
-        ;;
-    port-forward-only)
-        # Internal re-entry point: the pre-mount branch invokes the hook
-        # script again with this pseudo hook-type inside pid-1's network
-        # namespace (via nsenter) to install nftables rules on the host.
-        # See the NETNS comment in the pre-start/pre-mount branch.
-        setup_port_forwarding "$1"
         ;;
     start-host)
         # PVE-LXC: propagate memory/cores limits into the inner `ns` cgroup so
@@ -205,8 +171,8 @@ case "$HOOK_TYPE" in
             fi
         fi
 
-        # Port forwarding via nftables DNAT (LXC only; PVE-LXC handles it
-        # from pre-mount because PVE strips lxc.hook.start-host).
+        # Port forwarding via nftables DNAT. For pve-lxc, this branch is
+        # reached via the snippets hookscript wrapper (post-start phase).
         setup_port_forwarding "$1"
         ;;
     post-stop)
