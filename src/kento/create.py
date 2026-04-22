@@ -226,9 +226,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             else:
                 mode = "pve"
 
-    # Pre-validate PVE-VM snippets storage (before any filesystem writes)
+    # Pre-validate PVE snippets storage (before any filesystem writes).
+    # pve-vm always needs it; pve-lxc needs it when port/memory/cores set
+    # (PVE strips lxc.hook.start-host, so we use hookscript: instead).
     _snippets_info = None
     if mode == "pve-vm":
+        from kento.vm_hook import find_snippets_dir
+        _snippets_info = find_snippets_dir()
+    elif mode == "pve" and (port is not None or memory is not None
+                             or cores is not None):
         from kento.vm_hook import find_snippets_dir
         _snippets_info = find_snippets_dir()
 
@@ -519,6 +525,14 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
 
         # Generate config
         if mode == "pve":
+            hookscript_ref = None
+            if _snippets_info is not None:
+                from kento.lxc_hook import write_lxc_snippets_wrapper
+                hookscript_ref = write_lxc_snippets_wrapper(
+                    vmid, container_dir / "kento-hook",
+                    snippets_dir=_snippets_info[0],
+                    storage_name=_snippets_info[1],
+                )
             pve_conf = write_pve_config(
                 vmid,
                 generate_pve_config(name, vmid, container_dir, bridge=bridge,
@@ -528,7 +542,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                     searchdomain=searchdomain,
                                     timezone=timezone, env=env,
                                     port=port,
-                                    memory=memory, cores=cores)
+                                    memory=memory, cores=cores,
+                                    hookscript_ref=hookscript_ref)
             )
             config_path = str(pve_conf)
         else:

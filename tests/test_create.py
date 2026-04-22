@@ -1071,6 +1071,165 @@ class TestPveVmCreate:
         assert not (vm_dir / "test").exists()
 
 
+class TestPveLxcSnippetsWrapper:
+    """pve-lxc routes port/memory/cores through a PVE snippets hookscript
+    (PVE strips lxc.hook.start-host, so the legacy hook path is dead)."""
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_lxc_port_writes_snippets_wrapper(self, mock_root, mock_layers,
+                                                   mock_run, mock_free, tmp_path):
+        """pve-lxc with --port writes a snippets wrapper + emits hookscript."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento._bridge_exists", return_value=True), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   return_value=(snippets, "local")), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            create("myimage:latest", name="test", mode="pve",
+                   port="10205:22", net_type="bridge", bridge="vmbr0")
+
+        wrapper = snippets / "kento-lxc-100.sh"
+        assert wrapper.is_file()
+        assert wrapper.stat().st_mode & 0o755 == 0o755
+        cfg = pve_conf.read_text()
+        assert "hookscript: local:snippets/kento-lxc-100.sh" in cfg
+        assert "lxc.hook.start-host" not in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_lxc_memory_writes_snippets_wrapper(self, mock_root, mock_layers,
+                                                     mock_run, tmp_path):
+        """pve-lxc with --memory writes a snippets wrapper + emits hookscript."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   return_value=(snippets, "local")), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            create("myimage:latest", name="test", mode="pve", memory=512)
+
+        wrapper = snippets / "kento-lxc-100.sh"
+        assert wrapper.is_file()
+        cfg = pve_conf.read_text()
+        assert "hookscript: local:snippets/kento-lxc-100.sh" in cfg
+        assert "lxc.hook.start-host" not in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_lxc_cores_writes_snippets_wrapper(self, mock_root, mock_layers,
+                                                    mock_run, tmp_path):
+        """pve-lxc with --cores writes a snippets wrapper + emits hookscript."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   return_value=(snippets, "local")), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            create("myimage:latest", name="test", mode="pve", cores=2)
+
+        wrapper = snippets / "kento-lxc-100.sh"
+        assert wrapper.is_file()
+        cfg = pve_conf.read_text()
+        assert "hookscript: local:snippets/kento-lxc-100.sh" in cfg
+        assert "lxc.hook.start-host" not in cfg
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_lxc_no_resource_flags_no_wrapper(self, mock_root, mock_layers,
+                                                    mock_run, tmp_path):
+        """pve-lxc without port/memory/cores: no wrapper, no hookscript line."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        # find_snippets_dir must NOT be called in the no-flag path — if the
+        # implementation regresses and calls it anyway, the side_effect will
+        # fail the test.
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   side_effect=AssertionError("find_snippets_dir should not be called")), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            create("myimage:latest", name="test", mode="pve")
+
+        wrapper = snippets / "kento-lxc-100.sh"
+        assert not wrapper.exists()
+        cfg = pve_conf.read_text()
+        assert "hookscript:" not in cfg
+        assert "lxc.hook.start-host" not in cfg
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_lxc_no_snippets_exits_clean(self, mock_root, mock_layers,
+                                              tmp_path):
+        """pve-lxc with resource flags fails early if no snippets storage."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", side_effect=SystemExit(1)):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="pve", memory=512)
+
+        # No state should have been written
+        assert not (tmp_path / "100").exists()
+
+
 class TestLxcPortForwarding:
     """Tests for --port in LXC/PVE modes (Phase 3: nftables DNAT)."""
 
