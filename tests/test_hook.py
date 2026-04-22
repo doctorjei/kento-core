@@ -119,3 +119,62 @@ def test_generate_hook_start_host_has_ip_discovery():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     assert "kento-net" in script
     assert "lxc-info" in script
+
+
+def test_generate_hook_start_host_enables_route_localnet():
+    """start-host enables route_localnet so localhost:<port> DNAT works."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "route_localnet" in script
+
+
+def test_generate_hook_start_host_dhcp_uses_background_worker():
+    """DHCP discovery must fork a detached worker to avoid a deadlock where
+    lxc-info (inside the hook) blocks on the monitor that is running the
+    hook. The hook should write a worker script and launch it via setsid."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    # Worker script path
+    assert "kento-portfwd-worker.sh" in script
+    # Detachment primitive — setsid in a backgrounded subshell
+    assert "setsid" in script
+    # Worker itself uses lxc-info (not the synchronous hook path)
+    assert "lxc-info -n" in script
+    # Static-IP fast path still does not need lxc-info: the apply_portfwd_rules
+    # function should be defined once and called directly for static IPs.
+    assert "apply_portfwd_rules" in script
+
+
+def test_generate_hook_portfwd_worker_is_ipv4_only():
+    """nft rules live in the ip family, so the worker must filter lxc-info
+    output to IPv4 addresses only. An IPv6 address would produce an invalid
+    nftables rule and silently break port forwarding."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    # Dotted-quad filter appears with escaped dots in the generated sh
+    # heredoc (`\\.` inside the shell string). Just check the grep invocation.
+    assert "grep -E" in script
+    assert "[0-9]+" in script
+    # Make sure the worker performs filtering, not just `head -1` of raw
+    # lxc-info output which would surface IPv6 first on many hosts.
+    worker_section = script.split("WORKER_EOF")[1] if "WORKER_EOF" in script else ""
+    # (split splits around heredoc body; the body itself is between
+    # the first and second WORKER_EOF)
+    body = script.split("WORKER_EOF")[1] if script.count("WORKER_EOF") >= 2 else ""
+    # The grep must appear before `head -1` in the worker body.
+    full_body = script
+    grep_idx = full_body.find("grep -E")
+    head_idx = full_body.find("head -1", grep_idx if grep_idx > 0 else 0)
+    assert grep_idx > 0
+    assert head_idx > grep_idx
+
+
+def test_generate_hook_start_host_no_sync_lxc_info():
+    """Hook must never call lxc-info on the synchronous path (which would
+    deadlock with the monitor). The actual `lxc-info -n $CID` invocation
+    should only appear inside the detached worker heredoc body."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    start_host = script.split("start-host)", 1)[1].split(";;", 1)[0]
+    # The synchronous code paths may MENTION lxc-info in comments, but the
+    # actual invocation pattern `lxc-info -n "<some_var>"` must live after
+    # the heredoc marker (i.e. inside the worker body).
+    assert "WORKER_EOF" in start_host
+    invocation_idx = start_host.index('lxc-info -n "\\$CID"')
+    assert start_host.index("WORKER_EOF") < invocation_idx

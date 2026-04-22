@@ -43,34 +43,28 @@ case "$HOOK_TYPE" in
         HOST_PORT="${PORT_SPEC%%:*}"
         GUEST_PORT="${PORT_SPEC##*:}"
 
-        # Discover container IP: static (kento-net) or DHCP (lxc-info)
+        # Discover container IP: static (kento-net) fast path, or DHCP
+        # discovery via lxc-info in a detached background worker.
+        #
+        # DEADLOCK NOTE: the start-host hook runs in the LXC monitor process.
+        # `lxc-info -iH` opens a control-socket RPC to that same monitor —
+        # which is blocked waiting for this hook to return. So calling
+        # lxc-info synchronously here hangs forever and kento start never
+        # exits. Always detach the DHCP path with setsid + nohup so the
+        # worker survives after the hook returns and can talk to the
+        # (by then free) monitor.
         CONTAINER_IP=""
         NET_FILE="$CONTAINER_DIR/kento-net"
         if [ -f "$NET_FILE" ]; then
             CONTAINER_IP=$(grep '^ip=' "$NET_FILE" | head -1 | sed 's/^ip=//' | cut -d/ -f1)
         fi
 
-        if [ -z "$CONTAINER_IP" ]; then
-            CONTAINER_ID="${LXC_NAME:-$1}"
-            TRIES=0
-            while [ "$TRIES" -lt 10 ]; do
-                CONTAINER_IP=$(lxc-info -n "$CONTAINER_ID" -iH 2>/dev/null | head -1)
-                [ -n "$CONTAINER_IP" ] && break
-                sleep 1
-                TRIES=$((TRIES + 1))
-            done
-        fi
-
-        if [ -z "$CONTAINER_IP" ]; then
-            echo "Warning: could not determine container IP for port forwarding" >&2
-            echo "Port forwarding will not be active for $NAME" >&2
-            exit 0
-        fi
-
-        # Check ip_forward
-        if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" != "1" ]; then
-            echo "Warning: net.ipv4.ip_forward is disabled; port forwarding may not work" >&2
-        fi
+        # Enable route_localnet so the kernel will route 127.0.0.0/8 traffic
+        # out through the bridge interface toward the container. Without this
+        # the kernel drops packets with saddr 127.0.0.1 on non-loopback
+        # interfaces, so `ssh -p <host_port> localhost` times out even when
+        # the DNAT and masquerade rules are correct. Debian/PVE defaults to 0.
+        echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
 
         # Ensure kento nftables table and base chains exist (idempotent)
         nft add table ip kento 2>/dev/null || true
@@ -78,13 +72,59 @@ case "$HOOK_TYPE" in
         nft 'add chain ip kento output { type nat hook output priority dstnat; policy accept; }' 2>/dev/null || true
         nft 'add chain ip kento postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
 
-        # Add DNAT rules tagged with container name for reliable cleanup
-        nft add rule ip kento prerouting tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
-        nft add rule ip kento output tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
-        nft add rule ip kento postrouting ip saddr 127.0.0.0/8 ip daddr "$CONTAINER_IP" tcp dport "$GUEST_PORT" masquerade comment "\"kento:${NAME}\""
+        apply_portfwd_rules() {
+            # $1 = CONTAINER_IP
+            nft add rule ip kento prerouting tcp dport "$HOST_PORT" dnat to "${1}:${GUEST_PORT}" comment "\"kento:${NAME}\""
+            nft add rule ip kento output tcp dport "$HOST_PORT" dnat to "${1}:${GUEST_PORT}" comment "\"kento:${NAME}\""
+            nft add rule ip kento postrouting ip saddr 127.0.0.0/8 ip daddr "${1}" tcp dport "$GUEST_PORT" masquerade comment "\"kento:${NAME}\""
+            echo "${HOST_PORT}:${GUEST_PORT}:${1}" > "$CONTAINER_DIR/kento-portfwd-active"
+        }
 
-        # Record active state for info display and fallback cleanup
-        echo "${HOST_PORT}:${GUEST_PORT}:${CONTAINER_IP}" > "$CONTAINER_DIR/kento-portfwd-active"
+        if [ -n "$CONTAINER_IP" ]; then
+            apply_portfwd_rules "$CONTAINER_IP"
+        else
+            # DHCP path — detach a worker that polls lxc-info and installs
+            # the rules once the guest has an address.
+            CONTAINER_ID="${LXC_NAME:-$1}"
+            WORKER="$CONTAINER_DIR/kento-portfwd-worker.sh"
+            cat > "$WORKER" <<WORKER_EOF
+#!/bin/sh
+CID="$CONTAINER_ID"
+NAME="$NAME"
+HOST_PORT="$HOST_PORT"
+GUEST_PORT="$GUEST_PORT"
+CONTAINER_DIR="$CONTAINER_DIR"
+IP=""
+TRIES=0
+# Retry for up to ~30s; DHCP can take a while on slow guests.
+# IPv4-only: our nftables rules live in the ip family, so we must ignore
+# IPv6 addresses (which lxc-info prints interleaved with IPv4 ones).
+while [ "\$TRIES" -lt 30 ]; do
+    IP=\$(lxc-info -n "\$CID" -iH 2>/dev/null \\
+        | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$' | head -1)
+    [ -n "\$IP" ] && break
+    sleep 1
+    TRIES=\$((TRIES + 1))
+done
+if [ -z "\$IP" ]; then
+    echo "kento: could not determine IPv4 address for \$NAME; port forwarding not active" \\
+        > "\$CONTAINER_DIR/kento-portfwd-error" 2>&1
+    exit 0
+fi
+nft add rule ip kento prerouting tcp dport "\$HOST_PORT" \\
+    dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
+nft add rule ip kento output tcp dport "\$HOST_PORT" \\
+    dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
+nft add rule ip kento postrouting ip saddr 127.0.0.0/8 \\
+    ip daddr "\$IP" tcp dport "\$GUEST_PORT" \\
+    masquerade comment "\"kento:\$NAME\""
+echo "\$HOST_PORT:\$GUEST_PORT:\$IP" > "\$CONTAINER_DIR/kento-portfwd-active"
+WORKER_EOF
+            chmod +x "$WORKER"
+            # setsid + redirection detaches fully from the monitor process
+            # group, so lxc-start can reap its children and return.
+            setsid sh "$WORKER" </dev/null >/dev/null 2>&1 &
+        fi
         ;;
     post-stop)
         # Tear down nftables port forwarding rules by comment tag
