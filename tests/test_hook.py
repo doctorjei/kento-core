@@ -174,9 +174,10 @@ def test_generate_hook_start_host_dhcp_uses_background_worker():
     assert "setsid" in script
     # Worker itself uses lxc-info (not the synchronous hook path)
     assert "lxc-info -n" in script
-    # Static-IP fast path still does not need lxc-info: the apply_portfwd_rules
-    # function should be defined once and called directly for static IPs.
-    assert "apply_portfwd_rules" in script
+    # Port forwarding logic should be factored into a reusable shell function
+    # so it can be invoked from multiple hook points (start-host on plain LXC,
+    # pre-mount on PVE-LXC where start-host is stripped by pct).
+    assert "setup_port_forwarding" in script
 
 
 def test_generate_hook_portfwd_worker_is_ipv4_only():
@@ -205,12 +206,29 @@ def test_generate_hook_portfwd_worker_is_ipv4_only():
 def test_generate_hook_start_host_no_sync_lxc_info():
     """Hook must never call lxc-info on the synchronous path (which would
     deadlock with the monitor). The actual `lxc-info -n $CID` invocation
-    should only appear inside the detached worker heredoc body."""
+    should only appear inside the detached worker heredoc body — regardless of
+    which hook branch invokes setup_port_forwarding."""
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
-    start_host = script.split("start-host)", 1)[1].split(";;", 1)[0]
-    # The synchronous code paths may MENTION lxc-info in comments, but the
-    # actual invocation pattern `lxc-info -n "<some_var>"` must live after
-    # the heredoc marker (i.e. inside the worker body).
-    assert "WORKER_EOF" in start_host
-    invocation_idx = start_host.index('lxc-info -n "\\$CID"')
-    assert start_host.index("WORKER_EOF") < invocation_idx
+    # Grab only the port-forwarding helper (where the worker lives).
+    fn_start = script.index("setup_port_forwarding()")
+    fn_body = script[fn_start:script.index("\n}\n", fn_start) + 2]
+    assert "WORKER_EOF" in fn_body
+    invocation_idx = fn_body.index('lxc-info -n "\\$CID"')
+    assert fn_body.index("WORKER_EOF") < invocation_idx
+
+
+def test_generate_hook_pve_lxc_runs_portfwd_from_pre_mount():
+    """PVE's config parser silently drops `lxc.hook.start-host` because it's
+    not in its allow-list. So port forwarding setup must also be invoked from
+    the pre-mount/pre-start branch, which PVE does honor (pre-mount) and which
+    plain LXC also honors (pre-start). The invocation must be idempotent so
+    plain LXC doesn't double-install rules when start-host subsequently fires."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    pre_branch = script.split("pre-start|pre-mount)", 1)[1].split(";;", 1)[0]
+    assert "setup_port_forwarding" in pre_branch
+    # Idempotency guard must bail out early if rules are already active.
+    assert "kento-portfwd-active" in script
+    # And setup_port_forwarding should short-circuit via that file.
+    fn_start = script.index("setup_port_forwarding()")
+    fn_body = script[fn_start:script.index("\n}\n", fn_start) + 2]
+    assert 'kento-portfwd-active" ] && return 0' in fn_body
