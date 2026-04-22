@@ -153,6 +153,98 @@ def test_reset_pve_refuses_running(mock_root, mock_run, tmp_path):
             reset("mybox")
 
 
+def _make_pve_container(tmp_path, vmid="100"):
+    lxc_dir = tmp_path / vmid
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+    return lxc_dir
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_with_port_regenerates_snippets_wrapper(
+        mock_root, mock_layers, mock_run, tmp_path):
+    lxc_dir = _make_pve_container(tmp_path, vmid="100")
+    (lxc_dir / "kento-port").write_text("10022:22\n")
+    snippets = tmp_path / "snippets"
+    snippets.mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm_hook.find_snippets_dir",
+               return_value=(snippets, "local")):
+        reset("mybox")
+
+    wrapper = snippets / "kento-lxc-100.sh"
+    assert wrapper.is_file()
+    content = wrapper.read_text()
+    assert str(lxc_dir / "kento-hook") in content
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_with_memory_regenerates_snippets_wrapper(
+        mock_root, mock_layers, mock_run, tmp_path):
+    lxc_dir = _make_pve_container(tmp_path, vmid="101")
+    (lxc_dir / "kento-memory").write_text("512\n")
+    snippets = tmp_path / "snippets"
+    snippets.mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm_hook.find_snippets_dir",
+               return_value=(snippets, "local")):
+        reset("mybox")
+
+    wrapper = snippets / "kento-lxc-101.sh"
+    assert wrapper.is_file()
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_with_cores_regenerates_snippets_wrapper(
+        mock_root, mock_layers, mock_run, tmp_path):
+    lxc_dir = _make_pve_container(tmp_path, vmid="102")
+    (lxc_dir / "kento-cores").write_text("2\n")
+    snippets = tmp_path / "snippets"
+    snippets.mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm_hook.find_snippets_dir",
+               return_value=(snippets, "local")):
+        reset("mybox")
+
+    wrapper = snippets / "kento-lxc-102.sh"
+    assert wrapper.is_file()
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_without_resource_metadata_skips_snippets(
+        mock_root, mock_layers, mock_run, tmp_path):
+    """No port/memory/cores metadata: wrapper regeneration is skipped.
+
+    find_snippets_dir must NOT be called in the no-flag path — if the
+    storage lookup were attempted we'd fail hard even though there's
+    nothing to write.
+    """
+    lxc_dir = _make_pve_container(tmp_path, vmid="103")
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.vm_hook.find_snippets_dir",
+               side_effect=AssertionError(
+                   "find_snippets_dir should not be called")):
+        reset("mybox")
+
+
 # --- VM mode tests ---
 
 

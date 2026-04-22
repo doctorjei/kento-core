@@ -145,5 +145,19 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     elif mode != "vm":
         write_hook(container_dir, layers, name, state_dir)
 
+    # PVE-LXC: regenerate snippets wrapper when the container has
+    # port/memory/cores metadata. The wrapper path is derived from the
+    # VMID (container_dir.name) and the kento-hook path, so this is
+    # idempotent — we rewrite the same file. Done for consistency in
+    # case the kento-hook path ever changes across upgrades.
+    if mode == "pve":
+        if any((container_dir / f).is_file()
+               for f in ("kento-port", "kento-memory", "kento-cores")):
+            from kento.lxc_hook import write_lxc_snippets_wrapper
+            write_lxc_snippets_wrapper(
+                int(container_dir.name),
+                container_dir / "kento-hook",
+            )
+
     print(f"Scrubbed: {name}")
     print("  Writable layer cleared, layers re-resolved from image.")
