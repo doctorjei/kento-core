@@ -466,6 +466,49 @@ class TestPveConfigPortForwarding:
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
 
 
+class TestPveConfigHookscriptRef:
+    """Tests for hookscript_ref kwarg — PVE-native snippets replace start-host."""
+
+    def test_hookscript_ref_emits_hookscript_line(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  port="10205:22",
+                                  hookscript_ref="local:snippets/kento-lxc-100.sh")
+        assert "hookscript: local:snippets/kento-lxc-100.sh" in cfg
+
+    def test_hookscript_ref_skips_start_host_and_post_stop(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  port="10205:22",
+                                  hookscript_ref="local:snippets/kento-lxc-100.sh")
+        assert "lxc.hook.start-host" not in cfg
+        assert "lxc.hook.post-stop" not in cfg
+
+    def test_hookscript_ref_wins_without_port_memory_cores(self):
+        """When hookscript_ref is set, it's emitted even if no resource flags."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  hookscript_ref="local:snippets/kento-lxc-100.sh")
+        assert "hookscript: local:snippets/kento-lxc-100.sh" in cfg
+        assert "lxc.hook.start-host" not in cfg
+        assert "lxc.hook.post-stop" not in cfg
+
+    def test_legacy_behavior_without_hookscript_ref(self):
+        """Without hookscript_ref, port set still emits start-host/post-stop."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  port="10205:22")
+        assert "hookscript:" not in cfg
+        assert "lxc.hook.start-host: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
+
+    def test_pre_mount_always_present(self):
+        """pre-mount is emitted regardless of hookscript_ref — PVE accepts it."""
+        cfg_with = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                        port="10205:22",
+                                        hookscript_ref="local:snippets/kento-lxc-100.sh")
+        cfg_without = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                           port="10205:22")
+        assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg_with
+        assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg_without
+
+
 class TestPveConfigMemoryCores:
     """Tests for memory/cores in generate_pve_config."""
 

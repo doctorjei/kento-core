@@ -132,7 +132,8 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         env: list[str] | None = None,
                         port: str | None = None,
                         memory: int | None = None,
-                        cores: int | None = None) -> str:
+                        cores: int | None = None,
+                        hookscript_ref: str | None = None) -> str:
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
@@ -180,7 +181,9 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     # of "max" (the outer cgroup gets the ceiling but `lxc.cgroup.dir.container.inner`
     # nests the actual namespace one level deeper). Register it whenever any of
     # those features need it.
-    if port is not None or memory is not None or cores is not None:
+    if hookscript_ref is not None:
+        lines.append(f"hookscript: {hookscript_ref}")
+    elif port is not None or memory is not None or cores is not None:
         lines.append(f"lxc.hook.start-host: {hook}")
         lines.append(f"lxc.hook.post-stop: {hook}")
     mount_auto = LXC_MOUNT_AUTO_NESTING if nesting else LXC_MOUNT_AUTO
