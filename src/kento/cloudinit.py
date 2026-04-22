@@ -6,8 +6,19 @@ from pathlib import Path
 
 
 def detect_cloudinit(layers: str) -> bool:
-    """Check if any layer in the colon-separated layer paths has cloud-init."""
-    markers = ["usr/bin/cloud-init", "etc/cloud/cloud.cfg"]
+    """Check if any layer in the colon-separated layer paths has cloud-init.
+
+    Layer paths are podman's overlay diff directories — each layer only
+    holds files that changed at that layer. cloud-init might be installed
+    in any layer, so we scan all of them for a broad set of markers.
+    """
+    markers = [
+        "usr/bin/cloud-init",
+        "usr/sbin/cloud-init",
+        "etc/cloud/cloud.cfg",
+        "lib/systemd/system/cloud-init.service",
+        "usr/lib/systemd/system/cloud-init.service",
+    ]
     for layer_path in layers.split(":"):
         layer = Path(layer_path)
         for marker in markers:
