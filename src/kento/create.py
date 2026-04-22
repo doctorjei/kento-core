@@ -504,6 +504,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 host_port, guest_port = int(host_port), int(guest_port)
             (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
 
+        # Persist memory/cores so the start-host hook can propagate the limit
+        # into the inner ns cgroup on PVE-LXC (outer cgroup gets the ceiling
+        # from PVE's `memory:`/`cpulimit:`, but processes live in ns/ and
+        # read "max" without this).
+        if memory is not None:
+            (container_dir / "kento-memory").write_text(str(memory) + "\n")
+        if cores is not None:
+            (container_dir / "kento-cores").write_text(str(cores) + "\n")
+
         # Generate hook (LXC/PVE only) + inject.sh (shared with VM/PVE-VM modes)
         write_hook(container_dir, layers, name, state_dir)
         write_inject(container_dir)

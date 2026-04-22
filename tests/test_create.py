@@ -1358,6 +1358,45 @@ class TestLxcCreateMemoryCores:
         assert "cgroup2.memory.max" not in cfg
         assert "cgroup2.cpu.max" not in cfg
 
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_writes_memory_metadata_for_start_host_hook(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """kento-memory is read by the start-host hook to propagate the limit
+        into PVE-LXC's inner `ns` cgroup. Must be written at create time."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", memory=256)
+
+        assert (tmp_path / "test" / "kento-memory").read_text().strip() == "256"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_writes_cores_metadata_for_start_host_hook(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """Same as memory — cores metadata needed for ns-cgroup propagation."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", cores=2)
+
+        assert (tmp_path / "test" / "kento-cores").read_text().strip() == "2"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_no_metadata_files_without_limits(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """When --memory/--cores are not passed, don't write placeholder files
+        that would fool the hook into writing 0-byte limits."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+
+        assert not (tmp_path / "test" / "kento-memory").exists()
+        assert not (tmp_path / "test" / "kento-cores").exists()
+
 
 class TestVmCreateMemoryCores:
     """Tests for --memory and --cores metadata files in VM create."""

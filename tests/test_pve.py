@@ -437,11 +437,26 @@ class TestPveConfigPortForwarding:
         assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
 
     def test_pve_config_omits_hooks_when_no_port(self):
-        """Without port, only lxc.hook.pre-mount is present."""
+        """Without port/memory/cores, only lxc.hook.pre-mount is present."""
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "lxc.hook.pre-mount" in cfg
         assert "lxc.hook.start-host" not in cfg
         assert "lxc.hook.post-stop" not in cfg
+
+    def test_pve_config_memory_wires_start_host(self):
+        """Memory alone must wire start-host so the hook can propagate the
+        limit into the inner `ns` cgroup at container-start time."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  memory=256)
+        assert "lxc.hook.start-host: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
+
+    def test_pve_config_cores_wires_start_host(self):
+        """Cores alone must wire start-host for the same reason as memory."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  cores=2)
+        assert "lxc.hook.start-host: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
 
     def test_pve_config_pre_mount_always_present(self):
         """pre-mount hook is always present regardless of port setting."""

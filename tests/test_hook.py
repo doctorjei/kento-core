@@ -127,6 +127,42 @@ def test_generate_hook_start_host_enables_route_localnet():
     assert "route_localnet" in script
 
 
+def test_generate_hook_propagates_memory_to_ns_cgroup():
+    """PVE-LXC nests the container cgroup via `dir.container.inner = ns`. The
+    start-host hook must write memory.max to the inner ns/ cgroup so the guest
+    sees its own limit (cgroup v2 enforces the outer ceiling regardless, but
+    memory-aware apps like JVMs read this file to size themselves)."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-memory" in script
+    assert "/sys/fs/cgroup/lxc/" in script
+    assert "/ns" in script
+    assert "memory.max" in script
+
+
+def test_generate_hook_propagates_cores_to_ns_cgroup():
+    """Same as memory — cpu.max must be written to ns/ so the guest sees it."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-cores" in script
+    assert "cpu.max" in script
+
+
+def test_generate_hook_ns_cgroup_guarded_by_existence_check():
+    """The ns/ cgroup is a PVE-specific convention. Guard the writes with a
+    directory check so plain LXC (no ns nesting) and future PVE layout changes
+    don't trip the hook."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert '[ -d "$NS_CGROUP" ]' in script
+
+
+def test_generate_hook_ns_cgroup_writes_are_best_effort():
+    """If the cgroup write fails (permissions, controller not enabled,
+    concurrent teardown), don't abort the hook — the outer ceiling still
+    enforces the limit. Emit a warning instead."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert '2>/dev/null' in script
+    assert 'kento: warning' in script
+
+
 def test_generate_hook_start_host_dhcp_uses_background_worker():
     """DHCP discovery must fork a detached worker to avoid a deadlock where
     lxc-info (inside the hook) blocks on the monitor that is running the

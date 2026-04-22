@@ -35,6 +35,35 @@ case "$HOOK_TYPE" in
         sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"
         ;;
     start-host)
+        # PVE-LXC: propagate memory/cores limits into the inner `ns` cgroup so
+        # the guest sees its own limit at /sys/fs/cgroup/memory.max instead of
+        # "max". PVE nests the container cgroup via `lxc.cgroup.dir.container.inner = ns`,
+        # which means `lxc.cgroup2.*` keys land on the outer (accounting) cgroup
+        # at /sys/fs/cgroup/lxc/<vmid>/ while processes run in
+        # /sys/fs/cgroup/lxc/<vmid>/ns/ — cgroup v2 enforces the outer ceiling,
+        # but the inner file literally has "max" written on it. Apps like JVMs
+        # that read memory.max to size themselves get misled. Skip cleanly if
+        # PVE changes the nesting name (no `ns/`) or the write fails.
+        NS_CGROUP="/sys/fs/cgroup/lxc/$1/ns"
+        if [ -d "$NS_CGROUP" ]; then
+            if [ -f "$CONTAINER_DIR/kento-memory" ]; then
+                MEM_MB=$(cat "$CONTAINER_DIR/kento-memory" | tr -d '[:space:]')
+                if [ -n "$MEM_MB" ]; then
+                    MEM_BYTES=$((MEM_MB * 1024 * 1024))
+                    echo "$MEM_BYTES" > "$NS_CGROUP/memory.max" 2>/dev/null \
+                        || echo "kento: warning: could not set memory.max on $NS_CGROUP" >&2
+                fi
+            fi
+            if [ -f "$CONTAINER_DIR/kento-cores" ]; then
+                CORES=$(cat "$CONTAINER_DIR/kento-cores" | tr -d '[:space:]')
+                if [ -n "$CORES" ]; then
+                    QUOTA=$((CORES * 100000))
+                    echo "$QUOTA 100000" > "$NS_CGROUP/cpu.max" 2>/dev/null \
+                        || echo "kento: warning: could not set cpu.max on $NS_CGROUP" >&2
+                fi
+            fi
+        fi
+
         # Port forwarding via nftables DNAT (LXC/PVE modes only).
         PORT_FILE="$CONTAINER_DIR/kento-port"
         [ -f "$PORT_FILE" ] || exit 0

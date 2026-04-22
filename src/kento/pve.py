@@ -174,7 +174,13 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append("lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
     lines.append(f"lxc.hook.pre-mount: {hook}")
-    if port is not None:
+    # start-host runs on the host after the container is running. We use it for
+    # (a) nftables DNAT port-forwarding, and (b) propagating memory/cores into
+    # the inner `ns` cgroup on PVE-LXC so the guest sees its own limit instead
+    # of "max" (the outer cgroup gets the ceiling but `lxc.cgroup.dir.container.inner`
+    # nests the actual namespace one level deeper). Register it whenever any of
+    # those features need it.
+    if port is not None or memory is not None or cores is not None:
         lines.append(f"lxc.hook.start-host: {hook}")
         lines.append(f"lxc.hook.post-stop: {hook}")
     mount_auto = LXC_MOUNT_AUTO_NESTING if nesting else LXC_MOUNT_AUTO
