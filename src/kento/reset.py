@@ -8,6 +8,7 @@ from pathlib import Path
 from kento import is_running, read_mode, require_root, resolve_container
 from kento.hook import write_hook
 from kento.layers import resolve_layers
+from kento.vm_hook import write_vm_hook
 
 
 def reset(name: str, *, container_dir: Path | None = None, mode: str | None = None) -> None:
@@ -134,8 +135,14 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     layers = resolve_layers(image)
     (container_dir / "kento-layers").write_text(layers + "\n")
 
-    # Regenerate hook (LXC/PVE only — VM mode has no hook)
-    if mode != "vm":
+    # Regenerate the mode-appropriate hook so fresh image paths land in it.
+    # Plain VM mode has no hook (QEMU starts from Python), but pve-vm does —
+    # and its hook shape (VMID $1 / PHASE $2) is incompatible with the LXC
+    # hook shape (uses $3 for hook type), so using the wrong writer here
+    # silently breaks `qm start` after scrub.
+    if mode == "pve-vm":
+        write_vm_hook(container_dir, layers, name, state_dir)
+    elif mode != "vm":
         write_hook(container_dir, layers, name, state_dir)
 
     print(f"Scrubbed: {name}")

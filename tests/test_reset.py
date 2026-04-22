@@ -214,6 +214,43 @@ def test_reset_vm_no_hook_regenerated(mock_root, mock_layers, mock_run,
 @patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
 @patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
 @patch("kento.reset.require_root")
+def test_reset_pve_vm_regenerates_vm_hook(mock_root, mock_layers, mock_run,
+                                           tmp_path):
+    """pve-vm scrub must regenerate the VM hookscript, not the LXC hook.
+
+    Before this fix scrub called `write_hook()` for any mode != "vm",
+    which overwrote the VM hookscript with the LXC shell hook. `qm start`
+    then failed in pre-start with `3: parameter not set` because the LXC
+    hook expects a 3rd arg (hook-type) but qm only passes VMID and PHASE.
+    """
+    lxc_dir = tmp_path / "testpvevm"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve-vm\n")
+    (lxc_dir / "kento-vmid").write_text("100\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.reset.is_running", return_value=False):
+        reset("testpvevm")
+
+    hook = lxc_dir / "kento-hook"
+    assert hook.exists()
+    content = hook.read_text()
+    # VM hook shape: uses $1/$2 positional args, has a "pre-start" case
+    assert 'VMID="$1"' in content
+    assert 'PHASE="$2"' in content
+    # LXC hook shape uses $3 for hook type — must NOT be present
+    assert 'LXC_HOOK_TYPE' not in content
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
 def test_reset_reinjects_static_ip(mock_root, mock_layers, mock_run,
                                     tmp_path):
     lxc_dir = tmp_path / "test"
