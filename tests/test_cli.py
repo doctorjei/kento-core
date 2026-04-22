@@ -21,7 +21,7 @@ def test_version(capsys):
         main(["--version"])
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "1.0.0" in output
+    assert "kento" in output
 
 
 def test_no_command(capsys):

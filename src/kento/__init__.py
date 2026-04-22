@@ -5,7 +5,11 @@ import pwd
 import sys
 from pathlib import Path
 
-__version__ = "1.0.0"
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("kento")
+except Exception:
+    __version__ = "unknown"
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
