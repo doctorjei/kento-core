@@ -95,7 +95,7 @@ case "$PHASE" in
         fi
 
         SOCKET="$CONTAINER_DIR/virtiofsd.sock"
-        $VIRTIOFSD --socket-path="$SOCKET" --shared-dir="$ROOTFS" --cache=auto \
+        setsid $VIRTIOFSD --socket-path="$SOCKET" --shared-dir="$ROOTFS" --cache=auto \
             </dev/null >"$CONTAINER_DIR/virtiofsd.log" 2>&1 &
         VFS_PID=$!
         echo "$VFS_PID" > "$CONTAINER_DIR/kento-virtiofsd-pid"
