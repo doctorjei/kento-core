@@ -142,9 +142,12 @@ def unmount_rootfs(container_dir: Path) -> None:
 
 def start_vm(container_dir: Path, name: str) -> None:
     """Start a VM: mount rootfs, launch virtiofsd + QEMU, write PID files."""
+    # F15: idempotent — callers in start.py already guard, but this
+    # protects direct callers (create --start flow) too. Match CLI
+    # wording so users see the same message regardless of entry point.
     if is_vm_running(container_dir):
-        print(f"Error: VM {name} is already running", file=sys.stderr)
-        sys.exit(1)
+        print(f"Already running: {name}")
+        return
 
     layers = (container_dir / "kento-layers").read_text().strip()
     state_dir = Path((container_dir / "kento-state").read_text().strip())

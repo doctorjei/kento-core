@@ -508,11 +508,14 @@ class TestStartVm:
         assert "-netdev" not in qemu_args
 
     @patch("kento.vm.is_vm_running", return_value=True)
-    def test_start_rejects_running(self, mock_running, tmp_path):
+    def test_start_already_running_is_idempotent(self, mock_running, tmp_path, capsys):
+        """F15: start_vm on an already-running VM is a no-op, not an error."""
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
-        with pytest.raises(SystemExit):
-            start_vm(lxc_dir, "testvm")
+        # Does not raise; returns cleanly.
+        start_vm(lxc_dir, "testvm")
+        captured = capsys.readouterr()
+        assert "Already running: testvm" in captured.out
 
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.unmount_rootfs")

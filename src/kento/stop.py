@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from kento import read_mode, require_root, resolve_container
+from kento import is_running, read_mode, require_root, resolve_container
 from kento.subprocess_util import run_or_die
 
 
@@ -15,6 +15,13 @@ def shutdown(name: str, *, force: bool = False, container_dir: Path | None = Non
 
     if mode is None:
         mode = read_mode(container_dir)
+
+    # F15: idempotent stop — calling stop on an already-stopped instance
+    # should be a no-op, not a traceback from lxc-stop/pct/qm exiting
+    # non-zero because the target is already down.
+    if not is_running(container_dir, mode):
+        print(f"Already stopped: {name}")
+        return
 
     if mode == "vm":
         from kento.vm import stop_vm

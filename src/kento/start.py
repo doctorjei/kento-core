@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from kento import read_mode, require_root, resolve_container
+from kento import is_running, read_mode, require_root, resolve_container
 from kento.subprocess_util import run_or_die
 
 
@@ -15,6 +15,13 @@ def start(name: str, *, container_dir: Path | None = None, mode: str | None = No
 
     if mode is None:
         mode = read_mode(container_dir)
+
+    # F15: idempotent start — calling start on a running instance should
+    # be a no-op that reports the current state, not a traceback from
+    # lxc-start/pct/qm complaining the container is already up.
+    if is_running(container_dir, mode):
+        print(f"Already running: {name}")
+        return
 
     if mode == "vm":
         from kento.vm import start_vm
