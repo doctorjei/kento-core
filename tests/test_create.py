@@ -1,6 +1,7 @@
 """Tests for container creation."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -1988,3 +1989,225 @@ class TestUnconfinedGate:
         assert "acknowledge tradeoff" in err
         # Nothing on disk.
         assert not (tmp_path / "test").exists()
+
+
+class TestCreateRollback:
+    """F4: create() must roll back partial state if any post-mkdir step fails.
+
+    Exception raised anywhere after the initial ``container_dir.mkdir`` should
+    leave no orphan state behind — no container_dir, no external state_dir,
+    no image-hold podman container, no PVE config file, no snippets wrapper.
+    Re-raise the original exception so the user sees what failed.
+    """
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_rollback_cleans_container_dir(self, mock_root, mock_layers,
+                                                mock_run, tmp_path):
+        """LXC mode: if write_hook explodes, container_dir and state_dir are gone."""
+        state_dir = tmp_path / "state" / "test"
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated hook failure")
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=state_dir), \
+             patch("kento.create.write_hook", side_effect=boom):
+            with pytest.raises(RuntimeError, match="simulated hook failure"):
+                create("myimage:latest", name="test", mode="lxc",
+                       unconfined=True)
+
+        # container_dir is gone
+        assert not (tmp_path / "test").exists()
+        # separate state_dir is gone
+        assert not state_dir.exists()
+        # image-hold removal was invoked (podman rm kento-hold.test)
+        rm_calls = [c for c in mock_run.call_args_list
+                    if len(c[0][0]) >= 3 and c[0][0][1] == "rm"
+                    and c[0][0][2] == "kento-hold.test"]
+        assert rm_calls, "remove_image_hold was not called on rollback"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_rollback_cleans_pve_config_and_wrapper(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """pve mode: write_pve_config explodes after wrapper+hook written."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        state_dir = tmp_path / "state" / "100"
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("pmxcfs is read-only")
+
+        deleted = {"pve_config": 0, "wrapper": 0}
+
+        def count_delete_pve(vmid):
+            deleted["pve_config"] += 1
+
+        def count_delete_wrapper(vmid):
+            deleted["wrapper"] += 1
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=state_dir), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento._bridge_exists", return_value=True), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   return_value=(snippets, "local")), \
+             patch("kento.pve.write_pve_config", side_effect=boom), \
+             patch("kento.pve.delete_pve_config", side_effect=count_delete_pve), \
+             patch("kento.lxc_hook.delete_lxc_snippets_wrapper",
+                   side_effect=count_delete_wrapper):
+            with pytest.raises(RuntimeError, match="pmxcfs is read-only"):
+                create("myimage:latest", name="test", mode="pve",
+                       port="10205:22", net_type="bridge", bridge="vmbr0")
+
+        # Snippets wrapper was written (before write_pve_config blew up) and
+        # must be torn down.
+        assert deleted["wrapper"] == 1, \
+            "delete_lxc_snippets_wrapper was not called on rollback"
+        # write_pve_config raised before writing, but the undo is registered
+        # AFTER a successful write, so delete_pve_config should NOT run here.
+        assert deleted["pve_config"] == 0, \
+            "delete_pve_config must not run for a write that never happened"
+        assert not (tmp_path / "100").exists()
+        assert not state_dir.exists()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_rollback_cleans_container_dir(self, mock_root, mock_layers, tmp_path):
+        """plain vm mode: explode in write_inject; container_dir cleaned."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        state_dir = tmp_path / "state" / "test"
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=state_dir), \
+             patch("kento.create.write_inject", side_effect=boom):
+            with pytest.raises(RuntimeError, match="disk full"):
+                create("myimage:latest", name="test", mode="vm")
+
+        assert not (vm_dir / "test").exists()
+        assert not state_dir.exists()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_rollback_cleans_qm_config_and_wrapper(
+            self, mock_root, mock_layers, tmp_path):
+        """pve-vm mode: write_qm_config explodes; snippets wrapper + container
+        state are all cleaned. delete_qm_config is NOT called because the
+        write never succeeded (undo is only registered after a successful write)."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        state_dir = tmp_path / "state" / "test"
+
+        deleted = {"wrapper": 0, "qm": 0}
+
+        def count_delete_wrapper(vmid):
+            deleted["wrapper"] += 1
+
+        def count_delete_qm(vmid):
+            deleted["qm"] += 1
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("qm rejects config")
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=state_dir), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config", side_effect=boom), \
+             patch("kento.vm_hook.delete_snippets_wrapper",
+                   side_effect=count_delete_wrapper), \
+             patch("kento.pve.delete_qm_config", side_effect=count_delete_qm):
+            with pytest.raises(RuntimeError, match="qm rejects config"):
+                create("myimage:latest", name="test", mode="vm")
+
+        assert deleted["wrapper"] == 1, \
+            "delete_snippets_wrapper was not called on rollback"
+        assert deleted["qm"] == 0, \
+            "delete_qm_config must not run for a write that never happened"
+        assert not (vm_dir / "test").exists()
+        assert not state_dir.exists()
+
+    @patch("kento.create.require_root")
+    def test_early_failure_no_rollback_needed(self, mock_root, tmp_path):
+        """Failure BEFORE any side-effects (e.g. missing ssh key file) must
+        not attempt rollback — there's nothing to roll back."""
+        missing = tmp_path / "absent.pub"
+        with patch("kento.create.LXC_BASE", tmp_path):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test", mode="lxc",
+                       unconfined=True, ssh_keys=[str(missing)])
+        assert exc.value.code == 1
+        # Nothing got created.
+        assert not (tmp_path / "test").exists()
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_start_failure_rolls_back_and_stops(self, mock_root, mock_layers,
+                                                  tmp_path):
+        """--start path: lxc-start fails after config is written. Rollback
+        must stop the (partially-started) container AND clean container_dir.
+        """
+        state_dir = tmp_path / "state" / "test"
+
+        stop_calls = []
+        start_called = []
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "lxc-start":
+                start_called.append(cmd)
+                raise subprocess.CalledProcessError(1, cmd)
+            if cmd[0] == "lxc-stop":
+                stop_calls.append(cmd)
+            # podman / other subprocess: stub
+            return MagicMock(returncode=0)
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=state_dir), \
+             patch("kento.create.subprocess.run", side_effect=fake_run):
+            with pytest.raises(subprocess.CalledProcessError):
+                create("myimage:latest", name="test", mode="lxc",
+                       unconfined=True, start=True)
+
+        assert start_called, "lxc-start was not invoked"
+        assert stop_calls, "lxc-stop was not called on rollback"
+        # Container state is fully cleaned
+        assert not (tmp_path / "test").exists()
+        assert not state_dir.exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_rollback_preserves_original_exception(self, mock_root, mock_layers,
+                                                     mock_run, tmp_path):
+        """When a cleanup helper itself errors, the original exception still
+        reaches the caller — cleanup failures must not mask the root cause."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("original failure")
+
+        def cleanup_boom(*args, **kwargs):
+            raise OSError("cleanup also failed")
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base",
+                   return_value=tmp_path / "state" / "test"), \
+             patch("kento.create.write_hook", side_effect=boom), \
+             patch("kento.layers.remove_image_hold", side_effect=cleanup_boom):
+            with pytest.raises(RuntimeError, match="original failure"):
+                create("myimage:latest", name="test", mode="lxc",
+                       unconfined=True)

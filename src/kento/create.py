@@ -1,5 +1,6 @@
 """Create an instance backed by an OCI image."""
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,22 @@ from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
 from kento.inject import write_inject
 from kento.layers import resolve_layers
+
+
+def _run_cleanup(undos: list[tuple[str, object]]) -> None:
+    """Run cleanup callables in reverse order. Best-effort — log and continue on errors.
+
+    Each entry is ``(label, callable)``. The callable takes no args and its
+    return value is ignored. Exceptions are caught so one cleanup failure
+    doesn't mask the others (or the original failure).
+    """
+    while undos:
+        label, undo = undos.pop()
+        try:
+            undo()
+        except Exception as cleanup_err:  # noqa: BLE001 — best-effort cleanup
+            print(f"Warning: rollback step {label!r} failed: {cleanup_err}",
+                  file=sys.stderr)
 
 
 def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
@@ -392,267 +409,319 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
               file=sys.stderr)
         sys.exit(1)
 
-    from kento.layers import create_image_hold
-    create_image_hold(image, name)
+    # Accumulator of rollback actions for every side-effecting step past
+    # this point. On exception, each undo runs in LIFO order — see F4 in
+    # the edge-case audit for the original motivation.
+    undos: list[tuple[str, object]] = []
 
-    # Create directory structure — upper/work may be outside container_dir for sudo users
-    state_dir = upper_base(container_id, base_dir if mode in ("vm", "pve-vm") else None)
-    (container_dir / "rootfs").mkdir(parents=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "upper").mkdir(exist_ok=True)
-    (state_dir / "work").mkdir(exist_ok=True)
+    try:
+        from kento.layers import create_image_hold, remove_image_hold
+        create_image_hold(image, name)
+        undos.append(("image-hold", lambda: remove_image_hold(name)))
 
-    # Write image reference, layer paths, state dir, mode, and name
-    (container_dir / "kento-image").write_text(image + "\n")
-    (container_dir / "kento-layers").write_text(layers + "\n")
-    (container_dir / "kento-state").write_text(str(state_dir) + "\n")
-    (container_dir / "kento-mode").write_text(mode + "\n")
-    (container_dir / "kento-name").write_text(name + "\n")
+        # Create directory structure — upper/work may be outside container_dir for sudo users
+        state_dir = upper_base(container_id, base_dir if mode in ("vm", "pve-vm") else None)
+        (container_dir / "rootfs").mkdir(parents=True)
+        undos.append(("container-dir",
+                      lambda: shutil.rmtree(container_dir, ignore_errors=True)))
 
-    # Write static IP config if requested
-    if ip or dns or searchdomain:
-        net_parts = []
-        if ip:
-            net_parts.append(f"ip={ip}")
-        if gateway:
-            net_parts.append(f"gateway={gateway}")
-        if dns:
-            net_parts.append(f"dns={dns}")
-        if searchdomain:
-            net_parts.append(f"searchdomain={searchdomain}")
-        (container_dir / "kento-net").write_text("\n".join(net_parts) + "\n")
-        if ip:
-            _inject_network_config(state_dir, ip, gateway, dns, searchdomain,
-                                   mode=mode)
-        elif dns or searchdomain:
-            resolved_dir = state_dir / "upper" / "etc" / "systemd" / "resolved.conf.d"
-            resolved_dir.mkdir(parents=True, exist_ok=True)
-            lines = ["[Resolve]"]
+        state_dir_existed_outside = state_dir != container_dir and state_dir.exists()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        if state_dir != container_dir and not state_dir_existed_outside:
+            # Only schedule removal of a state_dir we just created (don't
+            # nuke a pre-existing directory that happened to share the path).
+            undos.append(("state-dir",
+                          lambda: shutil.rmtree(state_dir, ignore_errors=True)))
+        (state_dir / "upper").mkdir(exist_ok=True)
+        (state_dir / "work").mkdir(exist_ok=True)
+
+        # Write image reference, layer paths, state dir, mode, and name
+        (container_dir / "kento-image").write_text(image + "\n")
+        (container_dir / "kento-layers").write_text(layers + "\n")
+        (container_dir / "kento-state").write_text(str(state_dir) + "\n")
+        (container_dir / "kento-mode").write_text(mode + "\n")
+        (container_dir / "kento-name").write_text(name + "\n")
+
+        # Write static IP config if requested
+        if ip or dns or searchdomain:
+            net_parts = []
+            if ip:
+                net_parts.append(f"ip={ip}")
+            if gateway:
+                net_parts.append(f"gateway={gateway}")
             if dns:
-                lines.append(f"DNS={dns}")
+                net_parts.append(f"dns={dns}")
             if searchdomain:
-                lines.append(f"Domains={searchdomain}")
-            lines.append("")
-            (resolved_dir / "90-kento.conf").write_text("\n".join(lines))
+                net_parts.append(f"searchdomain={searchdomain}")
+            (container_dir / "kento-net").write_text("\n".join(net_parts) + "\n")
+            if ip:
+                _inject_network_config(state_dir, ip, gateway, dns, searchdomain,
+                                       mode=mode)
+            elif dns or searchdomain:
+                resolved_dir = state_dir / "upper" / "etc" / "systemd" / "resolved.conf.d"
+                resolved_dir.mkdir(parents=True, exist_ok=True)
+                lines = ["[Resolve]"]
+                if dns:
+                    lines.append(f"DNS={dns}")
+                if searchdomain:
+                    lines.append(f"Domains={searchdomain}")
+                lines.append("")
+                (resolved_dir / "90-kento.conf").write_text("\n".join(lines))
 
-    # Write hostname into guest
-    _inject_hostname(state_dir, name)
+        # Write hostname into guest
+        _inject_hostname(state_dir, name)
 
-    # Write timezone config if requested
-    if timezone:
-        (container_dir / "kento-tz").write_text(timezone + "\n")
-        _inject_timezone(state_dir, timezone)
+        # Write timezone config if requested
+        if timezone:
+            (container_dir / "kento-tz").write_text(timezone + "\n")
+            _inject_timezone(state_dir, timezone)
 
-    # Write environment variables if requested
-    if env:
-        (container_dir / "kento-env").write_text("\n".join(env) + "\n")
-        _inject_env(state_dir, env)
+        # Write environment variables if requested
+        if env:
+            (container_dir / "kento-env").write_text("\n".join(env) + "\n")
+            _inject_env(state_dir, env)
 
-    # Write SSH authorized_keys metadata if requested. Hook copies this into
-    # the guest's ~/.ssh/authorized_keys on every start (target user controlled
-    # by kento-ssh-user, defaulting to root).
-    if ssh_key_contents is not None:
-        (container_dir / "kento-authorized-keys").write_text(ssh_key_contents)
-    if ssh_key_user != "root":
-        (container_dir / "kento-ssh-user").write_text(ssh_key_user + "\n")
+        # Write SSH authorized_keys metadata if requested. Hook copies this into
+        # the guest's ~/.ssh/authorized_keys on every start (target user controlled
+        # by kento-ssh-user, defaulting to root).
+        if ssh_key_contents is not None:
+            (container_dir / "kento-authorized-keys").write_text(ssh_key_contents)
+        if ssh_key_user != "root":
+            (container_dir / "kento-ssh-user").write_text(ssh_key_user + "\n")
 
-    # Generate or copy SSH host keys
-    if ssh_host_keys:
-        _generate_ssh_host_keys(container_dir / "ssh-host-keys")
-    elif ssh_host_key_dir is not None:
-        _copy_ssh_host_keys(Path(ssh_host_key_dir), container_dir / "ssh-host-keys")
+        # Generate or copy SSH host keys
+        if ssh_host_keys:
+            _generate_ssh_host_keys(container_dir / "ssh-host-keys")
+        elif ssh_host_key_dir is not None:
+            _copy_ssh_host_keys(Path(ssh_host_key_dir), container_dir / "ssh-host-keys")
 
-    # Determine config mode (injection vs cloud-init)
-    if config_mode == "auto":
-        if detect_cloudinit(layers):
-            effective_config_mode = "cloudinit"
+        # Determine config mode (injection vs cloud-init)
+        if config_mode == "auto":
+            if detect_cloudinit(layers):
+                effective_config_mode = "cloudinit"
+            else:
+                effective_config_mode = "injection"
         else:
-            effective_config_mode = "injection"
-    else:
-        effective_config_mode = config_mode
-        if config_mode == "cloudinit" and not detect_cloudinit(layers):
-            print("Warning: --config-mode cloudinit specified but cloud-init not detected in image",
-                  file=sys.stderr)
+            effective_config_mode = config_mode
+            if config_mode == "cloudinit" and not detect_cloudinit(layers):
+                print("Warning: --config-mode cloudinit specified but cloud-init not detected in image",
+                      file=sys.stderr)
 
-    # Write config mode metadata
-    (container_dir / "kento-config-mode").write_text(effective_config_mode + "\n")
+        # Write config mode metadata
+        (container_dir / "kento-config-mode").write_text(effective_config_mode + "\n")
 
-    # Generate cloud-init seed if in cloudinit mode
-    if effective_config_mode == "cloudinit":
-        host_key_dir = container_dir / "ssh-host-keys"
-        write_seed(
-            container_dir, name=name,
-            ip=ip, gateway=gateway, dns=dns, searchdomain=searchdomain,
-            timezone=timezone, env=env,
-            ssh_keys=ssh_key_contents, ssh_key_user=ssh_key_user,
-            ssh_host_key_dir=host_key_dir if host_key_dir.is_dir() else None,
-        )
+        # Generate cloud-init seed if in cloudinit mode
+        if effective_config_mode == "cloudinit":
+            host_key_dir = container_dir / "ssh-host-keys"
+            write_seed(
+                container_dir, name=name,
+                ip=ip, gateway=gateway, dns=dns, searchdomain=searchdomain,
+                timezone=timezone, env=env,
+                ssh_keys=ssh_key_contents, ssh_key_user=ssh_key_user,
+                ssh_host_key_dir=host_key_dir if host_key_dir.is_dir() else None,
+            )
 
-    if mode in ("vm", "pve-vm"):
-        # Resolve MAC address for VM modes: user override wins, otherwise
-        # auto-generate a stable deterministic MAC from the container name
-        # (plain VM) or VMID (PVE-VM). Writing the result to kento-mac means
-        # scrub/recreate keep the same MAC (external DHCP reservations work).
-        from kento.vm import generate_mac
-        if mac is None:
+        if mode in ("vm", "pve-vm"):
+            # Resolve MAC address for VM modes: user override wins, otherwise
+            # auto-generate a stable deterministic MAC from the container name
+            # (plain VM) or VMID (PVE-VM). Writing the result to kento-mac means
+            # scrub/recreate keep the same MAC (external DHCP reservations work).
+            from kento.vm import generate_mac
+            if mac is None:
+                if mode == "pve-vm":
+                    mac_value = generate_mac(str(vmid))
+                else:
+                    mac_value = generate_mac(name)
+            else:
+                mac_value = mac
+            (container_dir / "kento-mac").write_text(mac_value + "\n")
+
+            # Resolve memory/cores: CLI > config file > hardcoded defaults
+            from kento.defaults import get_vm_defaults
+            vm_defaults = get_vm_defaults()
+            effective_memory = memory if memory is not None else vm_defaults["memory"]
+            effective_cores = cores if cores is not None else vm_defaults["cores"]
+            (container_dir / "kento-memory").write_text(str(effective_memory) + "\n")
+            (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
+
+            # Write port mapping (usermode networking only)
+            if network["type"] == "usermode":
+                from kento.vm import allocate_port
+                if port is None:
+                    host_port = allocate_port()
+                    guest_port = 22
+                else:
+                    host_port, guest_port = port.split(":")
+                    host_port, guest_port = int(host_port), int(guest_port)
+                (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+
             if mode == "pve-vm":
-                mac_value = generate_mac(str(vmid))
-            else:
-                mac_value = generate_mac(name)
-        else:
-            mac_value = mac
-        (container_dir / "kento-mac").write_text(mac_value + "\n")
+                # Generate VM hookscript + inject.sh (hookscript invokes inject.sh
+                # in its pre-start phase after overlayfs mount, before virtiofsd).
+                write_vm_hook(container_dir, layers, name, state_dir)
+                write_inject(container_dir)
 
-        # Resolve memory/cores: CLI > config file > hardcoded defaults
-        from kento.defaults import get_vm_defaults
-        vm_defaults = get_vm_defaults()
-        effective_memory = memory if memory is not None else vm_defaults["memory"]
-        effective_cores = cores if cores is not None else vm_defaults["cores"]
-        (container_dir / "kento-memory").write_text(str(effective_memory) + "\n")
-        (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
-
-        # Write port mapping (usermode networking only)
-        if network["type"] == "usermode":
-            from kento.vm import allocate_port
-            if port is None:
-                host_port = allocate_port()
-                guest_port = 22
-            else:
-                host_port, guest_port = port.split(":")
-                host_port, guest_port = int(host_port), int(guest_port)
-            (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
-
-        if mode == "pve-vm":
-            # Generate VM hookscript + inject.sh (hookscript invokes inject.sh
-            # in its pre-start phase after overlayfs mount, before virtiofsd).
-            write_vm_hook(container_dir, layers, name, state_dir)
-            write_inject(container_dir)
-
-            # Write snippets wrapper and get PVE reference
-            hookscript_ref = write_snippets_wrapper(
-                vmid, container_dir / "kento-hook",
-                snippets_dir=_snippets_info[0],
-                storage_name=_snippets_info[1],
-            )
-
-            # Write VMID reference
-            (container_dir / "kento-vmid").write_text(str(vmid) + "\n")
-
-            # Generate and write QM config
-            qm_conf = write_qm_config(
-                vmid,
-                generate_qm_config(
-                    name, vmid, container_dir,
-                    hookscript_ref=hookscript_ref,
-                    memory=effective_memory,
-                    cores=effective_cores,
-                    machine=vm_defaults["machine"],
-                    kvm=vm_defaults["kvm"],
-                    bridge=bridge,
-                    net_type=network.get("type"),
-                    mac=mac_value,
-                ),
-            )
-
-            print(f"\nVM created: {name}")
-            print(f"  Image:   {image}")
-            print(f"  VMID:    {vmid}")
-            if network["type"] == "usermode":
-                print(f"  Port:    {host_port}:{guest_port}")
-            elif network["type"] == "bridge":
-                print(f"  Bridge:  {bridge}")
-            print(f"  Config:  {qm_conf}")
-            print(f"  Dir:     {container_dir}")
-        else:
-            # Plain VM mode (no PVE)
-            write_inject(container_dir)
-            print(f"\nContainer created: {name}")
-            print(f"  Image:   {image}")
-            if network["type"] == "usermode":
-                print(f"  Port:    {host_port}:{guest_port}")
-            print(f"  Dir:     {container_dir}")
-    else:
-        # Port forwarding for LXC/PVE modes
-        if port is not None:
-            from kento.vm import allocate_port
-            if port == "auto":
-                host_port = allocate_port()
-                guest_port = 22
-            else:
-                host_port, guest_port = port.split(":")
-                host_port, guest_port = int(host_port), int(guest_port)
-            (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
-
-        # Persist memory/cores so the start-host hook can propagate the limit
-        # into the inner ns cgroup on PVE-LXC (outer cgroup gets the ceiling
-        # from PVE's `memory:`/`cpulimit:`, but processes live in ns/ and
-        # read "max" without this).
-        if memory is not None:
-            (container_dir / "kento-memory").write_text(str(memory) + "\n")
-        if cores is not None:
-            (container_dir / "kento-cores").write_text(str(cores) + "\n")
-
-        # Generate hook (LXC/PVE only) + inject.sh (shared with VM/PVE-VM modes)
-        write_hook(container_dir, layers, name, state_dir)
-        write_inject(container_dir)
-
-        # Generate config
-        if mode == "pve":
-            hookscript_ref = None
-            if _snippets_info is not None:
-                from kento.lxc_hook import write_lxc_snippets_wrapper
-                hookscript_ref = write_lxc_snippets_wrapper(
+                # Write snippets wrapper and get PVE reference
+                hookscript_ref = write_snippets_wrapper(
                     vmid, container_dir / "kento-hook",
                     snippets_dir=_snippets_info[0],
                     storage_name=_snippets_info[1],
                 )
-            pve_conf = write_pve_config(
-                vmid,
-                generate_pve_config(name, vmid, container_dir, bridge=bridge,
+                from kento.vm_hook import delete_snippets_wrapper
+                undos.append(("vm-snippets-wrapper",
+                              lambda v=vmid: delete_snippets_wrapper(v)))
+
+                # Write VMID reference
+                (container_dir / "kento-vmid").write_text(str(vmid) + "\n")
+
+                # Generate and write QM config
+                qm_conf = write_qm_config(
+                    vmid,
+                    generate_qm_config(
+                        name, vmid, container_dir,
+                        hookscript_ref=hookscript_ref,
+                        memory=effective_memory,
+                        cores=effective_cores,
+                        machine=vm_defaults["machine"],
+                        kvm=vm_defaults["kvm"],
+                        bridge=bridge,
+                        net_type=network.get("type"),
+                        mac=mac_value,
+                    ),
+                )
+                from kento.pve import delete_qm_config
+                undos.append(("qm-config",
+                              lambda v=vmid: delete_qm_config(v)))
+
+                print(f"\nVM created: {name}")
+                print(f"  Image:   {image}")
+                print(f"  VMID:    {vmid}")
+                if network["type"] == "usermode":
+                    print(f"  Port:    {host_port}:{guest_port}")
+                elif network["type"] == "bridge":
+                    print(f"  Bridge:  {bridge}")
+                print(f"  Config:  {qm_conf}")
+                print(f"  Dir:     {container_dir}")
+            else:
+                # Plain VM mode (no PVE)
+                write_inject(container_dir)
+                print(f"\nContainer created: {name}")
+                print(f"  Image:   {image}")
+                if network["type"] == "usermode":
+                    print(f"  Port:    {host_port}:{guest_port}")
+                print(f"  Dir:     {container_dir}")
+        else:
+            # Port forwarding for LXC/PVE modes
+            if port is not None:
+                from kento.vm import allocate_port
+                if port == "auto":
+                    host_port = allocate_port()
+                    guest_port = 22
+                else:
+                    host_port, guest_port = port.split(":")
+                    host_port, guest_port = int(host_port), int(guest_port)
+                (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+
+            # Persist memory/cores so the start-host hook can propagate the limit
+            # into the inner ns cgroup on PVE-LXC (outer cgroup gets the ceiling
+            # from PVE's `memory:`/`cpulimit:`, but processes live in ns/ and
+            # read "max" without this).
+            if memory is not None:
+                (container_dir / "kento-memory").write_text(str(memory) + "\n")
+            if cores is not None:
+                (container_dir / "kento-cores").write_text(str(cores) + "\n")
+
+            # Generate hook (LXC/PVE only) + inject.sh (shared with VM/PVE-VM modes)
+            write_hook(container_dir, layers, name, state_dir)
+            write_inject(container_dir)
+
+            # Generate config
+            if mode == "pve":
+                hookscript_ref = None
+                if _snippets_info is not None:
+                    from kento.lxc_hook import (write_lxc_snippets_wrapper,
+                                                delete_lxc_snippets_wrapper)
+                    hookscript_ref = write_lxc_snippets_wrapper(
+                        vmid, container_dir / "kento-hook",
+                        snippets_dir=_snippets_info[0],
+                        storage_name=_snippets_info[1],
+                    )
+                    undos.append(("lxc-snippets-wrapper",
+                                  lambda v=vmid: delete_lxc_snippets_wrapper(v)))
+                pve_conf = write_pve_config(
+                    vmid,
+                    generate_pve_config(name, vmid, container_dir, bridge=bridge,
+                                        net_type=network.get("type"),
+                                        nesting=nesting, ip=ip,
+                                        gateway=gateway, nameserver=dns,
+                                        searchdomain=searchdomain,
+                                        timezone=timezone, env=env,
+                                        port=port,
+                                        memory=memory, cores=cores,
+                                        hookscript_ref=hookscript_ref)
+                )
+                from kento.pve import delete_pve_config
+                undos.append(("pve-config",
+                              lambda v=vmid: delete_pve_config(v)))
+                config_path = str(pve_conf)
+            else:
+                (container_dir / "config").write_text(
+                    generate_config(name, container_dir, bridge=bridge,
                                     net_type=network.get("type"),
-                                    nesting=nesting, ip=ip,
-                                    gateway=gateway, nameserver=dns,
-                                    searchdomain=searchdomain,
-                                    timezone=timezone, env=env,
+                                    nesting=nesting,
+                                    ip=ip, gateway=gateway, env=env,
                                     port=port,
                                     memory=memory, cores=cores,
-                                    hookscript_ref=hookscript_ref)
-            )
-            config_path = str(pve_conf)
-        else:
-            (container_dir / "config").write_text(
-                generate_config(name, container_dir, bridge=bridge,
-                                net_type=network.get("type"),
-                                nesting=nesting,
-                                ip=ip, gateway=gateway, env=env,
-                                port=port,
-                                memory=memory, cores=cores,
-                                unconfined=unconfined, mode=mode)
-            )
-            config_path = f"{container_dir}/config"
+                                    unconfined=unconfined, mode=mode)
+                )
+                config_path = f"{container_dir}/config"
 
-        print(f"\nContainer created: {name}")
-        print(f"  Image:   {image}")
-        print(f"  Bridge:  {bridge}")
-        if mode == "pve":
-            print(f"  VMID:    {vmid}")
-        if port is not None:
-            print(f"  Port:    {host_port}:{guest_port}")
-        print(f"  Nesting: {nesting}")
-        print(f"  Config:  {config_path}")
+            print(f"\nContainer created: {name}")
+            print(f"  Image:   {image}")
+            print(f"  Bridge:  {bridge}")
+            if mode == "pve":
+                print(f"  VMID:    {vmid}")
+            if port is not None:
+                print(f"  Port:    {host_port}:{guest_port}")
+            print(f"  Nesting: {nesting}")
+            print(f"  Config:  {config_path}")
 
-    if start:
-        print("\nStarting...")
-        if mode in ("vm", "pve-vm"):
+        if start:
+            print("\nStarting...")
+            # Register the stop undo BEFORE issuing start: if the start call
+            # succeeds partially (container registers, then crashes), we still
+            # want to attempt the stop on rollback.
             if mode == "pve-vm":
+                undos.append(("qm-stop",
+                              lambda v=vmid: subprocess.run(
+                                  ["qm", "stop", str(v)],
+                                  capture_output=True, check=False)))
                 subprocess.run(["qm", "start", str(vmid)], check=True)
-            else:
-                from kento.vm import start_vm
+            elif mode == "vm":
+                from kento.vm import start_vm, stop_vm
+                undos.append(("vm-stop",
+                              lambda d=container_dir:
+                                  stop_vm(d, force=True)))
                 start_vm(container_dir, name)
-        elif mode == "pve":
-            subprocess.run(["pct", "start", str(vmid)], check=True)
+            elif mode == "pve":
+                undos.append(("pct-stop",
+                              lambda v=vmid: subprocess.run(
+                                  ["pct", "stop", str(v)],
+                                  capture_output=True, check=False)))
+                subprocess.run(["pct", "start", str(vmid)], check=True)
+            else:
+                undos.append(("lxc-stop",
+                              lambda n=name: subprocess.run(
+                                  ["lxc-stop", "-n", n],
+                                  capture_output=True, check=False)))
+                subprocess.run(["lxc-start", "-n", name], check=True)
+            print("  Status: running")
         else:
-            subprocess.run(["lxc-start", "-n", name], check=True)
-        print("  Status: running")
-    else:
-        print(f"  Status: stopped (use 'kento start {name}' to boot)")
+            print(f"  Status: stopped (use 'kento start {name}' to boot)")
+    except BaseException as exc:
+        # Rollback every side-effect we successfully made before re-raising.
+        # Use BaseException so SystemExit/KeyboardInterrupt also trigger cleanup.
+        print(f"\nError during create: {exc}", file=sys.stderr)
+        print("Rolling back partial state...", file=sys.stderr)
+        _run_cleanup(undos)
+        raise
