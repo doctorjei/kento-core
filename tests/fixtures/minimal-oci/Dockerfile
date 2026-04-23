@@ -16,10 +16,17 @@ RUN mkdir -p /sbin /etc \
     && printf '%s\n' \
         '#!/bin/sh' \
         '# kento test fixture init: sleep forever but stay reactive to signals.' \
-        '# A bare "sleep" would block SIGTERM/SIGINT until it returns, making' \
+        '# A bare "sleep" would block signals until it returns, making' \
         '# "kento stop" wait until the 3600s timeout. Putting sleep in the' \
         '# background and using "wait" lets the trap fire promptly.' \
-        'trap '"'"'exit 0'"'"' TERM INT' \
+        '#' \
+        '# Signals trapped:' \
+        '#   TERM / INT  -- kill/kill -k and generic stop paths' \
+        '#   PWR         -- lxc-stop (without -k) sends SIGPWR to PID 1 for' \
+        '#                  a clean shutdown request. busybox sh ignores SIGPWR' \
+        '#                  by default, so we must trap it explicitly or' \
+        '#                  lxc-stop hangs until its 60s timeout.' \
+        'trap '"'"'exit 0'"'"' TERM INT PWR' \
         'while :; do' \
         '    sleep 3600 &' \
         '    wait $!' \
