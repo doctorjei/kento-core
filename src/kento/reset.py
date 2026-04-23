@@ -11,6 +11,22 @@ from kento.layers import resolve_layers
 from kento.vm_hook import write_vm_hook
 
 
+def _safe_clear_dir(path: Path) -> None:
+    # Crash-safe clear: rename target out of the way, create a fresh
+    # empty dir, then remove the old copy. A crash mid-sequence leaves
+    # either ``path.old`` (next scrub sweeps it) or an empty ``path``;
+    # we never sit in a ``rmtree completed, mkdir not yet`` window where
+    # the overlayfs mount point is gone.
+    stale = path.with_name(path.name + ".old")
+    if stale.exists():
+        shutil.rmtree(stale)
+    if path.exists():
+        path.rename(stale)
+    path.mkdir(parents=True)
+    if stale.exists():
+        shutil.rmtree(stale)
+
+
 def reset(name: str, *, container_dir: Path | None = None, mode: str | None = None) -> None:
     require_root()
 
@@ -41,15 +57,9 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
                   file=sys.stderr)
             sys.exit(1)
 
-    # Clear writable layer
-    upper = state_dir / "upper"
-    work = state_dir / "work"
-    if upper.exists():
-        shutil.rmtree(upper)
-    if work.exists():
-        shutil.rmtree(work)
-    upper.mkdir(parents=True)
-    work.mkdir(parents=True)
+    # Clear writable layer (crash-safe: rename then rm, not rm then mkdir)
+    _safe_clear_dir(state_dir / "upper")
+    _safe_clear_dir(state_dir / "work")
 
     # Clean up stale port forwarding state (safety net)
     portfwd_active = container_dir / "kento-portfwd-active"

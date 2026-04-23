@@ -611,3 +611,99 @@ def test_reset_removes_portfwd_active(mock_root, mock_layers, mock_run,
         reset("test")
 
     assert not (lxc_dir / "kento-portfwd-active").exists()
+
+
+# --- F12: crash-safe upper/work clear ---
+
+
+from kento.reset import _safe_clear_dir
+
+
+def test_safe_clear_dir_creates_empty_when_missing(tmp_path):
+    target = tmp_path / "upper"
+    _safe_clear_dir(target)
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+
+
+def test_safe_clear_dir_clears_existing_content(tmp_path):
+    target = tmp_path / "upper"
+    target.mkdir()
+    (target / "a").write_text("one")
+    (target / "b").mkdir()
+    (target / "b" / "c").write_text("two")
+
+    _safe_clear_dir(target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert not (tmp_path / "upper.old").exists()
+
+
+def test_safe_clear_dir_sweeps_stale_old(tmp_path):
+    """A leftover .old from a prior interrupted scrub is removed."""
+    target = tmp_path / "upper"
+    target.mkdir()
+    (target / "fresh").write_text("x")
+    stale = tmp_path / "upper.old"
+    stale.mkdir()
+    (stale / "leftover").write_text("y")
+
+    _safe_clear_dir(target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert not stale.exists()
+
+
+def test_safe_clear_dir_crash_after_rename_leaves_old_recoverable(tmp_path):
+    """If mkdir fails after rename, .old still holds the data — next run recovers."""
+    target = tmp_path / "upper"
+    target.mkdir()
+    (target / "keepme").write_text("data")
+
+    real_mkdir = Path.mkdir
+
+    def boom(self, *args, **kwargs):
+        if self == target:
+            raise OSError("simulated crash after rename")
+        return real_mkdir(self, *args, **kwargs)
+
+    with patch.object(Path, "mkdir", boom):
+        with pytest.raises(OSError):
+            _safe_clear_dir(target)
+
+    stale = tmp_path / "upper.old"
+    assert stale.exists()
+    assert (stale / "keepme").read_text() == "data"
+
+    # Second run: no crash, .old is swept and target is recreated empty.
+    _safe_clear_dir(target)
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert not stale.exists()
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_sweeps_stale_old_from_prior_crash(mock_root, mock_layers,
+                                                  mock_run, tmp_path):
+    """reset() cleans up .old dirs left behind by a prior interrupted scrub."""
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "rootfs").mkdir()
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "upper" / "live").write_text("1")
+    (lxc_dir / "upper.old").mkdir()
+    (lxc_dir / "upper.old" / "leftover").write_text("2")
+    (lxc_dir / "work").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    assert (lxc_dir / "upper").is_dir()
+    assert list((lxc_dir / "upper").iterdir()) == []
+    assert not (lxc_dir / "upper.old").exists()
