@@ -15,12 +15,18 @@ FROM busybox:latest
 RUN mkdir -p /sbin /etc \
     && printf '%s\n' \
         '#!/bin/sh' \
-        '# kento test fixture init: sleep forever so the container stays alive.' \
-        'while true; do' \
-        '    sleep 3600' \
+        '# kento test fixture init: sleep forever but stay reactive to signals.' \
+        '# A bare "sleep" would block SIGTERM/SIGINT until it returns, making' \
+        '# "kento stop" wait until the 3600s timeout. Putting sleep in the' \
+        '# background and using "wait" lets the trap fire promptly.' \
+        'trap '"'"'exit 0'"'"' TERM INT' \
+        'while :; do' \
+        '    sleep 3600 &' \
+        '    wait $!' \
         'done' \
         > /sbin/init \
     && chmod 0755 /sbin/init \
+    && sh -n /sbin/init \
     && printf 'kento-test-minimal\n' > /etc/hostname
 
 ENTRYPOINT ["/sbin/init"]
