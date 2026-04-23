@@ -399,7 +399,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             sys.exit(1)
     if mode in ("vm", "pve-vm"):
         if not nesting:
-            print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
+            print("Warning: --nesting has no effect in VM mode "
+                  "(it's an LXC-only concept). Ignoring.", file=sys.stderr)
 
     # F7 + F11: hold the cross-process kento lock across the entire
     # allocate-and-commit sequence. Two concurrent `kento create` processes
@@ -474,14 +475,10 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "rootfs").mkdir(parents=True)
 
     # Resolve layers (validates image exists). Outside the lock to avoid
-    # serializing image pulls across concurrent creates.
+    # serializing image pulls across concurrent creates. resolve_layers
+    # either returns a non-empty string or sys.exits on missing image, so
+    # no defensive empty-string check is needed here.
     layers = resolve_layers(image)
-    if not layers:
-        print(f"Error: failed to resolve layer paths for {image}",
-              file=sys.stderr)
-        # container_dir was created inside the lock; clean it up before exit.
-        shutil.rmtree(container_dir, ignore_errors=True)
-        sys.exit(1)
 
     # F14: explicit --config-mode cloudinit without cloud-init in the image
     # is a user error — the seed we'd write would never be consumed and the

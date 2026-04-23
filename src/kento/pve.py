@@ -83,7 +83,9 @@ def next_vmid() -> int:
 def validate_vmid(vmid: int) -> None:
     """Exit with error if VMID is invalid or already taken."""
     if vmid < 100:
-        print(f"Error: VMID must be >= 100, got {vmid}", file=sys.stderr)
+        print(f"Error: VMID must be >= 100, got {vmid} "
+              f"(VMIDs 1-99 are reserved by Proxmox for internal use).",
+              file=sys.stderr)
         sys.exit(1)
     used = _used_vmids()
     if vmid in used:

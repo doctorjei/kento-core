@@ -123,7 +123,8 @@ def read_mode(container_dir: Path, default: str = "lxc") -> str:
 
 def require_root() -> None:
     if os.getuid() != 0:
-        print("Error: must run as root", file=sys.stderr)
+        print("Error: must run as root. Re-run with sudo "
+              "(e.g. 'sudo kento ...').", file=sys.stderr)
         sys.exit(1)
 
 
@@ -262,7 +263,8 @@ def resolve_container(name: str, scan_dir: Path | None = None) -> Path:
                     if (d / "kento-image").is_file():
                         return d
 
-    print(f"Error: instance not found: {name}", file=sys.stderr)
+    print(f"Error: no instance named '{name}'. "
+          f"Run 'kento list' to see available instances.", file=sys.stderr)
     sys.exit(1)
 
 
@@ -299,7 +301,9 @@ def resolve_in_namespace(name: str, namespace: str) -> Path:
     result = _scan_namespace(name, base)
     if result is not None:
         return result
-    print(f"Error: No {namespace} named '{name}'", file=sys.stderr)
+    list_cmd = "kento vm list" if namespace == "vm" else "kento lxc list"
+    print(f"Error: no {namespace} named '{name}'. "
+          f"Run '{list_cmd}' to see available instances.", file=sys.stderr)
     sys.exit(1)
 
 
@@ -315,8 +319,8 @@ def resolve_any(name: str) -> tuple[Path, str]:
 
     if lxc_hit and vm_hit:
         print(
-            f"Ambiguous: '{name}' exists as both LXC and VM instance. "
-            "Use 'kento lxc <cmd>' or 'kento vm <cmd>'.",
+            f"Error: ambiguous name '{name}' — exists as both LXC and VM "
+            f"instance. Use 'kento lxc <cmd>' or 'kento vm <cmd>'.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -327,7 +331,8 @@ def resolve_any(name: str) -> tuple[Path, str]:
     if vm_hit:
         return vm_hit, read_mode(vm_hit, "vm")
 
-    print(f"Error: no instance named '{name}'", file=sys.stderr)
+    print(f"Error: no instance named '{name}'. "
+          f"Run 'kento list' to see available instances.", file=sys.stderr)
     sys.exit(1)
 
 
