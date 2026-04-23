@@ -650,6 +650,94 @@ class TestGenerateQmArgs:
         assert "  " not in args
 
 
+class TestGeneratePveConfigPassthrough:
+    """B3: kento-pve-args lines appended verbatim to pve-lxc config."""
+
+    def test_no_passthrough_file(self, tmp_path):
+        """Baseline: absent kento-pve-args leaves config byte-identical."""
+        # Use a container_dir that does NOT have the file.
+        before = generate_pve_config("test", 100, tmp_path)
+        after = generate_pve_config("test", 100, tmp_path)
+        assert before == after
+        # And the last non-empty line is kento-controlled (no stray appends).
+        assert before.rstrip().splitlines()[-1].startswith("lxc.tty.max:")
+
+    def test_single_line_appended_at_end(self, tmp_path):
+        (tmp_path / "kento-pve-args").write_text("tags: kento-test\n")
+        cfg = generate_pve_config("test", 100, tmp_path)
+        lines = cfg.rstrip().splitlines()
+        assert lines[-1] == "tags: kento-test"
+        # Kento's own lines come first — confirm arch: still leads.
+        assert lines[0].startswith("arch:")
+
+    def test_multiple_lines_appended_in_order(self, tmp_path):
+        (tmp_path / "kento-pve-args").write_text(
+            "tags: kento-test\nonboot: 1\nunprivileged: 0\n"
+        )
+        cfg = generate_pve_config("test", 100, tmp_path)
+        lines = cfg.rstrip().splitlines()
+        # All three appear at the tail in order.
+        assert lines[-3:] == ["tags: kento-test", "onboot: 1", "unprivileged: 0"]
+
+    def test_blank_lines_skipped(self, tmp_path):
+        """Empty lines in the metadata file must not produce blank config
+        lines that could confuse qm's parser."""
+        (tmp_path / "kento-pve-args").write_text(
+            "\ntags: kento-test\n\nonboot: 1\n\n"
+        )
+        cfg = generate_pve_config("test", 100, tmp_path)
+        assert "tags: kento-test\nonboot: 1\n" in cfg
+        # No double-newline in pass-through region.
+        assert "\n\n" not in cfg
+
+    def test_appended_after_kento_lines(self, tmp_path):
+        """Last-value-wins semantics: a user `memory: 4096` comes AFTER
+        kento's `memory: 512` so PVE honours the user's value."""
+        (tmp_path / "kento-pve-args").write_text("memory: 4096\n")
+        cfg = generate_pve_config("test", 100, tmp_path, memory=512)
+        memory_lines = [l for l in cfg.splitlines() if l.startswith("memory:")]
+        # Kento's own first, user's last.
+        assert memory_lines == ["memory: 512", "memory: 4096"]
+
+
+class TestGenerateQmConfigPassthrough:
+    """B3: kento-pve-args lines appended verbatim to pve-vm qm config."""
+
+    def test_no_passthrough_file(self, tmp_path):
+        """Baseline: absent kento-pve-args leaves qm config byte-identical."""
+        before = generate_qm_config("test", 100, tmp_path, hookscript_ref="ref")
+        after = generate_qm_config("test", 100, tmp_path, hookscript_ref="ref")
+        assert before == after
+
+    def test_single_line_appended_at_end(self, tmp_path):
+        (tmp_path / "kento-pve-args").write_text("protection: 1\n")
+        cfg = generate_qm_config("test", 100, tmp_path, hookscript_ref="ref")
+        assert cfg.rstrip().splitlines()[-1] == "protection: 1"
+
+    def test_multiple_lines_appended_in_order(self, tmp_path):
+        (tmp_path / "kento-pve-args").write_text(
+            "protection: 1\ntags: kento-test\nonboot: 0\n"
+        )
+        cfg = generate_qm_config("test", 100, tmp_path, hookscript_ref="ref")
+        lines = cfg.rstrip().splitlines()
+        assert lines[-3:] == ["protection: 1", "tags: kento-test", "onboot: 0"]
+
+    def test_blank_lines_skipped(self, tmp_path):
+        (tmp_path / "kento-pve-args").write_text("\nprotection: 1\n\n")
+        cfg = generate_qm_config("test", 100, tmp_path, hookscript_ref="ref")
+        assert "protection: 1" in cfg
+        assert "\n\n" not in cfg
+
+    def test_pve_args_do_not_bleed_into_args_payload(self, tmp_path):
+        """kento-pve-args is for qm config lines (key: value), NOT for QEMU
+        flags inside args:. Confirm the pass-through entry lands as its own
+        config line, not concatenated into the args: line."""
+        (tmp_path / "kento-pve-args").write_text("tags: kento-test\n")
+        cfg = generate_qm_config("test", 100, tmp_path, hookscript_ref="ref")
+        args_line = next(l for l in cfg.splitlines() if l.startswith("args:"))
+        assert "tags:" not in args_line
+
+
 class TestParseQmConfField:
     def test_reads_memory(self):
         c = "name: x\nmemory: 2048\ncores: 4\n"

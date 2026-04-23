@@ -209,7 +209,34 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append(f"cores: {cores}")
         lines.append(f"cpulimit: {cores}")
         lines.append(f"lxc.cgroup2.cpu.max: {cores * 100000} 100000")
+    # Pass-through lines (v1.2.0 Phase B, B3): each non-empty line in
+    # kento-pve-args is appended verbatim AFTER kento's own lines. PVE's
+    # config parser is last-value-wins within the global section, so
+    # appending lets the user override kento defaults (e.g. the user
+    # writes `memory: 4096` and wins over a kento-emitted `memory: 512`).
+    # Denylist in create.py blocks keys kento owns structurally
+    # (rootfs:, mp0:, arch:, hostname:, lxc.rootfs.path).
+    lines.extend(_read_passthrough_lines(container_dir / "kento-pve-args"))
     return "\n".join(lines) + "\n"
+
+
+def _read_passthrough_lines(path: Path) -> list[str]:
+    """Return non-empty lines from a kento-pve-args-style file, stripped of
+    trailing newlines. Absent file returns an empty list.
+
+    kento does not parse or validate the contents — the B1 denylist has
+    already rejected the structural collisions, and anything else is
+    user-authored and kento trusts it.
+    """
+    if not path.is_file():
+        return []
+    out: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.rstrip("\r")
+        if not line:
+            continue
+        out.append(line)
+    return out
 
 
 def generate_qm_args(container_dir: Path, *,
@@ -302,6 +329,12 @@ def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
             lines.append(f"net0: virtio={mac},bridge={bridge}")
         else:
             lines.append(f"net0: virtio,bridge={bridge}")
+
+    # Pass-through lines (v1.2.0 Phase B, B3): same contract as generate_pve_config.
+    # Appended AFTER kento's own lines so last-value-wins hands the user control
+    # over duplicate keys (e.g. user-supplied `balloon: 0` overrides nothing,
+    # but `cores: 8` would override kento's `cores: <N>` from the create flag).
+    lines.extend(_read_passthrough_lines(container_dir / "kento-pve-args"))
 
     return "\n".join(lines) + "\n"
 
