@@ -63,6 +63,7 @@ class TestGenerateConfig:
         assert "lxc.include = /usr/share/lxc/config/common.conf" in cfg
         assert "lxc.apparmor.profile = unconfined" in cfg
         assert "lxc.apparmor.allow_nesting = 1" in cfg
+        assert "lxc.apparmor.allow_incomplete = 1" in cfg
         # common.conf must appear before nesting.conf (order matters).
         common_idx = cfg.index("common.conf")
         nesting_idx = cfg.index("nesting.conf")
@@ -78,6 +79,7 @@ class TestGenerateConfig:
         assert "common.conf" not in cfg
         assert "lxc.apparmor.profile" not in cfg
         assert "lxc.apparmor.allow_nesting" not in cfg
+        assert "lxc.apparmor.allow_incomplete" not in cfg
 
     def test_unconfined_pve_mode_ignored(self, tmp_path):
         # PVE-LXC uses apparmor.profile=generated; the flag should not emit
@@ -87,6 +89,21 @@ class TestGenerateConfig:
         assert "common.conf" not in cfg
         assert "lxc.apparmor.profile" not in cfg
         assert "lxc.apparmor.allow_nesting" not in cfg
+        assert "lxc.apparmor.allow_incomplete" not in cfg
+
+    def test_unconfined_lxc_emits_allow_incomplete(self, tmp_path):
+        # Nested LXC (container-in-container) requires allow_incomplete=1: the
+        # inner container sees a restricted subset of the kernel AppArmor
+        # features and lxc-start aborts without it.
+        cfg = generate_config("test", tmp_path, mode="lxc", unconfined=True)
+        assert "lxc.apparmor.allow_incomplete = 1" in cfg
+
+    def test_unconfined_pve_mode_omits_allow_incomplete(self, tmp_path):
+        # Regression: mode=="pve" must never emit allow_incomplete, even when
+        # unconfined=True is passed through (unreachable via the CLI gate but
+        # still worth covering at the unit-test boundary).
+        cfg = generate_config("test", tmp_path, mode="pve", unconfined=True)
+        assert "lxc.apparmor.allow_incomplete" not in cfg
 
 
 class TestCreate:
@@ -1687,6 +1704,7 @@ class TestUnconfinedGate:
         cfg = (lxc_dir / "config").read_text()
         assert "lxc.apparmor.profile = unconfined" in cfg
         assert "lxc.apparmor.allow_nesting = 1" in cfg
+        assert "lxc.apparmor.allow_incomplete = 1" in cfg
         assert "lxc.include = /usr/share/lxc/config/common.conf" in cfg
 
     @patch("kento.create.subprocess.run")

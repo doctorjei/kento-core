@@ -89,6 +89,7 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
     if unconfined and mode == "lxc":
         lines.append("lxc.apparmor.profile = unconfined")
         lines.append("lxc.apparmor.allow_nesting = 1")
+        lines.append("lxc.apparmor.allow_incomplete = 1")
     if env:
         for e in env:
             lines.append(f"lxc.environment = {e}")
