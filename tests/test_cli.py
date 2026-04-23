@@ -831,13 +831,29 @@ class TestMacFlag:
         assert "--mac" in output
 
     def test_mac_valid_passes_through(self):
-        """A valid --mac value reaches create() unchanged."""
+        """A valid --mac value reaches create() unchanged (VM scope)."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["lxc", "create", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
+            main(["vm", "create", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["mac"] == "52:54:00:ab:cd:ef"
+
+    def test_mac_rejected_on_lxc_scope(self, capsys):
+        """F9: --mac on LXC scope is rejected (silently ignored before)."""
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "create", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--mac is not supported for LXC" in err
+
+    def test_mac_rejected_on_lxc_run(self, capsys):
+        """F9: --mac on 'lxc run' also rejected."""
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "run", "--mac", "52:54:00:ab:cd:ef", "debian:12"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--mac is not supported for LXC" in err
 
     def test_mac_default_none(self):
         """Without --mac, mac is None (auto-generate in create)."""
@@ -869,18 +885,18 @@ class TestMacFlag:
         assert exc.value.code != 0
 
     def test_mac_accepts_uppercase(self):
-        """Uppercase hex accepted."""
+        """Uppercase hex accepted (VM scope)."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["lxc", "create", "--mac", "AA:BB:CC:DD:EE:FF", "debian:12"])
+            main(["vm", "create", "--mac", "AA:BB:CC:DD:EE:FF", "debian:12"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["mac"] == "AA:BB:CC:DD:EE:FF"
 
     def test_mac_reaches_create_via_run(self):
-        """--mac via 'run' also reaches create()."""
+        """--mac via 'vm run' also reaches create()."""
         mock_create = MagicMock()
         with patch("kento.create.create", mock_create):
-            main(["lxc", "run", "--mac", "52:54:00:11:22:33", "debian:12"])
+            main(["vm", "run", "--mac", "52:54:00:11:22:33", "debian:12"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["mac"] == "52:54:00:11:22:33"
         assert mock_create.call_args[1]["start"] is True
