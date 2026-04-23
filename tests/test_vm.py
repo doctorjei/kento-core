@@ -177,7 +177,8 @@ class TestIsVmRunning:
 
 class TestMountRootfs:
     @patch("kento.vm._is_mountpoint", return_value=False)
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     def test_mount_command(self, mock_run, mock_mp, tmp_path):
         lxc_dir = tmp_path / "vm1"
         lxc_dir.mkdir()
@@ -187,7 +188,7 @@ class TestMountRootfs:
         mount_rootfs(lxc_dir, "/a:/b", state_dir)
 
         mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
+        args = list(mock_run.call_args[0][0])
         assert args == [
             "mount", "-t", "overlay", "overlay", "-o",
             f"lowerdir=/a:/b,upperdir={state_dir}/upper,workdir={state_dir}/work",
@@ -195,7 +196,8 @@ class TestMountRootfs:
         ]
         env = mock_run.call_args[1]["env"]
         assert env["LIBMOUNT_FORCE_MOUNT2"] == "always"
-        assert mock_run.call_args[1]["check"] is True
+        # run_or_die captures stderr internally; check is not used.
+        assert mock_run.call_args[1].get("capture_output") is True
 
     @patch("kento.vm._is_mountpoint", return_value=True)
     def test_mount_rejects_already_mounted(self, mock_mp, tmp_path):
@@ -205,24 +207,59 @@ class TestMountRootfs:
         with pytest.raises(SystemExit):
             mount_rootfs(lxc_dir, "/a:/b", lxc_dir)
 
+    @patch("kento.vm._is_mountpoint", return_value=False)
+    def test_mount_failure_prints_clean_error(self, mock_mp, tmp_path, capsys):
+        """A failed mount prints a kento error + hint and SystemExit(1), not a traceback."""
+        lxc_dir = tmp_path / "vm1"
+        lxc_dir.mkdir()
+        (lxc_dir / "rootfs").mkdir()
+
+        def _fail(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 32, stdout="",
+                                               stderr="mount: overlay: bad superblock")
+
+        with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
+            with pytest.raises(SystemExit) as exc:
+                mount_rootfs(lxc_dir, "/a:/b", lxc_dir)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: failed to mount overlayfs" in captured.err
+        assert "hint:" in captured.err
+        assert "Traceback" not in captured.err
+
 
 # --- unmount_rootfs ---
 
 
 class TestUnmountRootfs:
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     def test_unmount_command(self, mock_run, tmp_path):
         unmount_rootfs(tmp_path)
-        mock_run.assert_called_once_with(
-            ["umount", str(tmp_path / "rootfs")], check=True,
-        )
+        mock_run.assert_called_once()
+        assert list(mock_run.call_args[0][0]) == ["umount", str(tmp_path / "rootfs")]
+
+    def test_unmount_failure_prints_clean_error(self, tmp_path, capsys):
+        """A failed umount prints a kento error + hint and SystemExit(1)."""
+        def _fail(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout="",
+                                               stderr="umount: target busy")
+        with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
+            with pytest.raises(SystemExit) as exc:
+                unmount_rootfs(tmp_path)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: failed to unmount rootfs" in captured.err
+        assert "hint:" in captured.err
+        assert "Traceback" not in captured.err
 
 
 # --- start_vm ---
 
 
 class TestStartVm:
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -256,7 +293,8 @@ class TestStartVm:
         assert (lxc_dir / "kento-virtiofsd-pid").read_text().strip() == "1001"
         assert (lxc_dir / "kento-qemu-pid").read_text().strip() == "1002"
 
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -305,7 +343,8 @@ class TestStartVm:
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -346,7 +385,8 @@ class TestStartVm:
     @patch("kento.vm.VM_KVM", True)
     @patch("kento.vm.VM_MACHINE", "q35")
     @patch("kento.vm.VM_MEMORY", 512)
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -431,7 +471,8 @@ class TestStartVm:
         assert qemu_call[1]["stderr"] == subprocess.DEVNULL
 
     @patch("kento.vm.VM_KVM", False)
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -492,7 +533,8 @@ class TestStartVm:
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -516,7 +558,11 @@ class TestStartVm:
         # Track call ordering across mock_mount, mock_run, mock_popen.
         order: list[str] = []
         mock_mount.side_effect = lambda *a, **kw: order.append("mount")
-        mock_run.side_effect = lambda *a, **kw: (order.append("inject"), MagicMock())[1]
+
+        def run_side_effect(*a, **kw):
+            order.append("inject")
+            return subprocess.CompletedProcess(a[0] if a else [], 0, stdout="", stderr="")
+        mock_run.side_effect = run_side_effect
 
         def popen_side_effect(*a, **kw):
             order.append("popen")
@@ -535,22 +581,27 @@ class TestStartVm:
         # Verify the inject invocation shape.
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args
-        cmd = args[0]
+        cmd = list(args[0])
         assert cmd[0] == "sh"
         assert cmd[1] == str(lxc_dir / "kento-inject.sh")
         assert cmd[2] == str(rootfs)
         assert cmd[3] == str(lxc_dir)
-        assert kwargs.get("check") is True
+        # run_or_die captures stderr itself; no check= kwarg.
+        assert kwargs.get("capture_output") is True
 
-    @patch("kento.vm.subprocess.run",
-           side_effect=subprocess.CalledProcessError(1, ["sh", "kento-inject.sh"]))
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="inject failed"))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
     def test_start_inject_failure_propagates(
-            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
-        """A failing inject.sh must abort start — virtiofsd/qemu never launch."""
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path, capsys):
+        """A failing inject.sh must abort start — virtiofsd/qemu never launch.
+
+        run_or_die converts the non-zero exit into a SystemExit(1) with a
+        kento-branded Error line, not a CalledProcessError traceback.
+        """
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -563,11 +614,15 @@ class TestStartVm:
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\nexit 1\n")
 
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(SystemExit) as exc:
             start_vm(lxc_dir, "testvm")
+        assert exc.value.code == 1
 
         # Neither virtiofsd nor qemu should have launched.
         mock_popen.assert_not_called()
+        captured = capsys.readouterr()
+        assert "Error: failed to inject guest config testvm" in captured.err
+        assert "Traceback" not in captured.err
 
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
@@ -739,7 +794,8 @@ class TestIsValidMac:
 class TestStartVmMac:
     """Tests that start_vm includes mac= on the -device line when kento-mac exists."""
 
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
@@ -773,7 +829,8 @@ class TestStartVmMac:
         joined = " ".join(qemu_args)
         assert "virtio-net-pci,netdev=net0,mac=52:54:00:de:ad:be" in joined
 
-    @patch("kento.vm.subprocess.run")
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")

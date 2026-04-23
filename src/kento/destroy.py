@@ -34,16 +34,28 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
 
     if running:
         print("Stopping...")
-        if mode == "vm":
-            from kento.vm import stop_vm
-            stop_vm(container_dir, force=True)
-        elif mode == "pve-vm":
-            vmid = (container_dir / "kento-vmid").read_text().strip()
-            subprocess.run(["qm", "stop", vmid], check=True)
-        elif mode == "pve":
-            subprocess.run(["pct", "stop", container_id], check=True)
-        else:
-            subprocess.run(["lxc-stop", "-n", container_id], check=True)
+        try:
+            if mode == "vm":
+                from kento.vm import stop_vm
+                stop_vm(container_dir, force=True)
+            elif mode == "pve-vm":
+                vmid = (container_dir / "kento-vmid").read_text().strip()
+                subprocess.run(["qm", "stop", vmid], check=True, capture_output=True)
+            elif mode == "pve":
+                subprocess.run(["pct", "stop", container_id], check=True, capture_output=True)
+            else:
+                subprocess.run(["lxc-stop", "-n", container_id], check=True, capture_output=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            # destroy() only runs the stop-before-remove path when called with -f
+            # (the non-force path errors above). Log and continue to cleanup so
+            # a partially-wedged instance can still be removed.
+            if isinstance(e, subprocess.CalledProcessError):
+                stderr = (e.stderr or b"").decode("utf-8", "replace").strip()
+                print(f"Warning: stop failed (exit {e.returncode}); proceeding with cleanup: {stderr}",
+                      file=sys.stderr)
+            else:
+                print(f"Warning: stop tool not found ({e.filename}); proceeding with cleanup.",
+                      file=sys.stderr)
 
     # Unmount rootfs if still mounted
     rootfs = container_dir / "rootfs"

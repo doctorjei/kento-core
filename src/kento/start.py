@@ -1,9 +1,9 @@
 """Start a kento-managed instance."""
 
-import subprocess
 from pathlib import Path
 
 from kento import read_mode, require_root, resolve_container
+from kento.subprocess_util import run_or_die
 
 
 def start(name: str, *, container_dir: Path | None = None, mode: str | None = None) -> None:
@@ -22,10 +22,25 @@ def start(name: str, *, container_dir: Path | None = None, mode: str | None = No
         return
     elif mode == "pve-vm":
         vmid = (container_dir / "kento-vmid").read_text().strip()
-        subprocess.run(["qm", "start", vmid], check=True)
+        run_or_die(
+            ["qm", "start", vmid],
+            what="start PVE VM",
+            name=name,
+            hint=f"check /var/log/pve/tasks/ or run 'qm start {vmid}' directly.",
+        )
     elif mode == "pve":
-        subprocess.run(["pct", "start", container_id], check=True)
+        run_or_die(
+            ["pct", "start", container_id],
+            what="start PVE container",
+            name=name,
+            hint=f"run 'pct start {container_id}' directly for details.",
+        )
     else:
-        subprocess.run(["lxc-start", "-n", container_id], check=True)
+        run_or_die(
+            ["lxc-start", "-n", container_id],
+            what="start LXC container",
+            name=name,
+            hint=f"run 'lxc-start -F -n {container_id}' in the foreground for details.",
+        )
 
     print(f"Started: {name}")

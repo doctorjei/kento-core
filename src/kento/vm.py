@@ -12,6 +12,7 @@ from pathlib import Path
 
 from kento import VM_BASE
 from kento.defaults import VM_MEMORY, VM_CORES, VM_KVM, VM_MACHINE
+from kento.subprocess_util import run_or_die
 
 # Locally-administered MAC prefix (QEMU's standard block).
 MAC_PREFIX = "52:54:00"
@@ -121,16 +122,22 @@ def mount_rootfs(container_dir: Path, layers: str, state_dir: Path) -> None:
     work = state_dir / "work"
     opts = f"lowerdir={layers},upperdir={upper},workdir={work}"
     env = {**os.environ, "LIBMOUNT_FORCE_MOUNT2": "always"}
-    subprocess.run(
+    run_or_die(
         ["mount", "-t", "overlay", "overlay", "-o", opts, str(rootfs)],
-        env=env, check=True,
+        what="mount overlayfs",
+        hint=f"common causes: upperdir on overlayfs (set KENTO_STATE_DIR), missing overlay module, stale mount at {rootfs}.",
+        env=env,
     )
 
 
 def unmount_rootfs(container_dir: Path) -> None:
     """Unmount overlayfs at container_dir/rootfs."""
     rootfs = container_dir / "rootfs"
-    subprocess.run(["umount", str(rootfs)], check=True)
+    run_or_die(
+        ["umount", str(rootfs)],
+        what="unmount rootfs",
+        hint="check for open file handles or active processes with 'lsof +D ...'.",
+    )
 
 
 def start_vm(container_dir: Path, name: str) -> None:
@@ -168,9 +175,11 @@ def start_vm(container_dir: Path, name: str) -> None:
         unmount_rootfs(container_dir)
         print(f"Error: inject script not found at {inject_script}", file=sys.stderr)
         sys.exit(1)
-    subprocess.run(
+    run_or_die(
         ["sh", str(inject_script), str(rootfs), str(container_dir)],
-        check=True,
+        what="inject guest config",
+        name=name,
+        hint=f"run 'sh {inject_script} {rootfs} {container_dir}' manually to debug.",
     )
 
     # Read port mapping (usermode networking)

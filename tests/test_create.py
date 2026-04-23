@@ -180,6 +180,11 @@ class TestCreate:
     @patch("kento.create.require_root")
     def test_start_calls_lxc_start(self, mock_root, mock_layers,
                                     mock_run, tmp_path):
+        # Return success for every subprocess.run invocation (including the
+        # --start tail which now manually checks returncode rather than
+        # relying on check=True).
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0, stdout="", stderr="")
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", mode="lxc", unconfined=True, start=True)
@@ -187,9 +192,7 @@ class TestCreate:
         lxc_calls = [c for c in mock_run.call_args_list
                      if c[0][0][0] == "lxc-start"]
         assert len(lxc_calls) == 1
-        assert lxc_calls[0] == (
-            (["lxc-start", "-n", "test"],), {"check": True},
-        )
+        assert list(lxc_calls[0][0][0]) == ["lxc-start", "-n", "test"]
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -253,6 +256,8 @@ class TestCreate:
         pve = tmp_path / "pve"
         pve.mkdir()
         (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0, stdout="", stderr="")
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
@@ -263,9 +268,7 @@ class TestCreate:
         pct_calls = [c for c in mock_run.call_args_list
                      if c[0][0][0] == "pct"]
         assert len(pct_calls) == 1
-        assert pct_calls[0] == (
-            (["pct", "start", "100"],), {"check": True},
-        )
+        assert list(pct_calls[0][0][0]) == ["pct", "start", "100"]
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -2159,9 +2162,13 @@ class TestCreateRollback:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_start_failure_rolls_back_and_stops(self, mock_root, mock_layers,
-                                                  tmp_path):
+                                                  tmp_path, capsys):
         """--start path: lxc-start fails after config is written. Rollback
         must stop the (partially-started) container AND clean container_dir.
+
+        F8: a failed lxc-start must surface a clean kento error, not a bare
+        CalledProcessError traceback. _run_start_or_rollback raises
+        RuntimeError which the surrounding try/except catches for rollback.
         """
         state_dir = tmp_path / "state" / "test"
 
@@ -2171,18 +2178,22 @@ class TestCreateRollback:
         def fake_run(cmd, *args, **kwargs):
             if cmd[0] == "lxc-start":
                 start_called.append(cmd)
-                raise subprocess.CalledProcessError(1, cmd)
+                return subprocess.CompletedProcess(cmd, 1, stdout="",
+                                                   stderr="lxc-start: boot failed")
             if cmd[0] == "lxc-stop":
                 stop_calls.append(cmd)
             # podman / other subprocess: stub
-            return MagicMock(returncode=0)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=state_dir), \
              patch("kento.create.subprocess.run", side_effect=fake_run):
-            with pytest.raises(subprocess.CalledProcessError):
+            with pytest.raises(RuntimeError) as exc:
                 create("myimage:latest", name="test", mode="lxc",
                        unconfined=True, start=True)
+            assert "failed to start test" in str(exc.value)
+            assert "kento lxc start test" in str(exc.value) \
+                or "kento lxc destroy test" in str(exc.value)
 
         assert start_called, "lxc-start was not invoked"
         assert stop_calls, "lxc-stop was not called on rollback"

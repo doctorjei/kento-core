@@ -15,6 +15,34 @@ from kento.layers import resolve_layers
 from kento.locking import kento_lock
 
 
+def _run_start_or_rollback(cmd: list[str], *, name: str, scope: str) -> None:
+    """Run a start command inside create()'s try block.
+
+    On failure, raises RuntimeError instead of letting CalledProcessError
+    propagate. The surrounding try/except in create() catches it and runs
+    the rollback undos (which include the matching stop). We *don't* use
+    run_or_die here because run_or_die calls sys.exit(1) which would also
+    trigger the rollback but with a duplicate error message from the
+    `Error during create:` line — explicit RuntimeError keeps a single
+    clear message.
+    """
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"failed to start {name}: '{e.filename}' not found on PATH. "
+            f"Instance created; run 'kento {scope} start {name}' to retry or "
+            f"'kento {scope} destroy {name}' to remove."
+        ) from e
+    if result.returncode != 0:
+        err = (result.stderr or "").strip() or f"(exit {result.returncode})"
+        raise RuntimeError(
+            f"failed to start {name}: {err}. "
+            f"Instance created; run 'kento {scope} start {name}' to retry or "
+            f"'kento {scope} destroy {name}' to remove."
+        )
+
+
 def _run_cleanup(undos: list[tuple[str, object]]) -> None:
     """Run cleanup callables in reverse order. Best-effort — log and continue on errors.
 
@@ -182,6 +210,11 @@ def _generate_ssh_host_keys(dest_dir: Path) -> None:
             subprocess.run(cmd, check=True, capture_output=True)
         except FileNotFoundError:
             print("Error: ssh-keygen not found. Install openssh-client to use --ssh-host-keys.",
+                  file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or b"").decode("utf-8", "replace").strip()
+            print(f"Error: ssh-keygen failed for {key_type} host key: {stderr}",
                   file=sys.stderr)
             sys.exit(1)
 
@@ -742,7 +775,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                               lambda v=vmid: subprocess.run(
                                   ["qm", "stop", str(v)],
                                   capture_output=True, check=False)))
-                subprocess.run(["qm", "start", str(vmid)], check=True)
+                _run_start_or_rollback(
+                    ["qm", "start", str(vmid)], name=name, scope="vm",
+                )
             elif mode == "vm":
                 from kento.vm import start_vm, stop_vm
                 undos.append(("vm-stop",
@@ -754,13 +789,17 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                               lambda v=vmid: subprocess.run(
                                   ["pct", "stop", str(v)],
                                   capture_output=True, check=False)))
-                subprocess.run(["pct", "start", str(vmid)], check=True)
+                _run_start_or_rollback(
+                    ["pct", "start", str(vmid)], name=name, scope="lxc",
+                )
             else:
                 undos.append(("lxc-stop",
                               lambda n=name: subprocess.run(
                                   ["lxc-stop", "-n", n],
                                   capture_output=True, check=False)))
-                subprocess.run(["lxc-start", "-n", name], check=True)
+                _run_start_or_rollback(
+                    ["lxc-start", "-n", name], name=name, scope="lxc",
+                )
             print("  Status: running")
         else:
             print(f"  Status: stopped (use 'kento start {name}' to boot)")

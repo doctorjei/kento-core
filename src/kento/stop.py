@@ -1,9 +1,9 @@
 """Shut down a kento-managed instance."""
 
-import subprocess
 from pathlib import Path
 
 from kento import read_mode, require_root, resolve_container
+from kento.subprocess_util import run_or_die
 
 
 def shutdown(name: str, *, force: bool = False, container_dir: Path | None = None, mode: str | None = None) -> None:
@@ -22,27 +22,49 @@ def shutdown(name: str, *, force: bool = False, container_dir: Path | None = Non
     elif mode == "pve-vm":
         vmid = (container_dir / "kento-vmid").read_text().strip()
         if force:
-            subprocess.run(["qm", "stop", vmid], check=True)
+            run_or_die(
+                ["qm", "stop", vmid],
+                what="stop PVE VM",
+                name=name,
+                hint=f"run 'qm stop {vmid}' directly for details.",
+            )
         else:
             # qm shutdown's default timeout is short and relies on ACPI.
             # Guests without acpid (or that ignore the power button) hang
             # until PVE aborts with "got timeout". --timeout extends the
             # graceful window; --forceStop 1 falls through to qm stop
             # once the timeout elapses so the VM reliably stops.
-            subprocess.run(
+            run_or_die(
                 ["qm", "shutdown", vmid, "--timeout", "60", "--forceStop", "1"],
-                check=True,
+                what="shut down PVE VM",
+                name=name,
+                hint=f"run 'qm shutdown {vmid}' directly for details.",
             )
     elif mode == "pve":
         if force:
-            subprocess.run(["pct", "stop", container_id], check=True)
+            run_or_die(
+                ["pct", "stop", container_id],
+                what="stop PVE container",
+                name=name,
+                hint=f"run 'pct stop {container_id}' directly for details.",
+            )
         else:
-            subprocess.run(["pct", "shutdown", container_id], check=True)
+            run_or_die(
+                ["pct", "shutdown", container_id],
+                what="shut down PVE container",
+                name=name,
+                hint=f"run 'pct shutdown {container_id}' directly for details.",
+            )
     else:
         cmd = ["lxc-stop", "-n", container_id]
         if force:
             cmd.append("-k")
-        subprocess.run(cmd, check=True)
+        run_or_die(
+            cmd,
+            what="stop LXC container",
+            name=name,
+            hint=f"run 'lxc-stop -n {container_id}' directly for details.",
+        )
 
     action = "Stopped" if force else "Shut down"
     print(f"{action}: {name}")
