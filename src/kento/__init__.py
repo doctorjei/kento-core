@@ -49,17 +49,25 @@ def resolve_network(net_type: str | None, bridge_name: str | None,
 
     # Auto-detect if no network type specified
     if net_type is None:
-        bridge = detect_bridge()
-        if bridge:
-            net_type = "bridge"
-            bridge_name = bridge
-            print(f"Network: using bridge {bridge}")
-        elif mode in ("vm", "pve-vm"):
+        if mode == "vm":
+            # Plain VM has no bridge support in start_vm (QEMU would need a tap
+            # device). Auto-detecting bridge here silently produces a VM with no
+            # network at all. Default to usermode instead; user can still pass
+            # --network bridge=<name> explicitly (pve-vm handles bridge via qm).
             net_type = "usermode"
-            print("Network: no bridge found, using usermode networking")
+            print("Network: using usermode networking (plain VM default)")
         else:
-            net_type = "none"
-            print("Network: no bridge found, networking disabled")
+            bridge = detect_bridge()
+            if bridge:
+                net_type = "bridge"
+                bridge_name = bridge
+                print(f"Network: using bridge {bridge}")
+            elif mode == "pve-vm":
+                net_type = "usermode"
+                print("Network: no bridge found, using usermode networking")
+            else:
+                net_type = "none"
+                print("Network: no bridge found, networking disabled")
     elif net_type == "bridge" and bridge_name is None:
         # --network bridge without name: auto-detect bridge
         bridge_name = detect_bridge()

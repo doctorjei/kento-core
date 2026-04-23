@@ -462,6 +462,20 @@ class TestResolveNetwork:
         result = resolve_network(None, None, "vm")
         assert result == {"type": "usermode", "bridge": None, "port": None}
 
+    @patch("kento.detect_bridge", return_value="lxcbr0")
+    def test_auto_detect_vm_prefers_usermode_over_bridge(self, mock_detect):
+        """Plain VM mode with no --network must default to usermode even when
+        a bridge exists on the host. start_vm has no bridge/tap support, so
+        auto-detecting bridge here would produce a VM with no network."""
+        result = resolve_network(None, None, "vm")
+        assert result == {"type": "usermode", "bridge": None, "port": None}
+
+    @patch("kento.detect_bridge", return_value="vmbr0")
+    def test_auto_detect_pve_vm_bridge(self, mock_detect):
+        """PVE-VM auto-detects bridge (qm generates proper bridge network)."""
+        result = resolve_network(None, None, "pve-vm")
+        assert result == {"type": "bridge", "bridge": "vmbr0", "port": None}
+
     @patch("kento.detect_bridge", return_value=None)
     def test_auto_detect_lxc_none(self, mock_detect):
         result = resolve_network(None, None, "lxc")
