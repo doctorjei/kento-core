@@ -461,8 +461,10 @@ class TestStaticIp:
     def test_ip_creates_net_file_and_network_unit(self, mock_root, mock_layers,
                                                    mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
             create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                   net_type="bridge", bridge="lxcbr0",
                    ip="192.168.0.160/22",
                    gateway="192.168.0.1", dns="8.8.8.8")
 
@@ -488,8 +490,10 @@ class TestStaticIp:
     def test_ip_only_no_gateway_dns(self, mock_root, mock_layers,
                                      mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, ip="10.0.0.5/24")
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                   net_type="bridge", bridge="lxcbr0", ip="10.0.0.5/24")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
                 "10-static.network").read_text()
@@ -499,24 +503,69 @@ class TestStaticIp:
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_ip_with_vm_mode_accepted(self, mock_root, mock_layers, tmp_path):
-        """--ip is valid for VM mode (inject.sh uses Type=ether match)."""
+    def test_ip_with_plain_vm_rejected(self, mock_root, mock_layers, tmp_path,
+                                        capsys):
+        """F10: Plain VM only supports usermode networking (F3), and --ip now
+        requires bridge (F10) — so plain VM + --ip is now unreachable and
+        should be rejected with a clear message.
+        """
         vm_dir = tmp_path / "vm"
         vm_dir.mkdir()
 
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
-            create("myimage:latest", name="test", mode="vm",
-                   ip="192.168.0.160/22", gateway="192.168.0.1")
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       ip="192.168.0.160/22", gateway="192.168.0.1")
+        err = capsys.readouterr().err
+        assert "--ip requires bridge networking" in err
 
-        net = (vm_dir / "test" / "kento-net").read_text()
-        assert "ip=192.168.0.160/22" in net
-        assert "gateway=192.168.0.1" in net
-        unit = (vm_dir / "test" / "upper" / "etc" / "systemd" / "network" /
-                "10-static.network").read_text()
-        assert "Address=192.168.0.160/22" in unit
-        assert "Gateway=192.168.0.1" in unit
-        assert "Type=ether" in unit
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ip_with_usermode_rejected(self, mock_root, mock_layers, tmp_path,
+                                        capsys):
+        """F10: --ip + explicit --network usermode is rejected."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       net_type="usermode", ip="10.0.0.5/24")
+        err = capsys.readouterr().err
+        assert "--ip requires bridge networking" in err
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_gateway_with_usermode_rejected(self, mock_root, mock_layers,
+                                             tmp_path, capsys):
+        """F10: --gateway + usermode is rejected (even with --ip)."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       net_type="usermode", ip="10.0.0.5/24",
+                       gateway="10.0.0.1")
+        err = capsys.readouterr().err
+        assert "requires bridge networking" in err
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_ip_with_network_none_rejected(self, mock_root, mock_layers,
+                                            mock_run, tmp_path, capsys):
+        """F10: --ip + --network none is rejected."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc",
+                       unconfined=True, net_type="none", ip="10.0.0.5/24")
+        err = capsys.readouterr().err
+        assert "--ip requires bridge networking" in err
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -563,8 +612,10 @@ class TestGuestConfig:
     def test_searchdomain_in_network_file(self, mock_root, mock_layers,
                                            mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
             create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                   net_type="bridge", bridge="lxcbr0",
                    ip="10.0.0.5/24", searchdomain="example.com")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /

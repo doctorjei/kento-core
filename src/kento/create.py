@@ -381,6 +381,22 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     if gateway and not ip:
         print("Error: --gateway requires --ip", file=sys.stderr)
         sys.exit(1)
+    # F10: --ip / --gateway only make sense with bridge networking. Silent
+    # acceptance with usermode/host/none produced broken configs: usermode
+    # gets a conflicting DHCP lease from QEMU's built-in 10.0.2.x while
+    # systemd-networkd fights for the static address; none/host have no
+    # interface for the address to bind to.
+    if network["type"] in ("none", "host", "usermode"):
+        if ip:
+            print(f"Error: --ip requires bridge networking; got --network {network['type']}.",
+                  file=sys.stderr)
+            print("  Use --network bridge (or bridge=<name>) for a static IP, "
+                  "or remove --ip.", file=sys.stderr)
+            sys.exit(1)
+        if gateway:
+            print(f"Error: --gateway requires bridge networking; got --network {network['type']}.",
+                  file=sys.stderr)
+            sys.exit(1)
     if mode in ("vm", "pve-vm"):
         if not nesting:
             print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
