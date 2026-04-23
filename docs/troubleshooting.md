@@ -86,6 +86,70 @@ cat /etc/pve/.vmlist
 The `--vmid` flag only works with PVE modes. Remove `--vmid` or add
 `--pve`.
 
+### "Error: --qemu-arg is not supported for LXC/PVE-LXC"
+
+`--qemu-arg` appends verbatim flags to the QEMU argv, so it only
+applies to VM modes (plain `vm` and `pve-vm`). LXC modes never invoke
+QEMU. For PVE-LXC config pass-through use `--pve-arg` instead; raw
+config pass-through for plain LXC is not yet implemented (tracked as
+the future `--lxc-config` flag).
+
+```
+sudo kento vm create <image> --qemu-arg '-device virtio-rng-pci'
+```
+
+### "Error: --pve-arg is not supported for plain LXC"
+
+`--pve-arg` appends lines to the PVE qm/lxc config, which only exists
+on PVE hosts. Either run on a PVE host (kento will auto-detect and use
+pve-lxc), force it with `--pve`, or drop the flag. Plain-LXC raw config
+pass-through is a separate, not-yet-implemented feature (`--lxc-config`).
+
+### "Error: --pve-arg is not supported for plain VM"
+
+Same cause as above but for VM mode: `--pve-arg` only applies under
+pve-vm. Run on a PVE host (or add `--pve`) to land under pve-vm, or
+drop the flag.
+
+### "Error: --pve-arg requires PVE mode but --no-pve was specified"
+
+`--pve-arg` and `--no-pve` are mutually exclusive. Drop one.
+
+### "Error: kento manages '\<needle\>' directly"
+
+One of the pass-through flags (`--qemu-arg` or `--pve-arg`) has a value
+that collides with a flag kento manages itself. The denylists are
+deliberately short — they only cover things kento writes itself and
+that would silently conflict:
+
+- QEMU: `-kernel`, `-initrd`, `virtiofs`, `rootfs`,
+  `memory-backend-memfd`, `memfd-size`, `-chardev`, `-serial`.
+- PVE: `rootfs:`, `mp0:`, `lxc.rootfs.path`, `arch:`, `hostname:`.
+
+Most of these have a dedicated kento flag already (`--memory` covers
+the memfd size; `--ip` / `--network` covers network keys). If you have
+a real need to override one of the denylisted items, file an issue —
+the denylist is the escape hatch's one restraint, not a policy
+statement.
+
+### "kento-qemu-args line contains whitespace which qm does not tokenize safely"
+
+PVE's `qm` splits the `args:` line on whitespace with no shell-quoting,
+so a single `--qemu-arg` value that contains a space would get split
+across two QEMU flags at boot. Kento refuses to pass that through
+silently. Split the argument yourself:
+
+```
+# Instead of:
+--qemu-arg '-device virtio-rng-pci,rng=rng0'
+
+# Use:
+--qemu-arg '-device' --qemu-arg 'virtio-rng-pci,rng=rng0'
+```
+
+Only pve-vm is affected — plain VM's argv is shell-split and handles
+embedded whitespace correctly.
+
 ### "kento-hook: error: virtiofsd not found"
 
 VM mode requires virtiofsd. Install it:

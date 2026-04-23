@@ -107,6 +107,8 @@ Options:
 | `--ssh-host-keys` | off | Auto-generate SSH host keys at create time |
 | `--config-mode MODE` | auto | Config delivery: `injection`, `cloudinit`, or `auto` |
 | `--mac XX:XX:...` | auto | Override MAC address (VM modes only) |
+| `--qemu-arg ARG` | none | Extra verbatim QEMU argument (VM modes only, repeatable; last occurrence wins) |
+| `--pve-arg "KEY: VALUE"` | none | Extra verbatim line appended to the PVE config (PVE modes only, repeatable) |
 | `--start` | off | Start instance after creation |
 
 ### Run (create + start)

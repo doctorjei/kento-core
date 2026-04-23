@@ -144,6 +144,90 @@ sudo kento ls
 Shows all kento-managed instances across all modes (lxc, pve-lxc, vm,
 pve-vm) with their name, image, status, mode, and writable layer size.
 
+## Pass-through flags
+
+Kento exposes a short list of first-class flags (`--memory`, `--cores`,
+`--network`, `--mac`, `--ssh-key`, ...). For everything else — a QEMU
+device kento doesn't know about, a PVE config key kento doesn't set —
+two escape-hatch flags let you inject raw config without waiting for a
+kento release.
+
+### `--qemu-arg` (VM modes only)
+
+Appends a verbatim argument to the QEMU argv. Repeatable. Plain VM and
+pve-vm both honour it. QEMU reads flags left-to-right and the last
+occurrence wins, so pass-through args override kento's own defaults
+(e.g. `--qemu-arg '-m 2048'` raises the memory size past the
+`--memory` default).
+
+```
+sudo kento vm create <image> --qemu-arg '-device virtio-rng-pci'
+sudo kento vm create <image> --qemu-arg '-cpu host' --qemu-arg '-smp 4'
+```
+
+> **pve-vm whitespace caveat:** PVE's `qm` tokenizes its `args:` line
+> with plain whitespace splitting (no shell-quoting), so a single
+> `--qemu-arg` value that itself contains a space will be rejected at
+> start time. Split it into two flags:
+>
+> ```
+> # Wrong (fails at start under pve-vm):
+> --qemu-arg '-device virtio-rng-pci,rng=rng0'
+>
+> # Right:
+> --qemu-arg '-device' --qemu-arg 'virtio-rng-pci,rng=rng0'
+> ```
+>
+> Plain VM has no such limit — kento's own argv parser is shell-split.
+> The whitespace error only fires on pve-vm.
+
+Kento rejects args that would collide with flags it manages itself
+(`-kernel`, `-initrd`, virtiofs `-chardev`, the memfd memory backend,
+and `-serial` / `-chardev` reserved for future VM-interactive work).
+Error message points at the offending needle.
+
+### `--pve-arg` (PVE modes only)
+
+Appends a verbatim line to the generated PVE config (`<VMID>.conf` for
+pve-lxc, the qemu-server config for pve-vm). Repeatable. Not valid on
+plain LXC or plain VM — kento errors at create time with a pointer to
+the right alternative.
+
+```
+sudo kento lxc create <image> --pve --pve-arg 'tags: kento-test'
+sudo kento lxc create <image> --pve --pve-arg 'onboot: 1' --pve-arg 'startup: order=2'
+```
+
+PVE's config parsers honour the last assignment of a repeated key, so
+a `--pve-arg` line will override a kento-generated line with the same
+key.
+
+Kento rejects pass-through values that would clobber keys it manages
+(`rootfs:`, `mp0:`, `lxc.rootfs.path`, `arch:`, `hostname:`).
+
+### Storage and scrub behaviour
+
+Both flag lists are stored in the instance directory alongside the
+other metadata — `<instance_dir>/kento-qemu-args` and
+`<instance_dir>/kento-pve-args`, one entry per line. They're preserved
+by `kento scrub` (scrub only rebuilds layers and the hook script; the
+pass-through files are left untouched) and surfaced in `kento info
+--verbose`:
+
+```
+$ sudo kento info my-vm --verbose
+Name: my-vm
+Mode: vm
+...
+Pass-through flags:
+  --qemu-arg:
+    -device virtio-rng-pci
+    -cpu host
+```
+
+The same data is included under the `qemu_args` / `pve_args` keys of
+`kento info --json`.
+
 ## Next steps
 
 - [Modes](modes.md) — understand lxc vs pve-lxc vs vm vs pve-vm modes
