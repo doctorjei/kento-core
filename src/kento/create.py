@@ -296,6 +296,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     bridge = network["bridge"]
     port = network["port"]
 
+    # Plain VM mode has no tap/bridge wiring in start_vm (QEMU would need a
+    # tap device; only -netdev user is implemented). Reject bridge networking
+    # up front so the VM doesn't boot with zero NICs and no warning.
+    if mode == "vm" and network["type"] == "bridge":
+        print("Error: plain VM mode does not support bridge networking.",
+              file=sys.stderr)
+        print("  Use --network usermode (default) for outbound access and",
+              file=sys.stderr)
+        print("  port forwarding via --port, or run on a PVE host for",
+              file=sys.stderr)
+        print("  bridged VMs.", file=sys.stderr)
+        sys.exit(1)
+
     # Determine base directory for this mode
     base_dir = VM_BASE if mode in ("vm", "pve-vm") else LXC_BASE
 

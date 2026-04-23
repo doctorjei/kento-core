@@ -1469,6 +1469,110 @@ class TestLxcPortForwarding:
                 create("myimage:latest", name="test", mode="vm",
                        port="10022:22", net_type="bridge", bridge="vmbr0")
 
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_bridge_named_rejected(self, mock_root, mock_layers,
+                                       tmp_path, capsys):
+        """Plain VM + --network bridge=<name> is rejected (F3: start_vm has
+        no bridge/tap support, silently boots with zero NICs otherwise)."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       net_type="bridge", bridge="vmbr0")
+        err = capsys.readouterr().err
+        assert "plain VM mode does not support bridge networking" in err
+        # Guidance must lead with usermode (most users aren't on PVE).
+        assert "usermode" in err
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_bridge_autodetect_rejected(self, mock_root, mock_layers,
+                                            tmp_path, capsys):
+        """Plain VM + --network bridge (no name, auto-detect) is rejected.
+
+        In practice resolve_network() already defaults plain VM to usermode
+        when net_type is None (see 9bb2eb6), so to hit this path we have to
+        pass net_type='bridge' explicitly with no bridge name and rely on
+        bridge auto-detection. Either way, a resolved type of 'bridge' must
+        be rejected for plain VM mode.
+        """
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.detect_bridge", return_value="lxcbr0"), \
+             patch("kento._bridge_exists", return_value=True):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       net_type="bridge")
+        err = capsys.readouterr().err
+        assert "plain VM mode does not support bridge networking" in err
+        assert "usermode" in err
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_bridge_with_port_still_rejected(self, mock_root, mock_layers,
+                                                 tmp_path, capsys):
+        """Plain VM + bridge + port: whichever check fires first, exit 1.
+
+        The new F3 block fires before the existing bridge+port block, but
+        either way the user must see an error.
+        """
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       port="10022:22", net_type="bridge", bridge="vmbr0")
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_bridge_not_rejected(self, mock_root, mock_layers, tmp_path):
+        """pve-vm + bridge is valid (qm handles bridged VMs natively).
+
+        Uses mode='vm' + patched PVE_DIR so auto-detection promotes to pve-vm
+        (matches the pattern of the existing pve-vm tests in this file)."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config",
+                   return_value=Path("/etc/pve/qemu-server/100.conf")), \
+             patch("kento._bridge_exists", return_value=True):
+            # Should not raise — pve-vm supports bridge via qm.
+            create("myimage:latest", name="test", mode="vm",
+                   net_type="bridge", bridge="vmbr0")
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_usermode_not_rejected(self, mock_root, mock_layers, mock_run,
+                                       mock_free, tmp_path):
+        """Plain VM + --network usermode is the good path, must not raise."""
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"):
+            create("myimage:latest", name="test", mode="vm",
+                   net_type="usermode")
+
+        assert (vm_dir / "test" / "kento-port").is_file()
+
     @patch("kento.vm._port_is_free", return_value=True)
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
