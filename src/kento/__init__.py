@@ -111,10 +111,20 @@ def detect_mode(force: str | None = None) -> str:
 def upper_base(name: str, base: Path | None = None) -> Path:
     """Return the base directory for a container's upper and work dirs.
 
-    When run via sudo, uses the invoking user's XDG data directory
-    (~user/.local/share/kento/<name>/) so writable state is per-user.
-    When run as root directly, uses the provided base (or LXC_BASE)/<name>/.
+    Resolution order:
+    1. If ``KENTO_STATE_DIR`` is set and non-empty, use it as the base
+       (``~`` is expanded). Takes precedence over sudo/root detection.
+       Useful when the default location sits on an overlayfs (e.g.
+       nested-LXC rootfs), which the kernel refuses as an upperdir.
+    2. When run via sudo, uses the invoking user's XDG data directory
+       (~user/.local/share/kento/<name>/) so writable state is per-user.
+    3. When run as root directly, uses the provided base (or LXC_BASE)/<name>/.
     """
+    override = os.environ.get("KENTO_STATE_DIR")
+    if override:
+        if override.startswith("~"):
+            override = os.path.expanduser(override)
+        return Path(override) / name
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         home = Path(pwd.getpwnam(sudo_user).pw_dir)

@@ -149,6 +149,19 @@ podman's rootful and rootless stores.
 The `kento-state` file records the state directory path so all
 commands work regardless of who runs them.
 
+### `KENTO_STATE_DIR` override
+
+Setting `KENTO_STATE_DIR` overrides the default base for the writable
+layer and takes precedence over sudo-user detection. A leading `~` is
+expanded. This is useful when the default path sits on an overlayfs
+(e.g. nested LXC where the outer rootfs is itself overlay) — the kernel
+refuses overlay-on-overlay as an upperdir. Point it at a tmpfs or plain
+filesystem instead:
+
+```
+sudo KENTO_STATE_DIR=/tmp/kento-state kento lxc create ...
+```
+
 ## PVE cluster filesystem quirks
 
 PVE's cluster filesystem (`/etc/pve`) is a FUSE mount with non-standard

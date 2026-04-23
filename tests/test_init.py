@@ -191,6 +191,40 @@ def test_upper_base_with_custom_base(tmp_path):
     assert result == tmp_path / "test"
 
 
+def test_upper_base_kento_state_dir_env(monkeypatch):
+    """KENTO_STATE_DIR overrides the default base."""
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setenv("KENTO_STATE_DIR", "/tmp/custom")
+    assert upper_base("test") == Path("/tmp/custom/test")
+
+
+def test_upper_base_kento_state_dir_empty_falls_through(monkeypatch):
+    """Empty KENTO_STATE_DIR is treated as unset (falls through to default)."""
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setenv("KENTO_STATE_DIR", "")
+    assert upper_base("test") == LXC_BASE / "test"
+
+
+def test_upper_base_kento_state_dir_expands_home(monkeypatch):
+    """KENTO_STATE_DIR starting with ~ is expanded via os.path.expanduser."""
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setenv("HOME", "/home/bob")
+    monkeypatch.setenv("KENTO_STATE_DIR", "~/foo")
+    assert upper_base("test") == Path("/home/bob/foo/test")
+
+
+def test_upper_base_kento_state_dir_overrides_sudo_user(monkeypatch):
+    """KENTO_STATE_DIR takes precedence over SUDO_USER detection."""
+    monkeypatch.setenv("SUDO_USER", "alice")
+    monkeypatch.setenv("KENTO_STATE_DIR", "/tmp/override")
+    with patch("kento.pwd.getpwnam") as mock_pwd:
+        mock_pwd.return_value.pw_dir = "/home/alice"
+        result = upper_base("test")
+    # Should use KENTO_STATE_DIR, ignoring SUDO_USER completely.
+    assert result == Path("/tmp/override/test")
+    mock_pwd.assert_not_called()
+
+
 # --- resolve_in_namespace ---
 
 
