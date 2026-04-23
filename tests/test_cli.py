@@ -344,6 +344,19 @@ class TestPullCommand:
         # argparse should reject this since pull is not a vm subcommand
         assert exc.value.code != 0
 
+    def test_pull_podman_missing_reports_clean_error(self, capsys):
+        """C1: FileNotFoundError from missing podman becomes a clean message."""
+        with patch("kento.require_root"), \
+             patch("subprocess.run", side_effect=FileNotFoundError(
+                 "[Errno 2] No such file or directory: 'podman'")):
+            with pytest.raises(SystemExit) as exc:
+                main(["pull", "alpine:3"])
+            assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "'podman' not found on PATH" in err
+        assert "apt install podman" in err or "dnf install podman" in err
+        assert "Traceback" not in err
+
 
 class TestParseNetwork:
     """Tests for _parse_network() validation logic."""
