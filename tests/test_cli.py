@@ -1029,3 +1029,86 @@ class TestMemoryCoresFlags:
             main(["lxc", "create", "--memory", "256", "--cores", "1", "debian:12"])
         assert mock_create.call_args[1]["memory"] == 256
         assert mock_create.call_args[1]["cores"] == 1
+
+
+class TestUnconfinedFlag:
+    """Tests for the --unconfined flag on lxc create/run.
+
+    See docs/troubleshooting.md for the rationale: plain LXC on modern OCI
+    images (systemd 256+) fails without AppArmor unconfined. --unconfined
+    is required on plain LXC, rejected on PVE-LXC, and absent on VM modes.
+    """
+
+    def test_unconfined_in_lxc_create_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--unconfined" in output
+
+    def test_unconfined_in_lxc_run_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--unconfined" in output
+
+    def test_unconfined_not_in_vm_create_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--unconfined" not in output
+
+    def test_unconfined_not_in_vm_run_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--unconfined" not in output
+
+    def test_lxc_create_without_unconfined_errors(self, capsys):
+        """Plain-LXC create without --unconfined must exit non-zero with guidance."""
+        with patch("kento.pve.is_pve", return_value=False), \
+             patch("kento.create.require_root"):
+            with pytest.raises(SystemExit) as exc:
+                main(["lxc", "create", "debian:13"])
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "--unconfined" in err
+        assert "systemd 256+" in err
+        assert "Alternatives" in err
+
+    def test_lxc_create_unconfined_with_pve_errors(self, capsys):
+        """--unconfined + --pve must error (PVE-LXC uses profile=generated)."""
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "create", "--unconfined", "--pve", "debian:13"])
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "--unconfined is only for plain LXC" in err
+
+    def test_lxc_create_with_unconfined_dispatches_create(self):
+        """kento lxc create --unconfined debian:13 reaches create() with unconfined=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--unconfined", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["unconfined"] is True
+        assert mock_create.call_args[1]["mode"] == "lxc"
+
+    def test_lxc_create_default_unconfined_false(self):
+        """Without --unconfined, CLI passes unconfined=False through (create() gate rejects later)."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["unconfined"] is False
+
+    def test_lxc_run_with_unconfined_dispatches_create(self):
+        """kento lxc run --unconfined also passes unconfined=True with start=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "run", "--unconfined", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["unconfined"] is True
+        assert mock_create.call_args[1]["start"] is True

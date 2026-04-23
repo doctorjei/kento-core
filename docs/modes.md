@@ -43,9 +43,30 @@ non-PVE host.
 - **Config location:** `/var/lib/lxc/<name>/config`
 - **Memory/CPU:** no limit by default (override with `--memory` / `--cores`)
 - **Nesting:** enabled by default (`--no-nesting` to disable)
-- **Apparmor:** set to `unconfined`
+- **AppArmor:** requires explicit `--unconfined` (see below)
 
 The instance runs systemd as PID 1 in a shared kernel namespace.
+
+### `--unconfined` is required
+
+Plain LXC on modern OCI images (systemd 256+, e.g. Debian 13) is
+broken by the default AppArmor profile: `ImportCredential=` directives
+in stock systemd units need a credentials tmpfs mount that the
+`lxc-container-default-with-nesting` profile denies. Result: journald,
+tmpfiles, networkd, and logind all fail with `status=243/CREDENTIALS`,
+DHCP never acquires IPv4, and the container is severely degraded.
+
+To create a working plain-LXC instance today you must pass
+`--unconfined`:
+
+```
+sudo kento lxc create --unconfined <image>
+```
+
+This drops AppArmor confinement entirely — don't use it for untrusted
+workloads. PVE-LXC and VM modes are not affected and don't need the
+flag. See [troubleshooting](troubleshooting.md#error-plain-lxc-mode-requires---unconfined-due-to-the-systemd-256-credentials-bug)
+for the full story.
 
 ## pve-lxc mode
 

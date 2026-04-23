@@ -20,7 +20,9 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     env: list[str] | None = None,
                     port: str | None = None,
                     memory: int | None = None,
-                    cores: int | None = None) -> str:
+                    cores: int | None = None,
+                    unconfined: bool = False,
+                    mode: str = "lxc") -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
         f"lxc.uts.name = {name}",
@@ -68,10 +70,25 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         f"lxc.tty.max = {LXC_TTY}",
     ]
 
+    # Plain-LXC on modern OCI images (systemd 256+) needs AppArmor unconfined:
+    # the stock lxc-container-default-with-nesting profile blocks the credentials
+    # tmpfs mount used by ImportCredential= directives, making systemd-journald,
+    # systemd-networkd, systemd-tmpfiles-setup all fail with status=243/CREDENTIALS.
+    # PVE-LXC doesn't have this problem: pct uses apparmor.profile=generated which
+    # labels in-container processes :unconfined automatically. For plain LXC our
+    # only fix today is to drop confinement entirely — gated behind --unconfined.
+    #
+    # common.conf must be included BEFORE nesting.conf so apparmor.profile ends up
+    # set AFTER both includes (otherwise nesting.conf would override it).
+    if unconfined and mode == "lxc":
+        lines.append("lxc.include = /usr/share/lxc/config/common.conf")
     if nesting:
         lines.append("lxc.include = /usr/share/lxc/config/nesting.conf")
         lines.append("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
+    if unconfined and mode == "lxc":
+        lines.append("lxc.apparmor.profile = unconfined")
+        lines.append("lxc.apparmor.allow_nesting = 1")
     if env:
         for e in env:
             lines.append(f"lxc.environment = {e}")
@@ -175,8 +192,29 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            ssh_host_key_dir: str | None = None,
            mac: str | None = None,
            config_mode: str = "auto",
-           net_type: str | None = None) -> None:
+           net_type: str | None = None,
+           unconfined: bool = False) -> None:
     require_root()
+
+    # Plain-LXC on modern OCI images (systemd 256+) is broken by the default
+    # AppArmor profile: journald/tmpfiles/networkd all fail with status=243/
+    # CREDENTIALS. The only plain-LXC fix today is full `unconfined` — gate it
+    # behind an explicit flag so users acknowledge the tradeoff. See docs/
+    # troubleshooting.md for the full story.
+    if mode == "lxc" and not unconfined:
+        print("Error: plain LXC mode requires '--unconfined' due to the "
+              "systemd 256+ credentials bug.", file=sys.stderr)
+        print("  This runs the container without AppArmor confinement — do not "
+              "use for untrusted workloads.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Alternatives:", file=sys.stderr)
+        print("  - kento lxc create --pve ...          # PVE-LXC mode, AppArmor-confined at host boundary",
+              file=sys.stderr)
+        print("  - kento vm create ...                 # VM mode, stronger isolation via QEMU",
+              file=sys.stderr)
+        print("  - kento lxc create --unconfined ...   # acknowledge tradeoff and proceed",
+              file=sys.stderr)
+        sys.exit(1)
 
     # Validate and read SSH key files early (before any filesystem changes)
     ssh_key_contents: str | None = None
@@ -225,6 +263,16 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 mode = "pve-vm"
             else:
                 mode = "pve"
+
+    # --unconfined is only meaningful for plain LXC. PVE-LXC uses
+    # apparmor.profile=generated which doesn't have the credentials bug.
+    # Reject here to catch PVE auto-promotion on PVE hosts (the CLI rejects
+    # explicit --pve + --unconfined earlier, but autodetection needs this).
+    if unconfined and mode == "pve":
+        print("Error: --unconfined is only for plain LXC; PVE-LXC uses "
+              "apparmor.profile=generated which doesn't have this issue.",
+              file=sys.stderr)
+        sys.exit(1)
 
     # Pre-validate PVE snippets storage (before any filesystem writes).
     # pve-vm always needs it; pve-lxc needs it when port/memory/cores set
@@ -553,7 +601,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                 nesting=nesting,
                                 ip=ip, gateway=gateway, env=env,
                                 port=port,
-                                memory=memory, cores=cores)
+                                memory=memory, cores=cores,
+                                unconfined=unconfined, mode=mode)
             )
             config_path = f"{container_dir}/config"
 
