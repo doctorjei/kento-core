@@ -555,6 +555,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 if port is None:
                     host_port = allocate_port()
                     guest_port = 22
+                elif port == "auto":
+                    host_port = allocate_port()
+                    guest_port = 22
                 else:
                     host_port, guest_port = port.split(":")
                     host_port, guest_port = int(host_port), int(guest_port)

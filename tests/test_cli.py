@@ -355,7 +355,8 @@ class TestParseNetwork:
         assert _parse_network("bridge", "lxc") == ("bridge", None)
 
     def test_bridge_with_name(self):
-        assert _parse_network("bridge=vmbr0", "lxc") == ("bridge", "vmbr0")
+        with patch("kento._bridge_exists", return_value=True):
+            assert _parse_network("bridge=vmbr0", "lxc") == ("bridge", "vmbr0")
 
     def test_host_mode(self):
         assert _parse_network("host", "lxc") == ("host", None)
@@ -395,7 +396,8 @@ class TestParseNetwork:
         assert _parse_network("host", None) == ("host", None)
 
     def test_bridge_with_custom_name(self):
-        assert _parse_network("bridge=br-lan", "pve") == ("bridge", "br-lan")
+        with patch("kento._bridge_exists", return_value=True):
+            assert _parse_network("bridge=br-lan", "pve") == ("bridge", "br-lan")
 
 
 def _make_container(base: Path, dirname: str, name: str, mode: str) -> Path:
@@ -908,7 +910,8 @@ class TestPortNetworkValidation:
     def test_port_with_bridge_passes_to_create(self):
         """--port with --network bridge reaches create() (valid for LXC)."""
         mock_create = MagicMock()
-        with patch("kento.create.create", mock_create):
+        with patch("kento.create.create", mock_create), \
+             patch("kento._bridge_exists", return_value=True):
             main(["lxc", "create", "--port", "10022:22", "--network", "bridge=lxcbr0",
                   "debian:12"])
         mock_create.assert_called_once()
