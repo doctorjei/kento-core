@@ -253,7 +253,7 @@ class TestSshKeygenFailure:
              patch("kento.create.subprocess.run", side_effect=fake_run):
             with pytest.raises(SystemExit) as exc:
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True, ssh_host_keys=True)
+                       ssh_host_keys=True)
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "Error: ssh-keygen failed" in captured.err

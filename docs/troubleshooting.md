@@ -62,55 +62,6 @@ Scrub requires the instance to be stopped. Stop it first:
 sudo kento shutdown <name>
 ```
 
-### "Error: plain LXC mode requires '--unconfined' due to the systemd 256+ credentials bug"
-
-Modern systemd (256+, shipped in Debian 13 and equivalent) adds
-`ImportCredential=` directives to stock units. These require a
-credentials tmpfs mount under `/run/credentials/`, which the default
-LXC AppArmor profile (`lxc-container-default-with-nesting`) denies.
-
-In plain-LXC mode the result is that systemd-journald,
-systemd-tmpfiles-setup, systemd-networkd, systemd-logind all exit
-with `status=243/CREDENTIALS`, DHCP never acquires an IPv4 lease,
-and the container is severely degraded even though it technically
-"started."
-
-PVE-LXC is not affected: `pct` sets `apparmor.profile = generated`,
-which builds a per-container profile where in-container processes
-run effectively unconfined (host boundary still enforced). Kento
-cannot replicate `generated` on plain LXC without custom
-apparmor_parser plumbing.
-
-For plain LXC today the only fix is to drop AppArmor confinement
-entirely. Kento gates this behind an explicit flag:
-
-```
-sudo kento lxc create --unconfined <image>
-```
-
-This adds to the LXC config:
-
-```
-lxc.include = /usr/share/lxc/config/common.conf
-lxc.apparmor.profile = unconfined
-lxc.apparmor.allow_nesting = 1
-```
-
-`unconfined` removes a layer of defense-in-depth — do not use it for
-untrusted workloads. Alternatives that keep confinement:
-
-- `kento lxc create --pve <image>` — PVE-LXC mode, AppArmor-confined
-  at the host boundary via `apparmor.profile = generated`
-- `kento vm create <image>` — VM mode, isolation via QEMU instead of
-  AppArmor
-
-### "Error: --unconfined is only for plain LXC"
-
-`--unconfined` is a workaround for a plain-LXC-only issue. PVE-LXC
-already works via `apparmor.profile = generated`, and VM modes don't
-use AppArmor at all. Drop the flag if you're on a PVE host or using
-`kento vm`.
-
 ### "Error: VMID must be >= 100"
 
 PVE requires VMIDs to be 100 or greater. Use a valid VMID:

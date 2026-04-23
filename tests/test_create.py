@@ -22,7 +22,7 @@ class TestGenerateConfig:
         assert "lxc.tty.max = 2" in cfg
         assert "lxc.mount.auto = proc:rw sys:rw cgroup:rw" in cfg
         assert "lxc.init.cmd" not in cfg
-        assert "lxc.apparmor.profile" not in cfg
+        assert "lxc.apparmor.profile = generated" in cfg
         assert "lxc.pty.max" not in cfg
         assert "nesting.conf" in cfg
         assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
@@ -59,10 +59,10 @@ class TestGenerateConfig:
         assert "/dev/fuse" not in cfg
         assert "/dev/net/tun" not in cfg
 
-    def test_unconfined_lxc_emits_apparmor_lines(self, tmp_path):
-        cfg = generate_config("test", tmp_path, mode="lxc", unconfined=True)
+    def test_lxc_emits_generated_apparmor_lines(self, tmp_path):
+        cfg = generate_config("test", tmp_path, mode="lxc")
         assert "lxc.include = /usr/share/lxc/config/common.conf" in cfg
-        assert "lxc.apparmor.profile = unconfined" in cfg
+        assert "lxc.apparmor.profile = generated" in cfg
         assert "lxc.apparmor.allow_nesting = 1" in cfg
         assert "lxc.apparmor.allow_incomplete = 1" in cfg
         # common.conf must appear before nesting.conf (order matters).
@@ -71,39 +71,17 @@ class TestGenerateConfig:
         assert common_idx < nesting_idx, \
             "common.conf include must precede nesting.conf include"
         # apparmor.profile must appear after both includes (overrides nesting.conf default).
-        apparmor_idx = cfg.index("lxc.apparmor.profile = unconfined")
+        apparmor_idx = cfg.index("lxc.apparmor.profile = generated")
         assert apparmor_idx > nesting_idx, \
-            "apparmor.profile = unconfined must come after nesting.conf include"
+            "apparmor.profile = generated must come after nesting.conf include"
 
-    def test_unconfined_false_lxc_omits_apparmor_lines(self, tmp_path):
-        cfg = generate_config("test", tmp_path, mode="lxc", unconfined=False)
+    def test_pve_mode_omits_apparmor_lines(self, tmp_path):
+        # PVE-LXC handles AppArmor via pct's config, not the kento-generated
+        # lxc.conf. generate_config() emits apparmor lines only for mode="lxc".
+        cfg = generate_config("test", tmp_path, mode="pve")
         assert "common.conf" not in cfg
         assert "lxc.apparmor.profile" not in cfg
         assert "lxc.apparmor.allow_nesting" not in cfg
-        assert "lxc.apparmor.allow_incomplete" not in cfg
-
-    def test_unconfined_pve_mode_ignored(self, tmp_path):
-        # PVE-LXC uses apparmor.profile=generated; the flag should not emit
-        # lines even if passed through (defense in depth — the CLI/create()
-        # gate rejects earlier, but generate_config itself is harmless).
-        cfg = generate_config("test", tmp_path, mode="pve", unconfined=True)
-        assert "common.conf" not in cfg
-        assert "lxc.apparmor.profile" not in cfg
-        assert "lxc.apparmor.allow_nesting" not in cfg
-        assert "lxc.apparmor.allow_incomplete" not in cfg
-
-    def test_unconfined_lxc_emits_allow_incomplete(self, tmp_path):
-        # Nested LXC (container-in-container) requires allow_incomplete=1: the
-        # inner container sees a restricted subset of the kernel AppArmor
-        # features and lxc-start aborts without it.
-        cfg = generate_config("test", tmp_path, mode="lxc", unconfined=True)
-        assert "lxc.apparmor.allow_incomplete = 1" in cfg
-
-    def test_unconfined_pve_mode_omits_allow_incomplete(self, tmp_path):
-        # Regression: mode=="pve" must never emit allow_incomplete, even when
-        # unconfined=True is passed through (unreachable via the CLI gate but
-        # still worth covering at the unit-test boundary).
-        cfg = generate_config("test", tmp_path, mode="pve", unconfined=True)
         assert "lxc.apparmor.allow_incomplete" not in cfg
 
 
@@ -115,7 +93,7 @@ class TestCreate:
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         lxc_dir = tmp_path / "test"
         assert (lxc_dir / "rootfs").is_dir()
@@ -139,7 +117,7 @@ class TestCreate:
                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "myimage_latest-0"):
-            create("myimage:latest", mode="lxc", unconfined=True)
+            create("myimage:latest", mode="lxc")
 
         lxc_dir = tmp_path / "myimage_latest-0"
         assert (lxc_dir / "rootfs").is_dir()
@@ -154,7 +132,7 @@ class TestCreate:
         state = tmp_path / "user-state" / "test"
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=state):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         lxc_dir = tmp_path / "test"
         assert (state / "upper").is_dir()
@@ -171,9 +149,9 @@ class TestCreate:
                                          mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
             with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc", unconfined=True)
+                create("myimage:latest", name="test", mode="lxc")
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -187,7 +165,7 @@ class TestCreate:
             [], 0, stdout="", stderr="")
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, start=True)
+            create("myimage:latest", name="test", mode="lxc", start=True)
 
         lxc_calls = [c for c in mock_run.call_args_list
                      if c[0][0][0] == "lxc-start"]
@@ -201,7 +179,7 @@ class TestCreate:
                                   mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         assert (tmp_path / "test" / "kento-mode").read_text().strip() == "lxc"
 
@@ -246,7 +224,7 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc", unconfined=True, vmid=100)
+                create("myimage:latest", name="test", mode="lxc", vmid=100)
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -295,7 +273,7 @@ class TestCreate:
         """When bridge is None (omitted), no network config is generated."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         cfg = (tmp_path / "test" / "config").read_text()
         assert "lxc.net.0" not in cfg
@@ -345,7 +323,7 @@ class TestCreate:
              patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
-            create("myimage:latest", name="shared", mode="lxc", unconfined=True)
+            create("myimage:latest", name="shared", mode="lxc")
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="shared", mode="vm")
 
@@ -368,7 +346,7 @@ class TestCreate:
             # Without force, this would raise (covered by the previous test
             # in the reverse direction). With force, it must succeed.
             create("myimage:latest", name="shared", mode="lxc",
-                   unconfined=True, force=True)
+                   force=True)
 
         # Both directories should now exist side by side.
         assert (lxc_base / "shared" / "kento-name").read_text().strip() == "shared"
@@ -389,7 +367,7 @@ class TestCreate:
              patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
-            create("myimage:latest", name="shared", mode="lxc", unconfined=True)
+            create("myimage:latest", name="shared", mode="lxc")
             create("myimage:latest", name="shared", mode="vm", force=True)
 
         assert (lxc_base / "shared" / "kento-name").read_text().strip() == "shared"
@@ -429,10 +407,10 @@ class TestCreate:
              patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
-            create("myimage:latest", name="shared", mode="lxc", unconfined=True)
+            create("myimage:latest", name="shared", mode="lxc")
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="shared", mode="lxc",
-                       unconfined=True, force=True)
+                       force=True)
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -451,7 +429,7 @@ class TestCreate:
             create("myimage:latest", name="shared", mode="vm")
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="shared", mode="lxc",
-                       unconfined=True)
+                       )
 
 
 class TestStaticIp:
@@ -463,7 +441,7 @@ class TestStaticIp:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    net_type="bridge", bridge="lxcbr0",
                    ip="192.168.0.160/22",
                    gateway="192.168.0.1", dns="8.8.8.8")
@@ -492,7 +470,7 @@ class TestStaticIp:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    net_type="bridge", bridge="lxcbr0", ip="10.0.0.5/24")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
@@ -563,7 +541,7 @@ class TestStaticIp:
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True, net_type="none", ip="10.0.0.5/24")
+                       net_type="none", ip="10.0.0.5/24")
         err = capsys.readouterr().err
         assert "--ip requires bridge networking" in err
 
@@ -575,7 +553,7 @@ class TestStaticIp:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc", unconfined=True, gateway="192.168.0.1")
+                create("myimage:latest", name="test", mode="lxc", gateway="192.168.0.1")
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -584,7 +562,7 @@ class TestStaticIp:
                                                     mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, dns="8.8.8.8")
+            create("myimage:latest", name="test", mode="lxc", dns="8.8.8.8")
 
         dropin = (tmp_path / "test" / "upper" / "etc" / "systemd" /
                   "resolved.conf.d" / "90-kento.conf")
@@ -601,7 +579,7 @@ class TestGuestConfig:
     def test_hostname_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         hostname = (tmp_path / "test" / "upper" / "etc" / "hostname").read_text()
         assert hostname.strip() == "test"
@@ -614,7 +592,7 @@ class TestGuestConfig:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    net_type="bridge", bridge="lxcbr0",
                    ip="10.0.0.5/24", searchdomain="example.com")
 
@@ -630,7 +608,7 @@ class TestGuestConfig:
     def test_timezone_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, timezone="Asia/Tokyo")
+            create("myimage:latest", name="test", mode="lxc", timezone="Asia/Tokyo")
 
         lxc_dir = tmp_path / "test"
         assert (lxc_dir / "kento-tz").read_text().strip() == "Asia/Tokyo"
@@ -645,7 +623,7 @@ class TestGuestConfig:
     def test_env_injected(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, env=["FOO=bar", "BAZ=qux"])
+            create("myimage:latest", name="test", mode="lxc", env=["FOO=bar", "BAZ=qux"])
 
         lxc_dir = tmp_path / "test"
         env_content = (lxc_dir / "kento-env").read_text()
@@ -671,7 +649,7 @@ class TestGuestConfig:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    ssh_keys=[str(key1), str(key2)])
 
         content = (tmp_path / "test" / "kento-authorized-keys").read_text()
@@ -688,7 +666,7 @@ class TestGuestConfig:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                create("myimage:latest", name="test", mode="lxc",
                        ssh_keys=[str(missing)])
             assert exc.value.code == 1
         # Container dir should not have been created yet
@@ -702,7 +680,7 @@ class TestGuestConfig:
         """ssh_keys=None means no kento-authorized-keys file."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         assert not (tmp_path / "test" / "kento-authorized-keys").exists()
 
@@ -716,7 +694,7 @@ class TestGuestConfig:
         key.write_text("ssh-rsa AAAA user@host\n")
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    ssh_keys=[str(key)], ssh_key_user="droste")
 
         content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
@@ -732,7 +710,7 @@ class TestGuestConfig:
         key.write_text("ssh-rsa AAAA user@host\n")
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, ssh_keys=[str(key)])
+            create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
 
         assert not (tmp_path / "test" / "kento-ssh-user").exists()
 
@@ -744,7 +722,7 @@ class TestGuestConfig:
         """--ssh-key-user without --ssh-key still writes the metadata file."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, ssh_key_user="droste")
+            create("myimage:latest", name="test", mode="lxc", ssh_key_user="droste")
 
         content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
         assert content == "droste"
@@ -756,7 +734,7 @@ class TestGuestConfig:
                                                       mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, searchdomain="example.com")
+            create("myimage:latest", name="test", mode="lxc", searchdomain="example.com")
 
         net = (tmp_path / "test" / "kento-net").read_text()
         assert "searchdomain=example.com" in net
@@ -776,7 +754,7 @@ class TestSSHHostKeys:
         """--ssh-host-keys calls ssh-keygen for 3 key types."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, ssh_host_keys=True)
+            create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
 
         key_dir = tmp_path / "test" / "ssh-host-keys"
         assert key_dir.is_dir()
@@ -806,7 +784,7 @@ class TestSSHHostKeys:
         """Generated keys are placed in ssh-host-keys/ with correct filenames."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, ssh_host_keys=True)
+            create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
 
         key_dir = tmp_path / "test" / "ssh-host-keys"
         keygen_calls = [c for c in mock_run.call_args_list
@@ -833,7 +811,7 @@ class TestSSHHostKeys:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    ssh_host_key_dir=str(src))
 
         key_dir = tmp_path / "test" / "ssh-host-keys"
@@ -852,7 +830,7 @@ class TestSSHHostKeys:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                create("myimage:latest", name="test", mode="lxc",
                        ssh_host_key_dir=str(tmp_path / "nonexistent"))
             assert exc.value.code == 1
 
@@ -867,7 +845,7 @@ class TestSSHHostKeys:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                create("myimage:latest", name="test", mode="lxc",
                        ssh_host_key_dir=str(src))
             assert exc.value.code == 1
 
@@ -879,7 +857,7 @@ class TestSSHHostKeys:
         """Without either flag, no ssh-host-keys/ directory is created."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         assert not (tmp_path / "test" / "ssh-host-keys").exists()
 
@@ -897,7 +875,7 @@ class TestSSHHostKeys:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc", unconfined=True, ssh_host_keys=True)
+                create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
             assert exc.value.code == 1
 
 
@@ -1449,7 +1427,7 @@ class TestLxcPortForwarding:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    port="10022:22", net_type="bridge", bridge="lxcbr0")
 
         port_file = tmp_path / "test" / "kento-port"
@@ -1466,7 +1444,7 @@ class TestLxcPortForwarding:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    port="10022:22", net_type="bridge", bridge="lxcbr0")
 
         cfg = (tmp_path / "test" / "config").read_text()
@@ -1480,7 +1458,7 @@ class TestLxcPortForwarding:
         """Without port, LXC config does NOT include lxc.hook.start-host."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         cfg = (tmp_path / "test" / "config").read_text()
         assert "lxc.hook.start-host" not in cfg
@@ -1492,7 +1470,7 @@ class TestLxcPortForwarding:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc", unconfined=True,
+                create("myimage:latest", name="test", mode="lxc",
                        port="10022:22", net_type="none")
 
     @patch("kento.vm._port_is_free", return_value=True)
@@ -1506,7 +1484,7 @@ class TestLxcPortForwarding:
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento._bridge_exists", return_value=True):
             # Should not raise
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    port="10022:22", net_type="bridge", bridge="lxcbr0")
 
         assert (tmp_path / "test" / "kento-port").is_file()
@@ -1644,7 +1622,7 @@ class TestLxcPortForwarding:
              patch("kento._bridge_exists", return_value=True), \
              patch("kento.vm.VM_BASE", vm_base), \
              patch("kento.LXC_BASE", lxc_base):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True,
+            create("myimage:latest", name="test", mode="lxc",
                    port="auto", net_type="bridge", bridge="lxcbr0")
 
         port = (lxc_base / "test" / "kento-port").read_text().strip()
@@ -1668,7 +1646,7 @@ class TestCloudInitMode:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.is_file()
@@ -1682,7 +1660,7 @@ class TestCloudInitMode:
         """Default to injection mode when image lacks cloud-init."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.is_file()
@@ -1701,7 +1679,7 @@ class TestCloudInitMode:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, config_mode="injection")
+            create("myimage:latest", name="test", mode="lxc", config_mode="injection")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.read_text().strip() == "injection"
@@ -1719,7 +1697,7 @@ class TestCloudInitMode:
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, timezone="UTC",
+            create("myimage:latest", name="test", mode="lxc", timezone="UTC",
                    env=["FOO=bar"])
 
         seed_dir = tmp_path / "test" / "cloud-seed"
@@ -1740,7 +1718,7 @@ class TestCloudInitMode:
         """Injection mode does not create cloud-seed/ directory."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, config_mode="injection")
+            create("myimage:latest", name="test", mode="lxc", config_mode="injection")
 
         assert not (tmp_path / "test" / "cloud-seed").exists()
 
@@ -1754,7 +1732,7 @@ class TestCloudInitMode:
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             with pytest.raises(SystemExit) as exc:
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True, config_mode="cloudinit")
+                       config_mode="cloudinit")
             assert exc.value.code == 1
 
         captured = capsys.readouterr()
@@ -1777,7 +1755,7 @@ class TestCloudInitMode:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", mode="lxc",
-                   unconfined=True, config_mode="cloudinit")
+                   config_mode="cloudinit")
 
         mode_file = tmp_path / "test" / "kento-config-mode"
         assert mode_file.read_text().strip() == "cloudinit"
@@ -1823,7 +1801,7 @@ class TestLxcCreateMemoryCores:
     def test_lxc_memory_in_config(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, memory=256)
+            create("myimage:latest", name="test", mode="lxc", memory=256)
 
         cfg = (tmp_path / "test" / "config").read_text()
         assert "lxc.cgroup2.memory.max = 268435456" in cfg
@@ -1834,7 +1812,7 @@ class TestLxcCreateMemoryCores:
     def test_lxc_cores_in_config(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, cores=2)
+            create("myimage:latest", name="test", mode="lxc", cores=2)
 
         cfg = (tmp_path / "test" / "config").read_text()
         assert "lxc.cgroup2.cpu.max = 200000 100000" in cfg
@@ -1845,7 +1823,7 @@ class TestLxcCreateMemoryCores:
     def test_lxc_no_memory_cores_by_default(self, mock_root, mock_layers, mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         cfg = (tmp_path / "test" / "config").read_text()
         assert "cgroup2.memory.max" not in cfg
@@ -1860,7 +1838,7 @@ class TestLxcCreateMemoryCores:
         into PVE-LXC's inner `ns` cgroup. Must be written at create time."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, memory=256)
+            create("myimage:latest", name="test", mode="lxc", memory=256)
 
         assert (tmp_path / "test" / "kento-memory").read_text().strip() == "256"
 
@@ -1872,7 +1850,7 @@ class TestLxcCreateMemoryCores:
         """Same as memory — cores metadata needed for ns-cgroup propagation."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, cores=2)
+            create("myimage:latest", name="test", mode="lxc", cores=2)
 
         assert (tmp_path / "test" / "kento-cores").read_text().strip() == "2"
 
@@ -1885,7 +1863,7 @@ class TestLxcCreateMemoryCores:
         that would fool the hook into writing 0-byte limits."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         assert not (tmp_path / "test" / "kento-memory").exists()
         assert not (tmp_path / "test" / "kento-cores").exists()
@@ -1939,88 +1917,26 @@ class TestVmCreateMemoryCores:
         """LXC mode does not write kento-memory/kento-cores metadata files."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
+            create("myimage:latest", name="test", mode="lxc")
 
         assert not (tmp_path / "test" / "kento-memory").exists()
         assert not (tmp_path / "test" / "kento-cores").exists()
 
 
-class TestUnconfinedGate:
-    """Tests for the plain-LXC --unconfined gate in create().
+class TestPveAutopromote:
+    """PVE auto-promotion smoke test.
 
-    Plain-LXC on modern OCI images (systemd 256+) is broken without AppArmor
-    unconfined. We require an explicit --unconfined flag before writing any
-    config for mode="lxc", and reject unconfined=True for mode="pve".
+    On a PVE host, `kento lxc create foo` (no flags) must flip mode to pve.
+    Regression coverage for F1 (edge-case audit 2026-04-23): the former
+    --unconfined gate used to run before auto-promotion resolution, aborting
+    on PVE hosts even when auto-detection would have promoted to pve.
     """
 
-    @patch("kento.create.require_root")
-    def test_lxc_without_unconfined_errors(self, mock_root, tmp_path, capsys):
-        with patch("kento.create.LXC_BASE", tmp_path):
-            with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc")
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "--unconfined" in err
-        assert "systemd 256+" in err
-        assert "Alternatives" in err
-        # Guidance should mention the three alternatives.
-        assert "--pve" in err
-        assert "kento vm create" in err
-        assert "acknowledge tradeoff" in err
-
-    @patch("kento.create.require_root")
-    def test_lxc_without_unconfined_does_not_write(self, mock_root, tmp_path):
-        """Gate must fire before any filesystem changes."""
-        with patch("kento.create.LXC_BASE", tmp_path):
-            with pytest.raises(SystemExit):
-                create("myimage:latest", name="test", mode="lxc")
-        # No container directory should have been created.
-        assert not (tmp_path / "test").exists()
-
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_lxc_with_unconfined_succeeds(self, mock_root, mock_layers,
-                                           mock_run, tmp_path):
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True)
-
-        lxc_dir = tmp_path / "test"
-        assert (lxc_dir / "config").is_file()
-        cfg = (lxc_dir / "config").read_text()
-        assert "lxc.apparmor.profile = unconfined" in cfg
-        assert "lxc.apparmor.allow_nesting = 1" in cfg
-        assert "lxc.apparmor.allow_incomplete = 1" in cfg
-        assert "lxc.include = /usr/share/lxc/config/common.conf" in cfg
-
-    @patch("kento.create.subprocess.run")
-    @patch("kento.create.resolve_layers", return_value="/a:/b")
-    @patch("kento.pve.is_pve", return_value=True)
-    @patch("kento.create.require_root")
-    def test_pve_with_unconfined_errors(self, mock_root, mock_is_pve,
-                                         mock_layers, mock_run, tmp_path, capsys):
-        """PVE auto-promotion + unconfined=True should be rejected."""
-        with patch("kento.create.LXC_BASE", tmp_path):
-            with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True, pve=True)
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "--unconfined is only for plain LXC" in err
-        assert "apparmor.profile=generated" in err
-
-    @patch("kento.create.subprocess.run")
-    @patch("kento.create.resolve_layers", return_value="/a:/b")
-    @patch("kento.create.require_root")
-    def test_pve_host_autopromote_skips_gate(self, mock_root, mock_layers,
-                                               mock_run, tmp_path, capsys):
-        """On a PVE host, `kento lxc create foo` (no flags) must auto-promote
-        to pve mode rather than fail the --unconfined gate. Regression for F1
-        (edge-case audit 2026-04-23): the gate used to run BEFORE auto-promote
-        resolution, so plain-lxc mode + no --unconfined aborted even when
-        auto-detection would have flipped the mode to pve.
-        """
+    def test_pve_host_autopromote(self, mock_root, mock_layers,
+                                    mock_run, tmp_path, capsys):
         pve = tmp_path / "pve"
         pve.mkdir()
         (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
@@ -2035,38 +1951,10 @@ class TestUnconfinedGate:
              patch("kento.create.upper_base", return_value=tmp_path / "100"), \
              patch("kento.pve.PVE_DIR", pve), \
              patch("kento.pve.write_pve_config", side_effect=fake_write):
-            # No --unconfined, no --pve — auto-promotion should fire.
             create("myimage:latest", name="test", mode="lxc")
 
-        # Gate should NOT have fired.
-        err = capsys.readouterr().err
-        assert "requires '--unconfined'" not in err
-
-        # Instance was auto-promoted to pve mode.
         lxc_dir = tmp_path / "100"
         assert (lxc_dir / "kento-mode").read_text().strip() == "pve"
-
-    @patch("kento.create.require_root")
-    def test_non_pve_host_still_gates(self, mock_root, tmp_path, capsys):
-        """On a non-PVE host, `kento lxc create foo` (no flags, no --unconfined)
-        still errors with the full guidance message. Complement to the F1
-        regression — moving the gate below auto-promotion must not weaken it
-        on plain-LXC hosts.
-        """
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.pve.is_pve", return_value=False):
-            with pytest.raises(SystemExit) as exc:
-                create("myimage:latest", name="test", mode="lxc")
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "--unconfined" in err
-        assert "systemd 256+" in err
-        assert "Alternatives" in err
-        assert "--pve" in err
-        assert "kento vm create" in err
-        assert "acknowledge tradeoff" in err
-        # Nothing on disk.
-        assert not (tmp_path / "test").exists()
 
 
 class TestCreateRollback:
@@ -2094,7 +1982,7 @@ class TestCreateRollback:
              patch("kento.create.write_hook", side_effect=boom):
             with pytest.raises(RuntimeError, match="simulated hook failure"):
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True)
+                       )
 
         # container_dir is gone
         assert not (tmp_path / "test").exists()
@@ -2229,7 +2117,7 @@ class TestCreateRollback:
         with patch("kento.create.LXC_BASE", tmp_path):
             with pytest.raises(SystemExit) as exc:
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True, ssh_keys=[str(missing)])
+                       ssh_keys=[str(missing)])
         assert exc.value.code == 1
         # Nothing got created.
         assert not (tmp_path / "test").exists()
@@ -2265,7 +2153,7 @@ class TestCreateRollback:
              patch("kento.create.subprocess.run", side_effect=fake_run):
             with pytest.raises(RuntimeError) as exc:
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True, start=True)
+                       start=True)
             assert "failed to start test" in str(exc.value)
             assert "kento lxc start test" in str(exc.value) \
                 or "kento lxc destroy test" in str(exc.value)
@@ -2296,4 +2184,4 @@ class TestCreateRollback:
              patch("kento.layers.remove_image_hold", side_effect=cleanup_boom):
             with pytest.raises(RuntimeError, match="original failure"):
                 create("myimage:latest", name="test", mode="lxc",
-                       unconfined=True)
+                       )

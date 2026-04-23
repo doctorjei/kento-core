@@ -67,7 +67,6 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     port: str | None = None,
                     memory: int | None = None,
                     cores: int | None = None,
-                    unconfined: bool = False,
                     mode: str = "lxc") -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
@@ -116,24 +115,26 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         f"lxc.tty.max = {LXC_TTY}",
     ]
 
-    # Plain-LXC on modern OCI images (systemd 256+) needs AppArmor unconfined:
-    # the stock lxc-container-default-with-nesting profile blocks the credentials
+    # Plain-LXC on modern OCI images (systemd 256+) needs AppArmor profile=generated.
+    # The stock lxc-container-default-with-nesting profile blocks the credentials
     # tmpfs mount used by ImportCredential= directives, making systemd-journald,
-    # systemd-networkd, systemd-tmpfiles-setup all fail with status=243/CREDENTIALS.
-    # PVE-LXC doesn't have this problem: pct uses apparmor.profile=generated which
-    # labels in-container processes :unconfined automatically. For plain LXC our
-    # only fix today is to drop confinement entirely — gated behind --unconfined.
+    # systemd-networkd, systemd-tmpfiles-setup fail with status=243/CREDENTIALS.
+    # profile=generated is a built-in LXC feature (not PVE-specific): LXC builds a
+    # per-container profile that enforces the host/container boundary but labels
+    # in-container processes :unconfined, so PAM helpers (unix_chkpwd) and other
+    # setuid binaries still load glibc RELRO correctly. PVE-LXC takes the same
+    # approach via pct's config.
     #
     # common.conf must be included BEFORE nesting.conf so apparmor.profile ends up
     # set AFTER both includes (otherwise nesting.conf would override it).
-    if unconfined and mode == "lxc":
+    if mode == "lxc":
         lines.append("lxc.include = /usr/share/lxc/config/common.conf")
     if nesting:
         lines.append("lxc.include = /usr/share/lxc/config/nesting.conf")
         lines.append("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
-    if unconfined and mode == "lxc":
-        lines.append("lxc.apparmor.profile = unconfined")
+    if mode == "lxc":
+        lines.append("lxc.apparmor.profile = generated")
         lines.append("lxc.apparmor.allow_nesting = 1")
         lines.append("lxc.apparmor.allow_incomplete = 1")
     if env:
@@ -245,7 +246,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            mac: str | None = None,
            config_mode: str = "auto",
            net_type: str | None = None,
-           unconfined: bool = False,
            force: bool = False) -> None:
     require_root()
 
@@ -296,38 +296,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 mode = "pve-vm"
             else:
                 mode = "pve"
-
-    # --unconfined is only meaningful for plain LXC. PVE-LXC uses
-    # apparmor.profile=generated which doesn't have the credentials bug.
-    # Reject here to catch PVE auto-promotion on PVE hosts (the CLI rejects
-    # explicit --pve + --unconfined earlier, but autodetection needs this).
-    if unconfined and mode == "pve":
-        print("Error: --unconfined is only for plain LXC; PVE-LXC uses "
-              "apparmor.profile=generated which doesn't have this issue.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    # Plain-LXC on modern OCI images (systemd 256+) is broken by the default
-    # AppArmor profile: journald/tmpfiles/networkd all fail with status=243/
-    # CREDENTIALS. The only plain-LXC fix today is full `unconfined` — gate it
-    # behind an explicit flag so users acknowledge the tradeoff. See docs/
-    # troubleshooting.md for the full story. Runs AFTER PVE auto-promotion so
-    # that on PVE hosts the mode becomes "pve" before this check and the gate
-    # stays silent — PVE-LXC doesn't hit the systemd credentials bug.
-    if mode == "lxc" and not unconfined:
-        print("Error: plain LXC mode requires '--unconfined' due to the "
-              "systemd 256+ credentials bug.", file=sys.stderr)
-        print("  This runs the container without AppArmor confinement — do not "
-              "use for untrusted workloads.", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Alternatives:", file=sys.stderr)
-        print("  - kento lxc create --pve ...          # PVE-LXC mode, AppArmor-confined at host boundary",
-              file=sys.stderr)
-        print("  - kento vm create ...                 # VM mode, stronger isolation via QEMU",
-              file=sys.stderr)
-        print("  - kento lxc create --unconfined ...   # acknowledge tradeoff and proceed",
-              file=sys.stderr)
-        sys.exit(1)
 
     # Pre-validate PVE snippets storage (before any filesystem writes).
     # pve-vm always needs it; pve-lxc needs it when port/memory/cores set
@@ -775,7 +743,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                     ip=ip, gateway=gateway, env=env,
                                     port=port,
                                     memory=memory, cores=cores,
-                                    unconfined=unconfined, mode=mode)
+                                    mode=mode)
                 )
                 config_path = f"{container_dir}/config"
 

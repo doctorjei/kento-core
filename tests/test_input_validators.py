@@ -137,7 +137,7 @@ class TestBridgeExistence:
     def test_nonexistent_bridge_rejected(self, capsys):
         """--network bridge=<nonexistent> exits with 'does not exist'."""
         with pytest.raises(SystemExit) as exc:
-            main(["lxc", "create", "debian:13", "--unconfined",
+            main(["lxc", "create", "debian:13",
                   "--name", "x",
                   "--network", "bridge=definitely_does_not_exist_9999"])
         assert exc.value.code == 1
@@ -150,7 +150,7 @@ class TestBridgeExistence:
         with patch("kento.create.create", mock_create), \
              patch("kento._bridge_exists", return_value=True):
             main(["lxc", "create", "--network", "bridge=fakebr0",
-                  "--unconfined", "--name", "x", "debian:13"])
+                  "--name", "x", "debian:13"])
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["bridge"] == "fakebr0"
 
@@ -162,7 +162,7 @@ class TestCliLevelRejection:
     def test_cli_rejects_bad_port(self, capsys):
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "create", "--port", "abc:def", "--name", "x",
-                  "--unconfined", "debian:13"])
+                  "debian:13"])
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "invalid port" in err or "must be integers" in err
@@ -170,7 +170,7 @@ class TestCliLevelRejection:
     def test_cli_rejects_negative_memory(self, capsys):
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "create", "--memory", "-1", "--name", "x",
-                  "--unconfined", "debian:13"])
+                  "debian:13"])
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "invalid memory" in err or ">= 1" in err
@@ -178,7 +178,7 @@ class TestCliLevelRejection:
     def test_cli_rejects_zero_cores(self, capsys):
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "create", "--cores", "0", "--name", "x",
-                  "--unconfined", "debian:13"])
+                  "debian:13"])
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "invalid cores" in err or ">= 1" in err
@@ -186,7 +186,7 @@ class TestCliLevelRejection:
     def test_cli_rejects_bad_ip(self, capsys):
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "create", "--ip", "999.999.999.999/foo",
-                  "--name", "x", "--unconfined", "debian:13"])
+                  "--name", "x", "debian:13"])
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "invalid IP" in err

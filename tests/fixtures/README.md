@@ -36,7 +36,7 @@ localhost/kento-test-minimal:latest
 Example:
 
 ```sh
-kento lxc create --no-pve --unconfined \
+kento lxc create --no-pve \
     localhost/kento-test-minimal:latest --name probe
 ```
 

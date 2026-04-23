@@ -29,7 +29,7 @@ def test_create_enters_kento_lock_for_name_and_mkdir(
     with patch("kento.create.LXC_BASE", tmp_path), \
          patch("kento.create.upper_base", return_value=tmp_path / "lock-test"):
         create("myimage:latest", name="lock-test", mode="lxc",
-               unconfined=True)
+               )
 
     # At least one with-kento_lock() block must have been entered. For an LXC
     # create without --port, only the outer block runs — so exactly one call.
@@ -57,7 +57,7 @@ def test_create_enters_lock_twice_when_port_auto(
                return_value=tmp_path / "lock-port-test"), \
          patch("kento.vm.allocate_port", return_value=10099):
         create("myimage:latest", name="lock-port-test", mode="lxc",
-               unconfined=True, bridge="lxcbr0", port="auto",
+               bridge="lxcbr0", port="auto",
                net_type="bridge")
 
     # Outer allocate/mkdir block + port allocation block → at least 2 enters.
@@ -105,8 +105,8 @@ def test_concurrent_create_does_not_share_auto_name(
 
     with patch("kento.create.LXC_BASE", tmp_path), \
          patch("kento.create.upper_base", side_effect=fake_upper):
-        create("myimage:latest", mode="lxc", unconfined=True)
-        create("myimage:latest", mode="lxc", unconfined=True)
+        create("myimage:latest", mode="lxc")
+        create("myimage:latest", mode="lxc")
 
     # next_instance_name picks myimage_latest-0 then -1.
     assert (tmp_path / "myimage_latest-0").is_dir()
@@ -167,7 +167,7 @@ def test_create_port_written_atomically_with_allocation(tmp_path):
          patch("kento.vm.allocate_port", side_effect=fake_allocate_port), \
          patch.object(type(tmp_path), "write_text", recording_write_text):
         create("myimage:latest", name="atomic-test", mode="lxc",
-               unconfined=True, bridge="lxcbr0", port="auto",
+               bridge="lxcbr0", port="auto",
                net_type="bridge")
 
     # Find the port-alloc block: look for a sequence where allocate_port
