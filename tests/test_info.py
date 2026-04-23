@@ -707,3 +707,149 @@ def test_info_fingerprints_single_key_type(mock_run, mock_running, tmp_path, cap
     assert "ED25519:" in output
     assert "RSA:" not in output
     assert "ECDSA:" not in output
+
+
+# --- Pass-through flags (v1.2.0 Phase B4) ---
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_verbose_passthrough_both_files(mock_running, tmp_path, capsys):
+    """--verbose with both kento-qemu-args and kento-pve-args present."""
+    d = _make_container(tmp_path)
+    (d / "kento-qemu-args").write_text(
+        "-device virtio-rng-pci\n-device virtio-balloon\n")
+    (d / "kento-pve-args").write_text("tags: kento-test\nonboot: 1\n")
+
+    info("mybox", container_dir=d, mode="pve-vm", verbose=True)
+
+    output = capsys.readouterr().out
+    assert "Pass-through flags:" in output
+    assert "  --qemu-arg:" in output
+    assert "    -device virtio-rng-pci" in output
+    assert "    -device virtio-balloon" in output
+    assert "  --pve-arg:" in output
+    assert "    tags: kento-test" in output
+    assert "    onboot: 1" in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_verbose_passthrough_only_qemu(mock_running, tmp_path, capsys):
+    """--verbose with only kento-qemu-args: only --qemu-arg subheader."""
+    d = _make_container(tmp_path)
+    (d / "kento-qemu-args").write_text("-device virtio-rng-pci\n")
+
+    info("mybox", container_dir=d, mode="vm", verbose=True)
+
+    output = capsys.readouterr().out
+    assert "Pass-through flags:" in output
+    assert "  --qemu-arg:" in output
+    assert "    -device virtio-rng-pci" in output
+    assert "  --pve-arg:" not in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_verbose_passthrough_only_pve(mock_running, tmp_path, capsys):
+    """--verbose with only kento-pve-args: only --pve-arg subheader."""
+    d = _make_container(tmp_path)
+    (d / "kento-pve-args").write_text("tags: kento-test\n")
+
+    info("mybox", container_dir=d, mode="pve-lxc", verbose=True)
+
+    output = capsys.readouterr().out
+    assert "Pass-through flags:" in output
+    assert "  --pve-arg:" in output
+    assert "    tags: kento-test" in output
+    assert "  --qemu-arg:" not in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_verbose_passthrough_neither(mock_running, tmp_path, capsys):
+    """--verbose with neither file: section entirely absent."""
+    d = _make_container(tmp_path)
+
+    info("mybox", container_dir=d, mode="lxc", verbose=True)
+
+    output = capsys.readouterr().out
+    assert "Pass-through flags:" not in output
+    assert "--qemu-arg:" not in output
+    assert "--pve-arg:" not in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_default_hides_passthrough_section(mock_running, tmp_path, capsys):
+    """Default (non-verbose) human output never shows Pass-through flags,
+    even when both state files are present."""
+    d = _make_container(tmp_path)
+    (d / "kento-qemu-args").write_text("-device virtio-rng-pci\n")
+    (d / "kento-pve-args").write_text("tags: kento-test\n")
+
+    info("mybox", container_dir=d, mode="pve-vm")
+
+    output = capsys.readouterr().out
+    assert "Pass-through flags:" not in output
+    assert "--qemu-arg:" not in output
+    assert "--pve-arg:" not in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_json_passthrough_both_files(mock_running, tmp_path, capsys):
+    """JSON output surfaces qemu_args / pve_args when both files present."""
+    d = _make_container(tmp_path)
+    (d / "kento-qemu-args").write_text(
+        "-device virtio-rng-pci\n-device virtio-balloon\n")
+    (d / "kento-pve-args").write_text("tags: kento-test\nonboot: 1\n")
+
+    info("mybox", container_dir=d, mode="pve-vm", as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["qemu_args"] == [
+        "-device virtio-rng-pci",
+        "-device virtio-balloon",
+    ]
+    assert data["pve_args"] == ["tags: kento-test", "onboot: 1"]
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_json_passthrough_empty_when_absent(mock_running, tmp_path, capsys):
+    """JSON output includes qemu_args / pve_args as empty lists when files
+    are absent. Machine consumers get a stable schema."""
+    d = _make_container(tmp_path)
+
+    info("mybox", container_dir=d, mode="lxc", as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["qemu_args"] == []
+    assert data["pve_args"] == []
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_json_verbose_passthrough_same_as_default(mock_running, tmp_path, capsys):
+    """--verbose JSON includes the same qemu_args / pve_args keys as
+    default JSON (not an --verbose-only surface)."""
+    d = _make_container(tmp_path)
+    (d / "kento-qemu-args").write_text("-device virtio-rng-pci\n")
+    (d / "kento-pve-args").write_text("tags: kento-test\n")
+
+    info("mybox", container_dir=d, mode="pve-vm", as_json=True, verbose=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["qemu_args"] == ["-device virtio-rng-pci"]
+    assert data["pve_args"] == ["tags: kento-test"]
+
+
+# --- _read_passthrough_args unit test ---
+
+
+def test_read_passthrough_args_missing(tmp_path):
+    from kento.info import _read_passthrough_args
+    assert _read_passthrough_args(tmp_path, "kento-qemu-args") == []
+
+
+def test_read_passthrough_args_skips_empty_lines(tmp_path):
+    from kento.info import _read_passthrough_args
+    (tmp_path / "kento-qemu-args").write_text(
+        "-device virtio-rng-pci\n\n-device virtio-balloon\n\n")
+    assert _read_passthrough_args(tmp_path, "kento-qemu-args") == [
+        "-device virtio-rng-pci",
+        "-device virtio-balloon",
+    ]

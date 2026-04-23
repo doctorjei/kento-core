@@ -25,6 +25,18 @@ def _get_size(path: Path) -> str:
     return result.stdout.split()[0] if result.returncode == 0 else "?"
 
 
+def _read_passthrough_args(container_dir: Path, filename: str) -> list[str]:
+    """Read a pass-through args file (kento-qemu-args or kento-pve-args).
+
+    Returns a list of non-empty lines. Absent file returns []. Written at
+    create time (v1.2.0 Phase B1); surfaced here for info output.
+    """
+    f = container_dir / filename
+    if not f.is_file():
+        return []
+    return [line for line in f.read_text().splitlines() if line]
+
+
 def _get_ssh_host_key_fingerprints(
     container_dir: Path,
 ) -> tuple[dict[str, str], bool]:
@@ -145,6 +157,12 @@ def info(name: str, *, container_dir: Path, mode: str,
     # Track whether keys exist but ssh-keygen was missing (for human output)
     _ssh_keygen_missing = has_host_keys and not fingerprints
 
+    # Pass-through flags (v1.2.0 Phase B4). Always emitted in JSON (empty
+    # list when absent) so machine consumers get a stable schema. Human
+    # output surfaces them only under --verbose and only when non-empty.
+    data["qemu_args"] = _read_passthrough_args(container_dir, "kento-qemu-args")
+    data["pve_args"] = _read_passthrough_args(container_dir, "kento-pve-args")
+
     # Verbose additions
     if verbose:
         upper = state_dir / "upper"
@@ -222,3 +240,16 @@ def _print_human(data: dict, verbose: bool, *,
             for i, lp in enumerate(data["layers"]):
                 size = data.get("layer_sizes", [])[i] if i < len(data.get("layer_sizes", [])) else "?"
                 print(f"  [{i}] {lp} ({size})")
+
+        qemu_args = data.get("qemu_args", [])
+        pve_args = data.get("pve_args", [])
+        if qemu_args or pve_args:
+            print("Pass-through flags:")
+            if qemu_args:
+                print("  --qemu-arg:")
+                for line in qemu_args:
+                    print(f"    {line}")
+            if pve_args:
+                print("  --pve-arg:")
+                for line in pve_args:
+                    print(f"    {line}")
