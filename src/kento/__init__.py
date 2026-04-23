@@ -243,6 +243,7 @@ def resolve_container(name: str, scan_dir: Path | None = None) -> Path:
     When scan_dir is None, searches both LXC_BASE and VM_BASE.
     Returns the container directory path, or exits with error if not found.
     """
+    validate_name(name)
     bases = [scan_dir] if scan_dir else [LXC_BASE, VM_BASE]
 
     for base in bases:
@@ -293,6 +294,7 @@ def resolve_in_namespace(name: str, namespace: str) -> Path:
     Searches only LXC_BASE (for 'lxc'/'container') or VM_BASE (for 'vm').
     Exits with error if not found.
     """
+    validate_name(name)
     base = LXC_BASE if namespace in ("container", "lxc") else VM_BASE
     result = _scan_namespace(name, base)
     if result is not None:
@@ -307,6 +309,7 @@ def resolve_any(name: str) -> tuple[Path, str]:
     Returns (container_dir, mode) where mode is read from the kento-mode file.
     Exits with error if ambiguous (found in both) or not found.
     """
+    validate_name(name)
     lxc_hit = _scan_namespace(name, LXC_BASE)
     vm_hit = _scan_namespace(name, VM_BASE)
 
@@ -334,6 +337,7 @@ def check_name_conflict(name: str, target_namespace: str) -> bool:
     Returns True if a conflict exists, False otherwise.
     Does not error — the caller decides what to do.
     """
+    validate_name(name)
     if target_namespace in ("container", "lxc"):
         other_base = VM_BASE
     else:

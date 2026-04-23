@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from kento import (LXC_BASE, VM_BASE, _scan_namespace, next_instance_name,
-                   require_root, sanitize_image_name, upper_base)
+                   require_root, sanitize_image_name, upper_base, validate_name)
 from kento.cloudinit import detect_cloudinit, write_seed
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
@@ -334,6 +334,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         base_name = sanitize_image_name(image)
         other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
         name = next_instance_name(base_name, base_dir, other_dir=other_dir)
+        # Defend against pathological image refs that sanitize into something
+        # unsafe (e.g. leading-dot or embedded slash after transformation).
+        # The CLI validates explicit --name; this covers the auto-generated
+        # path so downstream hook templates / path joins never see a bad name.
+        validate_name(name, what="auto-generated name")
     else:
         # Scan both namespaces: for PVE-LXC/PVE-VM, container_id is the VMID
         # while `name` lives in kento-name, so a bare (base_dir / name).exists()

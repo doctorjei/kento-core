@@ -187,3 +187,103 @@ class TestValidateNameWhatParameter:
             validate_name("-bad")
         err = capsys.readouterr().err
         assert "instance name" in err
+
+
+class TestCLIIntegration:
+    """CLI entry points must reject bad names before any real work runs."""
+
+    def test_create_rejects_shell_metacharacter_name(self, capsys):
+        from kento import cli
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["lxc", "create", "debian:13", "--name", "bad;name"])
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
+
+    def test_create_rejects_path_traversal_name(self, capsys):
+        from kento import cli
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["lxc", "create", "debian:13", "--name", "../evil"])
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
+
+    def test_start_rejects_slash_in_name(self, capsys):
+        from kento import cli
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["start", "a/b"])
+        # _dispatch_multi catches the inner SystemExit and re-exits 1.
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
+
+    def test_info_rejects_double_quote_in_name(self, capsys):
+        from kento import cli
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(["info", 'x"y'])
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
+
+    def test_valid_name_does_not_raise_validate_error(self, capsys, monkeypatch):
+        """A valid name passes validate_name; later errors are fine, but the
+        first error seen must NOT mention 'invalid instance name'."""
+        from kento import cli
+
+        # Suppress require_root so the path gets to the resolver, which will
+        # error out on 'not found' — that's the error we expect, not a
+        # validate_name rejection.
+        monkeypatch.setattr("os.getuid", lambda: 0)
+
+        # resolve_any will fail with "no instance named" / "Error: instance
+        # not found". Both live in kento.__init__ and raise SystemExit.
+        with pytest.raises(SystemExit):
+            cli.main(["info", "valid-name-01"])
+        err = capsys.readouterr().err
+        assert "invalid instance name" not in err
+
+
+class TestResolverValidateName:
+    """Resolver entry points must validate names at the top."""
+
+    def test_resolve_container_rejects_shell_metacharacter(self, capsys):
+        from kento import resolve_container
+        with pytest.raises(SystemExit) as excinfo:
+            resolve_container("bad;name")
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
+
+    def test_resolve_in_namespace_rejects_path_traversal(self, capsys):
+        from kento import resolve_in_namespace
+        with pytest.raises(SystemExit) as excinfo:
+            resolve_in_namespace("../etc", "lxc")
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
+
+    def test_resolve_any_rejects_nul_byte(self, capsys):
+        from kento import resolve_any
+        with pytest.raises(SystemExit) as excinfo:
+            resolve_any("\x00")
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        # NUL triggers the empty-string branch first (since the initial
+        # emptiness check fires on falsy input) or the explicit NUL branch.
+        assert "NUL byte" in err or "cannot be empty" in err
+
+    def test_resolve_any_rejects_embedded_nul(self, capsys):
+        from kento import resolve_any
+        with pytest.raises(SystemExit) as excinfo:
+            resolve_any("a\x00b")
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "NUL byte" in err
+
+    def test_check_name_conflict_rejects_slash(self, capsys):
+        from kento import check_name_conflict
+        with pytest.raises(SystemExit) as excinfo:
+            check_name_conflict("a/b", "lxc")
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "invalid instance name" in err
