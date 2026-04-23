@@ -28,8 +28,32 @@ setup_port_forwarding() {
     [ -f "$CONTAINER_DIR/kento-portfwd-active" ] && return 0
 
     PORT_SPEC=$(cat "$PORT_FILE" | tr -d '[:space:]')
+
+    # F19: validate PORT_SPEC before feeding into nft. kento's CLI
+    # validates --port at create time, but kento-port is a plain file on
+    # disk; a tampered/corrupted value here would otherwise flow straight
+    # into `nft add rule ... dport "$HOST_PORT"` as shell-expanded text.
+    # Require strictly HOST:GUEST where both are integers in [1, 65535].
+    _kento_port_valid=1
+    case "$PORT_SPEC" in
+        *[!0-9:]*)      _kento_port_valid=0 ;;
+        *:*:*)          _kento_port_valid=0 ;;
+        :*|*:)          _kento_port_valid=0 ;;
+        *:*)            : ;;
+        *)              _kento_port_valid=0 ;;
+    esac
+    if [ "$_kento_port_valid" -eq 0 ]; then
+        echo "kento-hook: invalid kento-port $PORT_SPEC (expected HOST:GUEST integers) -- skipping port forwarding" >&2
+        return 0
+    fi
     HOST_PORT="${PORT_SPEC%%:*}"
     GUEST_PORT="${PORT_SPEC##*:}"
+    for _kp in "$HOST_PORT" "$GUEST_PORT"; do
+        if ! [ "$_kp" -ge 1 ] 2>/dev/null || ! [ "$_kp" -le 65535 ] 2>/dev/null; then
+            echo "kento-hook: port $_kp out of range 1..65535 in kento-port -- skipping port forwarding" >&2
+            return 0
+        fi
+    done
 
     # Discover container IP: static (kento-net) fast path, or DHCP
     # discovery via lxc-info in a detached background worker.

@@ -230,6 +230,67 @@ def test_generate_hook_start_host_no_sync_lxc_info():
     assert fn_body.index("WORKER_EOF") < invocation_idx
 
 
+def test_generate_hook_validates_port_spec():
+    """F19: setup_port_forwarding must validate kento-port before nft use."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    # Static: rejection path lives inside the setup_port_forwarding() body,
+    # not below it (so it runs before any nft invocation).
+    fn_start = script.index("setup_port_forwarding()")
+    fn_body = script[fn_start:script.index("\n}\n", fn_start) + 2]
+    assert "invalid kento-port" in fn_body
+    # The actual nft invocation happens after the validation (by line order).
+    # Use "nft add rule ip kento prerouting" — appears only as real commands,
+    # not in the explanatory comment.
+    assert fn_body.index("invalid kento-port") < fn_body.index(
+        "nft add rule ip kento prerouting tcp"
+    )
+
+
+def test_generate_hook_rejects_malformed_port_at_runtime(tmp_path):
+    """F19: actually exec the generated validator and watch it bail out.
+
+    Uses the isolated setup_port_forwarding function: we write various
+    malformed kento-port files and check that the script prints an error
+    and returns without calling nft. Avoids depending on a live LXC."""
+    import subprocess as sp
+    script = generate_hook(tmp_path, "/a:/b", "testname")
+
+    # Strip the rest of the script after setup_port_forwarding() so we
+    # only define the function; we'll call it from our own harness below.
+    fn_start = script.index("setup_port_forwarding()")
+    fn_end = script.index("\n}\n", fn_start) + 2
+    fn_def = script[fn_start:fn_end]
+
+    # Minimal prologue — match the globals the function references.
+    prologue = (
+        "#!/bin/sh\n"
+        f'NAME="testname"\n'
+        f'CONTAINER_DIR="{tmp_path}"\n'
+        # Stub nft so any accidental invocation is visible.
+        'nft() { echo "NFT CALLED: $*" >&2; return 0; }\n'
+    )
+
+    def _run(port_contents: str) -> sp.CompletedProcess:
+        (tmp_path / "kento-port").write_text(port_contents)
+        (tmp_path / "kento-portfwd-active").unlink(missing_ok=True)
+        harness = prologue + fn_def + '\nsetup_port_forwarding "testname"\n'
+        return sp.run(["sh", "-c", harness], capture_output=True, text=True)
+
+    for bad in [
+        "99999:22",                      # host port out of range
+        "22:99999",                      # guest port out of range
+        "abc:22",                        # non-digits
+        "22:22:22",                      # too many colons
+        ":22",                           # empty host
+        "22:",                           # empty guest
+        "22",                            # no colon
+        "; touch /tmp/pwned; #:22",      # injection attempt
+    ]:
+        r = _run(bad)
+        assert "kento-hook:" in r.stderr, f"bad={bad!r}: stderr={r.stderr!r}"
+        assert "NFT CALLED" not in r.stderr, f"nft invoked for {bad!r}"
+
+
 def test_generate_hook_portfwd_idempotency_guard():
     """setup_port_forwarding must short-circuit via kento-portfwd-active so
     repeated invocations across hook points don't double-install rules."""
