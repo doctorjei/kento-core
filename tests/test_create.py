@@ -1722,3 +1722,61 @@ class TestUnconfinedGate:
         err = capsys.readouterr().err
         assert "--unconfined is only for plain LXC" in err
         assert "apparmor.profile=generated" in err
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_host_autopromote_skips_gate(self, mock_root, mock_layers,
+                                               mock_run, tmp_path, capsys):
+        """On a PVE host, `kento lxc create foo` (no flags) must auto-promote
+        to pve mode rather than fail the --unconfined gate. Regression for F1
+        (edge-case audit 2026-04-23): the gate used to run BEFORE auto-promote
+        resolution, so plain-lxc mode + no --unconfined aborted even when
+        auto-detection would have flipped the mode to pve.
+        """
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            # No --unconfined, no --pve — auto-promotion should fire.
+            create("myimage:latest", name="test", mode="lxc")
+
+        # Gate should NOT have fired.
+        err = capsys.readouterr().err
+        assert "requires '--unconfined'" not in err
+
+        # Instance was auto-promoted to pve mode.
+        lxc_dir = tmp_path / "100"
+        assert (lxc_dir / "kento-mode").read_text().strip() == "pve"
+
+    @patch("kento.create.require_root")
+    def test_non_pve_host_still_gates(self, mock_root, tmp_path, capsys):
+        """On a non-PVE host, `kento lxc create foo` (no flags, no --unconfined)
+        still errors with the full guidance message. Complement to the F1
+        regression — moving the gate below auto-promotion must not weaken it
+        on plain-LXC hosts.
+        """
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.pve.is_pve", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test", mode="lxc")
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--unconfined" in err
+        assert "systemd 256+" in err
+        assert "Alternatives" in err
+        assert "--pve" in err
+        assert "kento vm create" in err
+        assert "acknowledge tradeoff" in err
+        # Nothing on disk.
+        assert not (tmp_path / "test").exists()

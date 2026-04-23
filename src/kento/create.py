@@ -197,26 +197,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            unconfined: bool = False) -> None:
     require_root()
 
-    # Plain-LXC on modern OCI images (systemd 256+) is broken by the default
-    # AppArmor profile: journald/tmpfiles/networkd all fail with status=243/
-    # CREDENTIALS. The only plain-LXC fix today is full `unconfined` — gate it
-    # behind an explicit flag so users acknowledge the tradeoff. See docs/
-    # troubleshooting.md for the full story.
-    if mode == "lxc" and not unconfined:
-        print("Error: plain LXC mode requires '--unconfined' due to the "
-              "systemd 256+ credentials bug.", file=sys.stderr)
-        print("  This runs the container without AppArmor confinement — do not "
-              "use for untrusted workloads.", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Alternatives:", file=sys.stderr)
-        print("  - kento lxc create --pve ...          # PVE-LXC mode, AppArmor-confined at host boundary",
-              file=sys.stderr)
-        print("  - kento vm create ...                 # VM mode, stronger isolation via QEMU",
-              file=sys.stderr)
-        print("  - kento lxc create --unconfined ...   # acknowledge tradeoff and proceed",
-              file=sys.stderr)
-        sys.exit(1)
-
     # Validate and read SSH key files early (before any filesystem changes)
     ssh_key_contents: str | None = None
     if ssh_keys:
@@ -272,6 +252,28 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     if unconfined and mode == "pve":
         print("Error: --unconfined is only for plain LXC; PVE-LXC uses "
               "apparmor.profile=generated which doesn't have this issue.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Plain-LXC on modern OCI images (systemd 256+) is broken by the default
+    # AppArmor profile: journald/tmpfiles/networkd all fail with status=243/
+    # CREDENTIALS. The only plain-LXC fix today is full `unconfined` — gate it
+    # behind an explicit flag so users acknowledge the tradeoff. See docs/
+    # troubleshooting.md for the full story. Runs AFTER PVE auto-promotion so
+    # that on PVE hosts the mode becomes "pve" before this check and the gate
+    # stays silent — PVE-LXC doesn't hit the systemd credentials bug.
+    if mode == "lxc" and not unconfined:
+        print("Error: plain LXC mode requires '--unconfined' due to the "
+              "systemd 256+ credentials bug.", file=sys.stderr)
+        print("  This runs the container without AppArmor confinement — do not "
+              "use for untrusted workloads.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Alternatives:", file=sys.stderr)
+        print("  - kento lxc create --pve ...          # PVE-LXC mode, AppArmor-confined at host boundary",
+              file=sys.stderr)
+        print("  - kento vm create ...                 # VM mode, stronger isolation via QEMU",
+              file=sys.stderr)
+        print("  - kento lxc create --unconfined ...   # acknowledge tradeoff and proceed",
               file=sys.stderr)
         sys.exit(1)
 
