@@ -1747,16 +1747,40 @@ class TestCloudInitMode:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_cloudinit_forced_warns_no_cloud_init(self, mock_root, mock_layers,
-                                                    mock_run, tmp_path, capsys):
-        """Forcing cloudinit mode without cloud-init in image prints a warning."""
+    def test_cloudinit_forced_without_cloud_init_errors(self, mock_root, mock_layers,
+                                                         mock_run, tmp_path, capsys):
+        """F14: forcing cloudinit mode without cloud-init in image is a hard error."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", unconfined=True, config_mode="cloudinit")
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test", mode="lxc",
+                       unconfined=True, config_mode="cloudinit")
+            assert exc.value.code == 1
 
         captured = capsys.readouterr()
-        assert "cloud-init not detected" in captured.err
-        # Still creates the seed dir
+        assert "requires cloud-init" in captured.err
+        assert "--config-mode injection" in captured.err
+        # Half-created container is cleaned up — no orphaned dir left behind.
+        assert not (tmp_path / "test").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers")
+    @patch("kento.create.require_root")
+    def test_cloudinit_forced_with_cloud_init_succeeds(self, mock_root, mock_layers,
+                                                        mock_run, tmp_path):
+        """F14 counter-test: explicit cloudinit + cloud-init in image is fine."""
+        layer = tmp_path / "layer"
+        (layer / "usr" / "bin").mkdir(parents=True)
+        (layer / "usr" / "bin" / "cloud-init").write_text("")
+        mock_layers.return_value = str(layer)
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc",
+                   unconfined=True, config_mode="cloudinit")
+
+        mode_file = tmp_path / "test" / "kento-config-mode"
+        assert mode_file.read_text().strip() == "cloudinit"
         assert (tmp_path / "test" / "cloud-seed").is_dir()
 
 

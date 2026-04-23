@@ -483,6 +483,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         shutil.rmtree(container_dir, ignore_errors=True)
         sys.exit(1)
 
+    # F14: explicit --config-mode cloudinit without cloud-init in the image
+    # is a user error — the seed we'd write would never be consumed and the
+    # guest would boot unconfigured. Reject up front rather than warning and
+    # silently producing a broken instance. ``auto`` falls back to injection.
+    if config_mode == "cloudinit" and not detect_cloudinit(layers):
+        print(f"Error: --config-mode cloudinit requires cloud-init in the "
+              f"image, but none was detected in {image}.", file=sys.stderr)
+        print("  Drop --config-mode to auto-detect, or use "
+              "--config-mode injection.", file=sys.stderr)
+        shutil.rmtree(container_dir, ignore_errors=True)
+        sys.exit(1)
+
     # Accumulator of rollback actions for every side-effecting step past
     # this point. On exception, each undo runs in LIFO order — see F4 in
     # the edge-case audit for the original motivation. container-dir goes
@@ -570,7 +582,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         elif ssh_host_key_dir is not None:
             _copy_ssh_host_keys(Path(ssh_host_key_dir), container_dir / "ssh-host-keys")
 
-        # Determine config mode (injection vs cloud-init)
+        # Determine config mode (injection vs cloud-init). The
+        # --config-mode=cloudinit without detected cloud-init case is
+        # rejected earlier (F14); here we only choose between valid modes.
         if config_mode == "auto":
             if detect_cloudinit(layers):
                 effective_config_mode = "cloudinit"
@@ -578,9 +592,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 effective_config_mode = "injection"
         else:
             effective_config_mode = config_mode
-            if config_mode == "cloudinit" and not detect_cloudinit(layers):
-                print("Warning: --config-mode cloudinit specified but cloud-init not detected in image",
-                      file=sys.stderr)
 
         # Write config mode metadata
         (container_dir / "kento-config-mode").write_text(effective_config_mode + "\n")
