@@ -201,7 +201,7 @@ if [ -f "$CONTAINER_DIR/kento-authorized-keys" ]; then
     else
         SSH_PASSWD_LINE=$(grep "^${SSH_USER}:" "$ROOTFS/etc/passwd" || true)
         if [ -z "$SSH_PASSWD_LINE" ]; then
-            echo "Warning: SSH key user '$SSH_USER' not found in rootfs /etc/passwd, skipping key injection" >&2
+            echo "kento-inject: warning: SSH key user '$SSH_USER' not found in rootfs /etc/passwd, skipping key injection" >&2
             SSH_HOME=""
         else
             SSH_HOME=$(echo "$SSH_PASSWD_LINE" | cut -d: -f6)

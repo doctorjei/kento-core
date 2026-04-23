@@ -144,8 +144,8 @@ case "$HOOK_TYPE" in
         IFS=:
         for dir in $LAYERS; do
             if [ ! -d "$dir" ]; then
-                echo "Error: layer path missing: $dir" >&2
-                echo "Image may have changed. Run: kento scrub $NAME" >&2
+                echo "kento-hook: error: layer path missing: $dir" >&2
+                echo "kento-hook: image may have changed. Run: kento scrub $NAME" >&2
                 exit 1
             fi
         done

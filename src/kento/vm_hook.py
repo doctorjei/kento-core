@@ -35,8 +35,8 @@ case "$PHASE" in
             ARGS_MEM=$(sed -n 's/.*size=\\([0-9]*\\)M.*/\\1/p' "$QM_CONF")
             if [ -n "$CONF_MEM" ] && [ -n "$ARGS_MEM" ]; then
                 if [ "$CONF_MEM" != "$ARGS_MEM" ]; then
-                    echo "Error: memory mismatch — memory: ${{CONF_MEM}}M but memfd size=${{ARGS_MEM}}M in args." >&2
-                    echo "Run: kento vm scrub $NAME to regenerate config with matching values." >&2
+                    echo "kento-hook: error: memory mismatch — memory: ${{CONF_MEM}}M but memfd size=${{ARGS_MEM}}M in args." >&2
+                    echo "kento-hook: run: kento vm scrub $NAME to regenerate config with matching values." >&2
                     exit 1
                 fi
             fi
@@ -46,8 +46,8 @@ case "$PHASE" in
         IFS=:
         for dir in $LAYERS; do
             if [ ! -d "$dir" ]; then
-                echo "Error: layer path missing: $dir" >&2
-                echo "Image may have changed. Run: kento vm scrub $NAME" >&2
+                echo "kento-hook: error: layer path missing: $dir" >&2
+                echo "kento-hook: image may have changed. Run: kento vm scrub $NAME" >&2
                 exit 1
             fi
         done
@@ -64,12 +64,12 @@ case "$PHASE" in
         # 4. Validate kernel and initramfs
         if [ ! -f "$ROOTFS/boot/vmlinuz" ]; then
             umount "$ROOTFS" 2>/dev/null || true
-            echo "Error: kernel not found at $ROOTFS/boot/vmlinuz" >&2
+            echo "kento-hook: error: kernel not found at $ROOTFS/boot/vmlinuz" >&2
             exit 1
         fi
         if [ ! -f "$ROOTFS/boot/initramfs.img" ]; then
             umount "$ROOTFS" 2>/dev/null || true
-            echo "Error: initramfs not found at $ROOTFS/boot/initramfs.img" >&2
+            echo "kento-hook: error: initramfs not found at $ROOTFS/boot/initramfs.img" >&2
             exit 1
         fi
 
@@ -90,7 +90,7 @@ case "$PHASE" in
         done
         if [ -z "$VIRTIOFSD" ]; then
             umount "$ROOTFS" 2>/dev/null || true
-            echo "Error: virtiofsd not found" >&2
+            echo "kento-hook: error: virtiofsd not found" >&2
             exit 1
         fi
 
@@ -110,7 +110,7 @@ case "$PHASE" in
         if [ ! -e "$SOCKET" ]; then
             kill "$VFS_PID" 2>/dev/null || true
             umount "$ROOTFS" 2>/dev/null || true
-            echo "Error: virtiofsd socket did not appear at $SOCKET" >&2
+            echo "kento-hook: error: virtiofsd socket did not appear at $SOCKET" >&2
             exit 1
         fi
         ;;
