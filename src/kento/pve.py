@@ -224,6 +224,15 @@ def generate_qm_args(container_dir: Path, *,
     The memfd ``size=`` is derived from ``memory`` and must be kept in
     sync with PVE's top-level ``memory:`` field, otherwise the pre-start
     hookscript validator aborts the VM start.
+
+    Pass-through flags (v1.2.0 Phase B): if ``container_dir/kento-qemu-args``
+    exists, each non-empty line is appended space-separated to the args
+    payload — kento's own flags first, then pass-through. QEMU honours the
+    last occurrence of a flag, so ``--qemu-arg '-m 2048'`` overrides the
+    kento-managed defaults. Since ``args:`` is tokenized by qm with simple
+    whitespace splitting (NOT shlex), a pass-through line that itself
+    contains whitespace is a foot-gun: the user must split it across
+    multiple --qemu-arg flags. Enforced with sys.exit at consumption time.
     """
     rootfs = container_dir / "rootfs"
     socket_path = container_dir / "virtiofsd.sock"
@@ -241,6 +250,23 @@ def generate_qm_args(container_dir: Path, *,
         f"-object memory-backend-memfd,id=mem,size={memory}M,share=on",
         "-numa node,memdev=mem",
     ]
+
+    passthrough_file = container_dir / "kento-qemu-args"
+    if passthrough_file.is_file():
+        for line in passthrough_file.read_text().splitlines():
+            if not line:
+                continue
+            # qm's args: is whitespace-tokenized with no quoting support,
+            # so any whitespace in a single pass-through entry would split
+            # into two QEMU flags at boot. Reject explicitly rather than
+            # silently mangling the user's intent.
+            if any(c.isspace() for c in line):
+                print(f"Error: kento-qemu-args line contains whitespace which "
+                      f"qm does not tokenize safely: {line!r}. Split into "
+                      f"separate --qemu-arg flags instead.", file=sys.stderr)
+                sys.exit(1)
+            args_parts.append(line)
+
     return " ".join(args_parts)
 
 

@@ -881,3 +881,115 @@ class TestIsMountpoint:
         from kento.vm import _is_mountpoint
         mock_run.return_value = subprocess.CompletedProcess([], 1)
         assert _is_mountpoint(Path("/some/path")) is False
+
+
+class TestStartVmQemuArgsPassthrough:
+    """B2: start_vm appends kento-qemu-args lines to the QEMU argv."""
+
+    def _setup(self, tmp_path):
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+        return lxc_dir
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_no_passthrough_file_argv_unchanged(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """Baseline: no kento-qemu-args file -> argv does not grow past kento's own flags."""
+        lxc_dir = self._setup(tmp_path)
+        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        # Last kento-managed element is the -append value.
+        assert qemu_args[-2] == "-append"
+        assert qemu_args[-1] == "console=ttyS0 rootfstype=virtiofs root=rootfs"
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_single_line_appended(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "kento-qemu-args").write_text("-device=virtio-rng-pci\n")
+        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        # Appended at the end (after kento's -append ...).
+        assert qemu_args[-1] == "-device=virtio-rng-pci"
+        # Exactly one added element.
+        assert qemu_args.count("-device=virtio-rng-pci") == 1
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_multi_line_appended_in_order(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "kento-qemu-args").write_text(
+            "-device\nvirtio-rng-pci\n-m\n2048\n"
+        )
+        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        # All four entries appear in order at the tail.
+        assert qemu_args[-4:] == ["-device", "virtio-rng-pci", "-m", "2048"]
+        # The kento-emitted -m 512 still precedes the pass-through -m 2048;
+        # QEMU's last-occurrence semantics lets the user override.
+        first_m = qemu_args.index("-m")
+        last_m = len(qemu_args) - 1 - qemu_args[::-1].index("-m")
+        assert first_m < last_m
+        assert qemu_args[first_m + 1] == "512"
+        assert qemu_args[last_m + 1] == "2048"
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_empty_lines_ignored(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """Blank lines in kento-qemu-args should not become empty argv elements."""
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "kento-qemu-args").write_text("\n-device=virtio-rng-pci\n\n")
+        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        assert "" not in qemu_args
+        assert qemu_args[-1] == "-device=virtio-rng-pci"

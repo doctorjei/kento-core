@@ -76,6 +76,29 @@ def test_reset_with_separate_state_dir(mock_root, mock_layers, mock_run,
     assert str(state) in hook
 
 
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_preserves_kento_qemu_args(mock_root, mock_layers, mock_run,
+                                          tmp_path):
+    """B2: scrub must leave kento-qemu-args intact so pass-through survives."""
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+    original = "-device=virtio-rng-pci\n-cpu=max\n"
+    (lxc_dir / "kento-qemu-args").write_text(original)
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    assert (lxc_dir / "kento-qemu-args").read_text() == original
+
+
 @patch("kento.reset.subprocess.run", side_effect=_mock_run_running)
 @patch("kento.reset.require_root")
 def test_reset_refuses_running(mock_root, mock_run, tmp_path):

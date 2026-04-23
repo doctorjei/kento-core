@@ -253,6 +253,20 @@ def start_vm(container_dir: Path, name: str) -> None:
     qemu_cmd += [
          "-append", "console=ttyS0 rootfstype=virtiofs root=rootfs",
     ]
+
+    # Pass-through flags (v1.2.0 Phase B). kento-qemu-args is written at
+    # create time by --qemu-arg; each non-empty line becomes one argv
+    # element. Appended AFTER kento's own argv so QEMU's last-occurrence
+    # semantics lets users override kento defaults (e.g. --qemu-arg '-m 2048'
+    # overrides the -m <memory> emitted above). One line = one argv element —
+    # no shell splitting. For a flag with a separate value, users pass two
+    # --qemu-arg flags (or use the -flag=value form). Tolerate missing file.
+    passthrough_file = container_dir / "kento-qemu-args"
+    if passthrough_file.is_file():
+        for line in passthrough_file.read_text().splitlines():
+            if line:
+                qemu_cmd.append(line)
+
     qemu = subprocess.Popen(
         qemu_cmd,
         stdout=subprocess.DEVNULL,

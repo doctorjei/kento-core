@@ -606,6 +606,49 @@ class TestGenerateQmArgs:
         )
         assert f"args: {expected}" in cfg
 
+    def test_no_passthrough_file(self, tmp_path):
+        """B2: absence of kento-qemu-args leaves args payload unchanged."""
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        # Kento's own last element is the -numa clause.
+        assert args.endswith("-numa node,memdev=mem")
+
+    def test_passthrough_single_entry_appended(self, tmp_path):
+        """B2: a single-entry kento-qemu-args line is appended space-separated
+        after kento's own args."""
+        (tmp_path / "kento-qemu-args").write_text("-device=virtio-rng-pci\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert args.endswith(" -device=virtio-rng-pci")
+        # Precedes by kento's final -numa element.
+        assert "-numa node,memdev=mem -device=virtio-rng-pci" in args
+
+    def test_passthrough_multi_entry_ordered(self, tmp_path):
+        """B2: multi-line kento-qemu-args preserves order after kento's own."""
+        (tmp_path / "kento-qemu-args").write_text(
+            "-device=virtio-rng-pci\n-cpu=max\n"
+        )
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        # Both pass-through entries appear at the tail in order.
+        assert args.endswith(" -device=virtio-rng-pci -cpu=max")
+
+    def test_passthrough_whitespace_errors(self, tmp_path, capsys):
+        """B2: qm args: is whitespace-tokenized, so a line that itself
+        contains whitespace would mis-split at boot. Reject explicitly."""
+        (tmp_path / "kento-qemu-args").write_text("-device virtio-rng-pci\n")
+        with pytest.raises(SystemExit) as exc:
+            generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "kento-qemu-args line contains whitespace" in captured.err
+        assert "--qemu-arg" in captured.err
+
+    def test_passthrough_blank_lines_ignored(self, tmp_path):
+        """Blank lines must not turn into empty tokens in the args: payload."""
+        (tmp_path / "kento-qemu-args").write_text("\n-device=virtio-rng-pci\n\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert args.endswith(" -device=virtio-rng-pci")
+        # No double-space from an empty token.
+        assert "  " not in args
+
 
 class TestParseQmConfField:
     def test_reads_memory(self):
