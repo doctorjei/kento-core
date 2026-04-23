@@ -32,7 +32,7 @@ remove the existing instance:
 sudo kento rm <name>
 ```
 
-### "Error: instance not found: \<name\>"
+### "Error: no instance named '\<name\>'"
 
 No kento-managed instance matches that name. Check available
 instances:
@@ -40,6 +40,9 @@ instances:
 ```
 sudo kento list
 ```
+
+Namespace-specific variants ("no lxc named ...", "no vm named ...")
+point at `kento lxc list` or `kento vm list` respectively.
 
 ### "Error: instance already exists: \<id\>"
 
@@ -58,18 +61,6 @@ Scrub requires the instance to be stopped. Stop it first:
 ```
 sudo kento shutdown <name>
 ```
-
-### "Error: failed to resolve layer paths for \<image\>"
-
-Podman returned empty or invalid layer paths. This can happen if the
-image store is corrupted. Try:
-
-```
-sudo podman image inspect <image>
-```
-
-If the image looks fine, try `sudo kento scrub <name>` to re-resolve
-layers.
 
 ### "Error: plain LXC mode requires '--unconfined' due to the systemd 256+ credentials bug"
 
@@ -144,7 +135,7 @@ cat /etc/pve/.vmlist
 The `--vmid` flag only works with PVE modes. Remove `--vmid` or add
 `--pve`.
 
-### "Error: virtiofsd not found"
+### "kento-hook: error: virtiofsd not found"
 
 VM mode requires virtiofsd. Install it:
 
@@ -156,7 +147,7 @@ sudo dnf install virtiofsd        # Fedora
 On Debian, virtiofsd installs to `/usr/libexec/virtiofsd` which is not
 in `$PATH`. Kento searches this location automatically.
 
-### "Error: kernel not found" / "Error: initramfs not found"
+### "kento-hook: error: kernel not found" / "kento-hook: error: initramfs not found"
 
 The OCI image is missing boot files required for VM mode:
 
