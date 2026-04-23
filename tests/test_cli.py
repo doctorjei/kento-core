@@ -901,6 +901,44 @@ class TestMacFlag:
         assert mock_create.call_args[1]["mac"] == "52:54:00:11:22:33"
         assert mock_create.call_args[1]["start"] is True
 
+    def test_mac_multicast_rejected(self, capsys):
+        """F16: multicast MACs (first-octet LSB set) are rejected."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create", "--mac", "01:02:03:04:05:06", "debian:12"])
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "multicast" in err.lower()
+
+    def test_mac_broadcast_rejected(self, capsys):
+        """F16: broadcast MAC ff:ff:ff:ff:ff:ff is rejected."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create", "--mac", "ff:ff:ff:ff:ff:ff", "debian:12"])
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "multicast" in err.lower() or "broadcast" in err.lower()
+
+    def test_mac_multicast_uppercase_rejected(self, capsys):
+        """F16: multicast detection is case-insensitive."""
+        # 0x03 = 00000011 — LSB set, so multicast.
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create", "--mac", "03:AA:BB:CC:DD:EE", "debian:12"])
+        assert exc.value.code != 0
+
+    def test_mac_laa_accepted(self):
+        """F16 counter-test: locally-administered unicast (0x02 prefix) is fine."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "create", "--mac", "02:aa:bb:cc:dd:ee", "debian:12"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["mac"] == "02:aa:bb:cc:dd:ee"
+
+    def test_mac_06_prefix_accepted(self):
+        """F16 counter-test: 0x06 (LAA unicast) is fine."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "create", "--mac", "06:00:00:00:00:01", "debian:12"])
+        mock_create.assert_called_once()
+
 
 class TestPortNetworkValidation:
     """Tests for --port + --network CLI-level validation (Phase 3)."""
