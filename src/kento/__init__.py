@@ -2,6 +2,7 @@
 
 import os
 import pwd
+import re
 import sys
 from pathlib import Path
 
@@ -13,6 +14,36 @@ except Exception:
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_NAME_MAX_LEN = 63
+
+
+def validate_name(name: str, *, what: str = "instance name") -> None:
+    """Reject names that would enable injection or path traversal.
+
+    Accepts: ASCII alphanumerics plus `_`, `.`, `-`. Must start with
+    alphanumeric. Max 63 chars (matches Linux HOST_NAME_MAX constraint).
+    Rejects: empty, whitespace, shell metacharacters, `/`, `..`, NUL.
+
+    Calls sys.exit(1) with Error: ... on rejection. what is used in the
+    message for context (e.g. "instance name", "auto-generated name").
+    """
+    if not isinstance(name, str) or not name:
+        print(f"Error: {what} cannot be empty", file=sys.stderr)
+        sys.exit(1)
+    if len(name) > _NAME_MAX_LEN:
+        print(f"Error: {what} too long ({len(name)} chars, max {_NAME_MAX_LEN}): {name!r}",
+              file=sys.stderr)
+        sys.exit(1)
+    if "\x00" in name:
+        print(f"Error: {what} contains NUL byte: {name!r}", file=sys.stderr)
+        sys.exit(1)
+    if not _NAME_RE.match(name):
+        print(f"Error: invalid {what}: {name!r}. Names must start with a letter "
+              f"or digit and contain only [A-Za-z0-9_.-] (max {_NAME_MAX_LEN} chars).",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def _bridge_exists(name: str) -> bool:
