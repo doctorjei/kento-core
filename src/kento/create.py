@@ -1,5 +1,6 @@
 """Create an instance backed by an OCI image."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -125,6 +126,12 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
     # setuid binaries still load glibc RELRO correctly. PVE-LXC takes the same
     # approach via pct's config.
     #
+    # Escape hatch: KENTO_APPARMOR_PROFILE env var overrides the default. Set it
+    # to "unconfined" when running kento inside an outer LXC (nested scenario) —
+    # apparmor_parser calls needed to load `generated` are blocked in that case,
+    # and `unconfined` is safe because the outer profile still enforces the
+    # host/container boundary. Accepts only "generated" or "unconfined".
+    #
     # common.conf must be included BEFORE nesting.conf so apparmor.profile ends up
     # set AFTER both includes (otherwise nesting.conf would override it).
     if mode == "lxc":
@@ -134,7 +141,12 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         lines.append("lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
     if mode == "lxc":
-        lines.append("lxc.apparmor.profile = generated")
+        profile = os.environ.get("KENTO_APPARMOR_PROFILE", "generated")
+        if profile not in ("generated", "unconfined"):
+            print(f"Error: KENTO_APPARMOR_PROFILE must be 'generated' or "
+                  f"'unconfined', got {profile!r}", file=sys.stderr)
+            sys.exit(1)
+        lines.append(f"lxc.apparmor.profile = {profile}")
         lines.append("lxc.apparmor.allow_nesting = 1")
         lines.append("lxc.apparmor.allow_incomplete = 1")
     if env:

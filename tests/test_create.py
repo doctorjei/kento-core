@@ -84,6 +84,18 @@ class TestGenerateConfig:
         assert "lxc.apparmor.allow_nesting" not in cfg
         assert "lxc.apparmor.allow_incomplete" not in cfg
 
+    def test_kento_apparmor_profile_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KENTO_APPARMOR_PROFILE", "unconfined")
+        cfg = generate_config("test", tmp_path, mode="lxc")
+        assert "lxc.apparmor.profile = unconfined" in cfg
+        assert "lxc.apparmor.profile = generated" not in cfg
+
+    def test_kento_apparmor_profile_rejects_bogus_value(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("KENTO_APPARMOR_PROFILE", "bogus")
+        with pytest.raises(SystemExit):
+            generate_config("test", tmp_path, mode="lxc")
+        assert "must be 'generated' or 'unconfined'" in capsys.readouterr().err
+
 
 class TestCreate:
     @patch("kento.create.subprocess.run")
