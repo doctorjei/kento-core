@@ -194,7 +194,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            mac: str | None = None,
            config_mode: str = "auto",
            net_type: str | None = None,
-           unconfined: bool = False) -> None:
+           unconfined: bool = False,
+           force: bool = False) -> None:
     require_root()
 
     # Validate and read SSH key files early (before any filesystem changes)
@@ -303,13 +304,21 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         base_name = sanitize_image_name(image)
         other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
         name = next_instance_name(base_name, base_dir, other_dir=other_dir)
-    elif (_scan_namespace(name, LXC_BASE) is not None
-          or _scan_namespace(name, VM_BASE) is not None):
+    else:
         # Scan both namespaces: for PVE-LXC/PVE-VM, container_id is the VMID
         # while `name` lives in kento-name, so a bare (base_dir / name).exists()
-        # misses same-name duplicates across VMIDs.
-        print(f"Error: instance name already taken: {name}", file=sys.stderr)
-        sys.exit(1)
+        # misses same-name duplicates across VMIDs. When --force is set, only
+        # scan the current namespace — the user has opted in to duplicate names
+        # across namespaces (bare shortcuts like `kento start foo` then require
+        # explicit `kento lxc start foo` / `kento vm start foo`).
+        if force:
+            conflict = _scan_namespace(name, base_dir) is not None
+        else:
+            conflict = (_scan_namespace(name, LXC_BASE) is not None
+                        or _scan_namespace(name, VM_BASE) is not None)
+        if conflict:
+            print(f"Error: instance name already taken: {name}", file=sys.stderr)
+            sys.exit(1)
 
     # Validate mode-specific flags
     if vmid and mode not in ("pve", "pve-vm"):

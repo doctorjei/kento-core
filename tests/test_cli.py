@@ -1112,3 +1112,51 @@ class TestUnconfinedFlag:
         mock_create.assert_called_once()
         assert mock_create.call_args[1]["unconfined"] is True
         assert mock_create.call_args[1]["start"] is True
+
+
+class TestForceFlag:
+    """--force on create/run must reach create() as force=True so the
+    cross-namespace scan inside create.py can skip to current-namespace-only.
+    """
+
+    def test_lxc_create_force_passes_to_create(self):
+        """kento lxc create --force reaches create() with force=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--unconfined", "--force", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["force"] is True
+
+    def test_lxc_create_force_default_false(self):
+        """Without --force, create() is called with force=False."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "create", "--unconfined", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["force"] is False
+
+    def test_vm_create_force_passes_to_create(self):
+        """kento vm create --force reaches create() with force=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "create", "--force", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["force"] is True
+
+    def test_lxc_run_force_passes_to_create(self):
+        """kento lxc run --force reaches create() with force=True and start=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["lxc", "run", "--unconfined", "--force", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["force"] is True
+        assert mock_create.call_args[1]["start"] is True
+
+    def test_vm_run_force_passes_to_create(self):
+        """kento vm run --force reaches create() with force=True and start=True."""
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create):
+            main(["vm", "run", "--force", "debian:13"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args[1]["force"] is True
+        assert mock_create.call_args[1]["start"] is True

@@ -345,6 +345,110 @@ class TestCreate:
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="shared", mode="vm")
 
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_force_allows_cross_namespace_vm_then_lxc(self, mock_root,
+                                                     mock_layers, mock_run,
+                                                     tmp_path):
+        """force=True lets an LXC reuse a name that already exists as a VM."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="shared", mode="vm")
+            # Without force, this would raise (covered by the previous test
+            # in the reverse direction). With force, it must succeed.
+            create("myimage:latest", name="shared", mode="lxc",
+                   unconfined=True, force=True)
+
+        # Both directories should now exist side by side.
+        assert (lxc_base / "shared" / "kento-name").read_text().strip() == "shared"
+        assert (vm_base / "shared" / "kento-name").read_text().strip() == "shared"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_force_allows_cross_namespace_lxc_then_vm(self, mock_root,
+                                                     mock_layers, mock_run,
+                                                     tmp_path):
+        """force=True lets a VM reuse a name that already exists as an LXC."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="shared", mode="lxc", unconfined=True)
+            create("myimage:latest", name="shared", mode="vm", force=True)
+
+        assert (lxc_base / "shared" / "kento-name").read_text().strip() == "shared"
+        assert (vm_base / "shared" / "kento-name").read_text().strip() == "shared"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_force_does_not_allow_same_namespace_vm(self, mock_root,
+                                                    mock_layers, mock_run,
+                                                    tmp_path):
+        """force=True must still reject a duplicate in the SAME namespace."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="shared", mode="vm")
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="shared", mode="vm", force=True)
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_force_does_not_allow_same_namespace_lxc(self, mock_root,
+                                                    mock_layers, mock_run,
+                                                    tmp_path):
+        """force=True must still reject a duplicate LXC name."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="shared", mode="lxc", unconfined=True)
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="shared", mode="lxc",
+                       unconfined=True, force=True)
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_force_default_false_still_rejects_cross_namespace(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """Regression: force=False (the default) still rejects cross-namespace."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="shared", mode="vm")
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="shared", mode="lxc",
+                       unconfined=True)
+
 
 class TestStaticIp:
     @patch("kento.create.subprocess.run")
