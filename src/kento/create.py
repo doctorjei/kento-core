@@ -12,6 +12,7 @@ from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 from kento.hook import write_hook
 from kento.inject import write_inject
 from kento.layers import resolve_layers
+from kento.locking import kento_lock
 
 
 def _run_cleanup(undos: list[tuple[str, object]]) -> None:
@@ -329,33 +330,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # Determine base directory for this mode
     base_dir = VM_BASE if mode in ("vm", "pve-vm") else LXC_BASE
 
-    # Resolve container name
-    if name is None:
-        base_name = sanitize_image_name(image)
-        other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
-        name = next_instance_name(base_name, base_dir, other_dir=other_dir)
-        # Defend against pathological image refs that sanitize into something
-        # unsafe (e.g. leading-dot or embedded slash after transformation).
-        # The CLI validates explicit --name; this covers the auto-generated
-        # path so downstream hook templates / path joins never see a bad name.
-        validate_name(name, what="auto-generated name")
-    else:
-        # Scan both namespaces: for PVE-LXC/PVE-VM, container_id is the VMID
-        # while `name` lives in kento-name, so a bare (base_dir / name).exists()
-        # misses same-name duplicates across VMIDs. When --force is set, only
-        # scan the current namespace — the user has opted in to duplicate names
-        # across namespaces (bare shortcuts like `kento start foo` then require
-        # explicit `kento lxc start foo` / `kento vm start foo`).
-        if force:
-            conflict = _scan_namespace(name, base_dir) is not None
-        else:
-            conflict = (_scan_namespace(name, LXC_BASE) is not None
-                        or _scan_namespace(name, VM_BASE) is not None)
-        if conflict:
-            print(f"Error: instance name already taken: {name}", file=sys.stderr)
-            sys.exit(1)
-
-    # Validate mode-specific flags
+    # Validate mode-specific flags (pure validation — no state mutation, so
+    # no need to hold the lock around these).
     if vmid and mode not in ("pve", "pve-vm"):
         print(f"Error: --vmid cannot be used with {mode.upper()} mode", file=sys.stderr)
         sys.exit(1)
@@ -376,59 +352,104 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         if not nesting:
             print("Warning: --nesting is ignored in VM mode", file=sys.stderr)
 
-    # Resolve container_id for directory paths
-    if mode == "pve":
-        from kento.pve import next_vmid, validate_vmid, generate_pve_config, write_pve_config
-        if vmid:
-            validate_vmid(vmid)
+    # F7 + F11: hold the cross-process kento lock across the entire
+    # allocate-and-commit sequence. Two concurrent `kento create` processes
+    # would otherwise race on next_instance_name / next_vmid / container_dir
+    # exists check, potentially ending up with the same name, VMID, or
+    # stomping each other's directory. Lock covers from just before name
+    # resolution through the container_dir mkdir; slower work (resolve_layers,
+    # image pulls, config writes) happens after release so we don't serialize
+    # the hot path. Port allocation further down has its own narrower lock.
+    with kento_lock():
+        # Resolve container name
+        if name is None:
+            base_name = sanitize_image_name(image)
+            other_dir = LXC_BASE if base_dir == VM_BASE else VM_BASE
+            name = next_instance_name(base_name, base_dir, other_dir=other_dir)
+            # Defend against pathological image refs that sanitize into something
+            # unsafe (e.g. leading-dot or embedded slash after transformation).
+            # The CLI validates explicit --name; this covers the auto-generated
+            # path so downstream hook templates / path joins never see a bad name.
+            validate_name(name, what="auto-generated name")
         else:
-            vmid = next_vmid()
-        container_id = str(vmid)
-        print(f"Mode: pve (VMID {vmid})")
-    elif mode == "pve-vm":
-        from kento.pve import next_vmid, validate_vmid, generate_qm_config, write_qm_config
-        from kento.vm_hook import write_vm_hook, write_snippets_wrapper
-        if vmid:
-            validate_vmid(vmid)
+            # Scan both namespaces: for PVE-LXC/PVE-VM, container_id is the VMID
+            # while `name` lives in kento-name, so a bare (base_dir / name).exists()
+            # misses same-name duplicates across VMIDs. When --force is set, only
+            # scan the current namespace — the user has opted in to duplicate names
+            # across namespaces (bare shortcuts like `kento start foo` then require
+            # explicit `kento lxc start foo` / `kento vm start foo`).
+            if force:
+                conflict = _scan_namespace(name, base_dir) is not None
+            else:
+                conflict = (_scan_namespace(name, LXC_BASE) is not None
+                            or _scan_namespace(name, VM_BASE) is not None)
+            if conflict:
+                print(f"Error: instance name already taken: {name}", file=sys.stderr)
+                sys.exit(1)
+
+        # Resolve container_id for directory paths
+        if mode == "pve":
+            from kento.pve import next_vmid, validate_vmid, generate_pve_config, write_pve_config
+            if vmid:
+                validate_vmid(vmid)
+            else:
+                vmid = next_vmid()
+            container_id = str(vmid)
+            print(f"Mode: pve (VMID {vmid})")
+        elif mode == "pve-vm":
+            from kento.pve import next_vmid, validate_vmid, generate_qm_config, write_qm_config
+            from kento.vm_hook import write_vm_hook, write_snippets_wrapper
+            if vmid:
+                validate_vmid(vmid)
+            else:
+                vmid = next_vmid()
+            container_id = name  # VM_BASE uses name, not VMID
+            print(f"Mode: pve-vm (VMID {vmid})")
+        elif mode == "vm":
+            container_id = name
+            print("Mode: vm")
         else:
-            vmid = next_vmid()
-        container_id = name  # VM_BASE uses name, not VMID
-        print(f"Mode: pve-vm (VMID {vmid})")
-    elif mode == "vm":
-        container_id = name
-        print("Mode: vm")
-    else:
-        container_id = name
-        print("Mode: lxc")
+            container_id = name
+            print("Mode: lxc")
 
-    container_dir = base_dir / container_id
+        container_dir = base_dir / container_id
 
-    if container_dir.exists():
-        print(f"Error: instance already exists: {container_id}", file=sys.stderr)
-        sys.exit(1)
+        if container_dir.exists():
+            print(f"Error: instance already exists: {container_id}", file=sys.stderr)
+            sys.exit(1)
 
-    # Resolve layers (validates image exists)
+        # Create container_dir inside the lock so a concurrent create() sees
+        # it on its own .exists() check above. Slower post-setup happens
+        # outside the lock; the try/undos below registers the rmtree cleanup
+        # as the very first undo so any later failure rolls back this mkdir.
+        (container_dir / "rootfs").mkdir(parents=True)
+
+    # Resolve layers (validates image exists). Outside the lock to avoid
+    # serializing image pulls across concurrent creates.
     layers = resolve_layers(image)
     if not layers:
         print(f"Error: failed to resolve layer paths for {image}",
               file=sys.stderr)
+        # container_dir was created inside the lock; clean it up before exit.
+        shutil.rmtree(container_dir, ignore_errors=True)
         sys.exit(1)
 
     # Accumulator of rollback actions for every side-effecting step past
     # this point. On exception, each undo runs in LIFO order — see F4 in
-    # the edge-case audit for the original motivation.
-    undos: list[tuple[str, object]] = []
+    # the edge-case audit for the original motivation. container-dir goes
+    # first so it's the last thing unwound (after image-hold / state-dir).
+    undos: list[tuple[str, object]] = [
+        ("container-dir",
+         lambda: shutil.rmtree(container_dir, ignore_errors=True)),
+    ]
 
     try:
         from kento.layers import create_image_hold, remove_image_hold
         create_image_hold(image, name)
         undos.append(("image-hold", lambda: remove_image_hold(name)))
 
-        # Create directory structure — upper/work may be outside container_dir for sudo users
+        # Compute state_dir — upper/work may be outside container_dir for sudo users
         state_dir = upper_base(container_id, base_dir if mode in ("vm", "pve-vm") else None)
-        (container_dir / "rootfs").mkdir(parents=True)
-        undos.append(("container-dir",
-                      lambda: shutil.rmtree(container_dir, ignore_errors=True)))
 
         state_dir_existed_outside = state_dir != container_dir and state_dir.exists()
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -549,19 +570,30 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             (container_dir / "kento-memory").write_text(str(effective_memory) + "\n")
             (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
 
-            # Write port mapping (usermode networking only)
+            # Write port mapping (usermode networking only).
+            # Hold kento_lock around allocate_port so two concurrent creates
+            # can't both pick the same host port (the allocator reads all
+            # existing kento-port files and bind-tests, but without a lock
+            # the scan and the write are a classic TOCTOU race).
             if network["type"] == "usermode":
                 from kento.vm import allocate_port
                 if port is None:
-                    host_port = allocate_port()
+                    with kento_lock():
+                        host_port = allocate_port()
+                        (container_dir / "kento-port").write_text(
+                            f"{host_port}:22\n")
                     guest_port = 22
                 elif port == "auto":
-                    host_port = allocate_port()
+                    with kento_lock():
+                        host_port = allocate_port()
+                        (container_dir / "kento-port").write_text(
+                            f"{host_port}:22\n")
                     guest_port = 22
                 else:
                     host_port, guest_port = port.split(":")
                     host_port, guest_port = int(host_port), int(guest_port)
-                (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+                    (container_dir / "kento-port").write_text(
+                        f"{host_port}:{guest_port}\n")
 
             if mode == "pve-vm":
                 # Generate VM hookscript + inject.sh (hookscript invokes inject.sh
@@ -619,16 +651,22 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                     print(f"  Port:    {host_port}:{guest_port}")
                 print(f"  Dir:     {container_dir}")
         else:
-            # Port forwarding for LXC/PVE modes
+            # Port forwarding for LXC/PVE modes. Hold kento_lock across
+            # allocate + write so concurrent creates don't collide on the
+            # same free port (same race as the VM-mode branch above).
             if port is not None:
                 from kento.vm import allocate_port
                 if port == "auto":
-                    host_port = allocate_port()
+                    with kento_lock():
+                        host_port = allocate_port()
+                        (container_dir / "kento-port").write_text(
+                            f"{host_port}:22\n")
                     guest_port = 22
                 else:
                     host_port, guest_port = port.split(":")
                     host_port, guest_port = int(host_port), int(guest_port)
-                (container_dir / "kento-port").write_text(f"{host_port}:{guest_port}\n")
+                    (container_dir / "kento-port").write_text(
+                        f"{host_port}:{guest_port}\n")
 
             # Persist memory/cores so the start-host hook can propagate the limit
             # into the inner ns cgroup on PVE-LXC (outer cgroup gets the ceiling
