@@ -343,6 +343,130 @@ def test_reset_pve_vm_regenerates_vm_hook(mock_root, mock_layers, mock_run,
 @patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
 @patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
 @patch("kento.reset.require_root")
+def test_reset_pve_vm_rewrites_memfd_size_after_memory_change(
+        mock_root, mock_layers, mock_run, tmp_path):
+    """pve-vm scrub must re-read `memory:` from the qm config and
+    rewrite the memfd `size=` inside `args:` to match.
+
+    Repro: create with default 512M -> user runs
+    `qm set --memory 2048` -> memory: updates but args:size= doesn't ->
+    kento's pre-start validator refuses to boot. Scrub should fix it.
+    """
+    pve = tmp_path / "pve"
+    conf_dir = pve / "nodes" / "mynode" / "qemu-server"
+    conf_dir.mkdir(parents=True)
+    qm_conf = conf_dir / "100.conf"
+    lxc_dir = tmp_path / "testpvevm"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve-vm\n")
+    (lxc_dir / "kento-vmid").write_text("100\n")
+    (lxc_dir / "kento-memory").write_text("512\n")
+    (lxc_dir / "kento-cores").write_text("1\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+    # Simulate user having run `qm set --memory 2048`:
+    # memory: updated, args:size= still stale at 512M.
+    qm_conf.write_text(
+        "name: testpvevm\n"
+        "ostype: l26\n"
+        "memory: 2048\n"
+        "cores: 1\n"
+        f"args: -enable-kvm -kernel {lxc_dir}/rootfs/boot/vmlinuz "
+        f"-object memory-backend-memfd,id=mem,size=512M,share=on -numa node,memdev=mem\n"
+        "serial0: socket\n"
+    )
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.reset.is_running", return_value=False), \
+         patch("kento.pve.PVE_DIR", pve), \
+         patch("kento.pve._pve_node_name", return_value="mynode"):
+        reset("testpvevm")
+
+    new = qm_conf.read_text()
+    assert "size=2048M" in new, new
+    assert "size=512M" not in new
+    assert "memory: 2048" in new
+    # Kento metadata now reflects PVE's authoritative values.
+    assert (lxc_dir / "kento-memory").read_text().strip() == "2048"
+    assert (lxc_dir / "kento-cores").read_text().strip() == "1"
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_vm_syncs_kento_metadata_from_qm_config(
+        mock_root, mock_layers, mock_run, tmp_path):
+    """If kento-memory and qm config disagree (user edited via qm set),
+    PVE's value wins — kento metadata files get rewritten to match."""
+    pve = tmp_path / "pve"
+    conf_dir = pve / "nodes" / "mynode" / "qemu-server"
+    conf_dir.mkdir(parents=True)
+    qm_conf = conf_dir / "100.conf"
+    lxc_dir = tmp_path / "pvevm2"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve-vm\n")
+    (lxc_dir / "kento-vmid").write_text("100\n")
+    (lxc_dir / "kento-memory").write_text("512\n")
+    (lxc_dir / "kento-cores").write_text("1\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+    qm_conf.write_text(
+        "memory: 4096\n"
+        "cores: 8\n"
+        f"args: -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+    )
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.reset.is_running", return_value=False), \
+         patch("kento.pve.PVE_DIR", pve), \
+         patch("kento.pve._pve_node_name", return_value="mynode"):
+        reset("pvevm2")
+
+    assert (lxc_dir / "kento-memory").read_text().strip() == "4096"
+    assert (lxc_dir / "kento-cores").read_text().strip() == "8"
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_pve_vm_missing_qm_config_does_not_mask_scrub(
+        mock_root, mock_layers, mock_run, tmp_path):
+    """If the qm config is missing (destroyed between steps), sync is a
+    no-op — scrub should not crash and should still regenerate the hook."""
+    pve = tmp_path / "pve"
+    (pve / "nodes" / "mynode" / "qemu-server").mkdir(parents=True)
+    # No qm config file written.
+    lxc_dir = tmp_path / "pvevm3"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve-vm\n")
+    (lxc_dir / "kento-vmid").write_text("100\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.reset.is_running", return_value=False), \
+         patch("kento.pve.PVE_DIR", pve), \
+         patch("kento.pve._pve_node_name", return_value="mynode"):
+        reset("pvevm3")
+
+    assert (lxc_dir / "kento-hook").exists()
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
 def test_reset_reinjects_static_ip(mock_root, mock_layers, mock_run,
                                     tmp_path):
     lxc_dir = tmp_path / "test"

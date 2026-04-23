@@ -210,30 +210,22 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     return "\n".join(lines) + "\n"
 
 
-def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
-                        hookscript_ref: str,
-                        memory: int = 512,
-                        cores: int = 1,
-                        machine: str = "q35",
-                        bridge: str | None = None,
-                        net_type: str | None = None,
-                        kvm: bool = True,
-                        mac: str | None = None) -> str:
-    """Generate a PVE QM config for a kento VM."""
+def generate_qm_args(container_dir: Path, *,
+                     memory: int = 512,
+                     kvm: bool = True) -> str:
+    """Build the kento-managed `args:` payload for a PVE VM config.
+
+    Returns the portion that follows ``args: `` — a single space-separated
+    line of QEMU arguments.  kento assumes exclusive ownership of this
+    field: callers mixing in user-supplied args will have those overwritten.
+
+    The memfd ``size=`` is derived from ``memory`` and must be kept in
+    sync with PVE's top-level ``memory:`` field, otherwise the pre-start
+    hookscript validator aborts the VM start.
+    """
     rootfs = container_dir / "rootfs"
     socket_path = container_dir / "virtiofsd.sock"
 
-    lines = [
-        f"name: {name}",
-        "ostype: l26",
-        f"machine: {machine}",
-        f"memory: {memory}",
-        f"cores: {cores}",
-        f"hookscript: {hookscript_ref}",
-        "serial0: socket",
-    ]
-
-    # Build args line — passed raw to QEMU
     args_parts = []
     if kvm:
         args_parts.append("-enable-kvm")
@@ -247,8 +239,32 @@ def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
         f"-object memory-backend-memfd,id=mem,size={memory}M,share=on",
         "-numa node,memdev=mem",
     ]
-    # Join with space (PVE's args: is a single line)
-    lines.append(f"args: {' '.join(args_parts)}")
+    return " ".join(args_parts)
+
+
+def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
+                        hookscript_ref: str,
+                        memory: int = 512,
+                        cores: int = 1,
+                        machine: str = "q35",
+                        bridge: str | None = None,
+                        net_type: str | None = None,
+                        kvm: bool = True,
+                        mac: str | None = None) -> str:
+    """Generate a PVE QM config for a kento VM."""
+    lines = [
+        f"name: {name}",
+        "ostype: l26",
+        f"machine: {machine}",
+        f"memory: {memory}",
+        f"cores: {cores}",
+        f"hookscript: {hookscript_ref}",
+        "serial0: socket",
+    ]
+
+    # args: is kento-managed (see generate_qm_args); user-added content
+    # would be overwritten by scrub.
+    lines.append(f"args: {generate_qm_args(container_dir, memory=memory, kvm=kvm)}")
 
     # Network. PVE's net0 format: virtio=<MAC>,bridge=<name>. Include MAC
     # whenever we have one so external DHCP reservations stay stable across
@@ -260,6 +276,115 @@ def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
             lines.append(f"net0: virtio,bridge={bridge}")
 
     return "\n".join(lines) + "\n"
+
+
+def _parse_qm_conf_field(content: str, field: str) -> str | None:
+    """Return the value of a top-level qm config field, or None if absent.
+
+    Matches ``<field>: <value>`` lines in the global section (the section
+    before any ``[snapshot]`` header). Returns the last occurrence if the
+    field is repeated (shouldn't happen, but shouldn't mask the repeat
+    either).
+    """
+    value: str | None = None
+    for raw in content.splitlines():
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            break  # snapshot section; stop here
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in stripped:
+            continue
+        key, sep, val = stripped.partition(":")
+        if sep and key.strip() == field:
+            value = val.strip()
+    return value
+
+
+def sync_qm_args_to_memory(vmid: int, container_dir: Path, *,
+                           kvm: bool = True) -> tuple[int | None, int | None]:
+    """Rewrite the ``args:`` line in the PVE qm config so memfd ``size=``
+    matches PVE's ``memory:`` field.
+
+    Use case: ``qm set <vmid> --memory N`` updates the top-level
+    ``memory:`` field but leaves the embedded ``size=<N>M`` inside
+    ``args:`` stale. kento's pre-start hookscript validator catches this
+    and refuses to boot; ``kento vm scrub`` calls this helper to rewrite
+    args in place so the next start succeeds.
+
+    Behaviour:
+    - If the qm config is missing or has no ``memory:`` field, this is a
+      no-op (returns (None, None)).
+    - If an ``args:`` line exists it is replaced with a freshly-generated
+      one. If it doesn't exist (e.g. externally-stripped config), one is
+      appended.
+    - PVE's config wins: kento's ``kento-memory`` / ``kento-cores``
+      metadata files are rewritten to match the qm config so subsequent
+      operations see a consistent value.
+
+    kento assumes exclusive ownership of ``args:`` — any user-added QEMU
+    flags on that line will be overwritten. Workaround: don't edit
+    ``args:`` directly.
+
+    Returns (memory, cores) parsed from qm config (either may be None
+    if the config doesn't have that field).
+    """
+    node = _pve_node_name()
+    conf_path = PVE_DIR / "nodes" / node / "qemu-server" / f"{vmid}.conf"
+    if not conf_path.is_file():
+        return (None, None)
+
+    content = conf_path.read_text()
+    memory_raw = _parse_qm_conf_field(content, "memory")
+    cores_raw = _parse_qm_conf_field(content, "cores")
+    if memory_raw is None:
+        # No memory: field — nothing to sync against.
+        return (None, _coerce_int(cores_raw))
+
+    try:
+        memory = int(memory_raw)
+    except ValueError:
+        return (None, _coerce_int(cores_raw))
+
+    new_args_line = f"args: {generate_qm_args(container_dir, memory=memory, kvm=kvm)}"
+
+    out_lines: list[str] = []
+    replaced = False
+    for raw in content.splitlines():
+        if raw.startswith("args:"):
+            if not replaced:
+                out_lines.append(new_args_line)
+                replaced = True
+            # Drop duplicate args lines (shouldn't occur, but be explicit).
+            continue
+        out_lines.append(raw)
+    if not replaced:
+        out_lines.append(new_args_line)
+
+    # Preserve trailing newline behaviour.
+    new_content = "\n".join(out_lines)
+    if content.endswith("\n") and not new_content.endswith("\n"):
+        new_content += "\n"
+    conf_path.write_text(new_content)
+
+    # PVE's config wins: rewrite kento metadata to match so `kento info`,
+    # plain-VM fallback, and other consumers agree.
+    (container_dir / "kento-memory").write_text(f"{memory}\n")
+    cores = _coerce_int(cores_raw)
+    if cores is not None:
+        (container_dir / "kento-cores").write_text(f"{cores}\n")
+
+    return (memory, cores)
+
+
+def _coerce_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def write_qm_config(vmid: int, content: str) -> Path:

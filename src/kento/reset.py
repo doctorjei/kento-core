@@ -142,6 +142,20 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     # silently breaks `qm start` after scrub.
     if mode == "pve-vm":
         write_vm_hook(container_dir, layers, name, state_dir)
+        # Re-read memory: from the PVE qm config and rewrite the
+        # kento-managed args: line so the embedded memfd size= stays in
+        # sync. `qm set --memory N` updates memory: but leaves args:
+        # untouched, so without this the pre-start validator aborts on
+        # every start after a memory change.
+        vmid_file = container_dir / "kento-vmid"
+        if vmid_file.is_file():
+            from kento.pve import sync_qm_args_to_memory
+            try:
+                vmid = int(vmid_file.read_text().strip())
+            except ValueError:
+                vmid = None
+            if vmid is not None:
+                sync_qm_args_to_memory(vmid, container_dir)
     elif mode != "vm":
         write_hook(container_dir, layers, name, state_dir)
 

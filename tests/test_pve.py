@@ -10,6 +10,7 @@ from kento.pve import (
     is_pve, _used_vmids, next_vmid, validate_vmid,
     generate_pve_config, write_pve_config, delete_pve_config,
     generate_qm_config, write_qm_config, delete_qm_config,
+    generate_qm_args, sync_qm_args_to_memory, _parse_qm_conf_field,
 )
 from kento import detect_mode
 
@@ -571,3 +572,175 @@ class TestPveConfigMemoryCores:
                                   cores=None)
         assert "cores:" not in cfg
         assert "cpulimit:" not in cfg
+
+
+class TestGenerateQmArgs:
+    """Tests for the kento-managed ``args:`` payload generator."""
+
+    def test_memfd_size_matches_memory(self):
+        args = generate_qm_args(Path("/d"), memory=2048)
+        assert "memory-backend-memfd,id=mem,size=2048M,share=on" in args
+
+    def test_kvm_enabled(self):
+        args = generate_qm_args(Path("/d"), kvm=True)
+        assert args.startswith("-enable-kvm ")
+
+    def test_kvm_disabled(self):
+        args = generate_qm_args(Path("/d"), kvm=False)
+        assert "-enable-kvm" not in args
+
+    def test_contains_kernel_and_initrd(self):
+        args = generate_qm_args(Path("/var/lib/kento/vm/t"), memory=512)
+        assert "-kernel /var/lib/kento/vm/t/rootfs/boot/vmlinuz" in args
+        assert "-initrd /var/lib/kento/vm/t/rootfs/boot/initramfs.img" in args
+
+    def test_used_by_generate_qm_config(self):
+        """``generate_qm_config`` must emit the same args payload as
+        ``generate_qm_args`` so create/scrub can't drift."""
+        container = Path("/var/lib/kento/vm/t")
+        expected = generate_qm_args(container, memory=1024, kvm=True)
+        cfg = generate_qm_config(
+            "t", 100, container,
+            hookscript_ref="local:snippets/kento-vm-100.sh",
+            memory=1024, kvm=True,
+        )
+        assert f"args: {expected}" in cfg
+
+
+class TestParseQmConfField:
+    def test_reads_memory(self):
+        c = "name: x\nmemory: 2048\ncores: 4\n"
+        assert _parse_qm_conf_field(c, "memory") == "2048"
+
+    def test_reads_cores(self):
+        c = "name: x\nmemory: 2048\ncores: 4\n"
+        assert _parse_qm_conf_field(c, "cores") == "4"
+
+    def test_missing_returns_none(self):
+        assert _parse_qm_conf_field("name: x\n", "memory") is None
+
+    def test_stops_at_snapshot_section(self):
+        """Values inside [snapshot-name] sections must not shadow the
+        global section. qm stores per-snapshot config after a section
+        header; we only care about live config."""
+        c = "memory: 2048\n[snap1]\nmemory: 99\n"
+        assert _parse_qm_conf_field(c, "memory") == "2048"
+
+    def test_last_occurrence_in_global_wins(self):
+        c = "memory: 512\nmemory: 2048\n"
+        assert _parse_qm_conf_field(c, "memory") == "2048"
+
+
+class TestSyncQmArgsToMemory:
+    def _setup(self, tmp_path, qm_content):
+        pve = tmp_path / "pve"
+        conf_dir = pve / "nodes" / "mynode" / "qemu-server"
+        conf_dir.mkdir(parents=True)
+        conf = conf_dir / "100.conf"
+        conf.write_text(qm_content)
+        container = tmp_path / "100"
+        container.mkdir()
+        return pve, conf, container
+
+    def test_rewrites_memfd_to_match_memory(self, tmp_path):
+        """Repro: user ran `qm set --memory 2048` after create-time 512M.
+        Scrub should rewrite the embedded size= to 2048M."""
+        container = tmp_path / "100"
+        qm = (
+            "name: test\n"
+            "ostype: l26\n"
+            "memory: 2048\n"
+            "cores: 1\n"
+            f"args: -kernel {container}/rootfs/boot/vmlinuz "
+            f"-object memory-backend-memfd,id=mem,size=512M,share=on\n"
+            "serial0: socket\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            memory, cores = sync_qm_args_to_memory(100, container)
+
+        assert memory == 2048
+        assert cores == 1
+        new = conf.read_text()
+        assert "size=2048M" in new
+        assert "size=512M" not in new
+        # memory: and other non-args lines preserved
+        assert "memory: 2048" in new
+        assert "name: test" in new
+        assert "ostype: l26" in new
+        assert "serial0: socket" in new
+
+    def test_missing_config_is_noop(self, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        container = tmp_path / "100"
+        container.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            result = sync_qm_args_to_memory(100, container)
+        assert result == (None, None)
+
+    def test_missing_memory_field(self, tmp_path):
+        qm = "name: test\ncores: 1\nargs: -nographic\n"
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            memory, cores = sync_qm_args_to_memory(100, container)
+        # No memory: to sync against — cores still parsed but file untouched.
+        assert memory is None
+        assert cores == 1
+        assert conf.read_text() == qm  # unchanged
+
+    def test_no_args_line_appends_one(self, tmp_path):
+        qm = "name: test\nmemory: 1024\ncores: 2\n"
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        new = conf.read_text()
+        assert "args: " in new
+        assert "size=1024M" in new
+
+    def test_duplicate_args_lines_collapsed(self, tmp_path):
+        qm = (
+            "name: test\n"
+            "memory: 1024\n"
+            "args: -enable-kvm -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+            "args: -bogus -object memory-backend-memfd,id=mem,size=256M,share=on\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        new = conf.read_text()
+        args_lines = [l for l in new.splitlines() if l.startswith("args:")]
+        assert len(args_lines) == 1
+        assert "size=1024M" in args_lines[0]
+
+    def test_updates_kento_memory_metadata(self, tmp_path):
+        """PVE config wins: kento-memory / kento-cores metadata files
+        get rewritten to match qm config (the user edited qm, not us)."""
+        qm = (
+            "memory: 4096\n"
+            "cores: 8\n"
+            f"args: -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        (container / "kento-memory").write_text("512\n")
+        (container / "kento-cores").write_text("1\n")
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        assert (container / "kento-memory").read_text().strip() == "4096"
+        assert (container / "kento-cores").read_text().strip() == "8"
+
+    def test_non_integer_memory_noop(self, tmp_path):
+        qm = "memory: oops\nargs: -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            memory, _ = sync_qm_args_to_memory(100, container)
+        assert memory is None
+        # args: line untouched when we can't parse memory.
+        assert conf.read_text() == qm
