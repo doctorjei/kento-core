@@ -9,7 +9,8 @@ from pathlib import Path
 from kento import (LXC_BASE, VM_BASE, _scan_namespace, next_instance_name,
                    require_root, sanitize_image_name, upper_base, validate_name)
 from kento.cloudinit import detect_cloudinit, write_seed
-from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
+from kento.defaults import (LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING,
+                            PVE_ARG_DENYLIST, QEMU_ARG_DENYLIST)
 from kento.hook import write_hook
 from kento.inject import write_inject
 from kento.layers import resolve_layers
@@ -42,6 +43,38 @@ def _run_start_or_rollback(cmd: list[str], *, name: str, scope: str) -> None:
             f"Instance created; run 'kento {scope} start {name}' to retry or "
             f"'kento {scope} destroy {name}' to remove."
         )
+
+
+def _validate_qemu_args(qemu_args: list[str]) -> None:
+    """Reject --qemu-arg values that clash with kento-managed QEMU flags.
+
+    See QEMU_ARG_DENYLIST for the reserved substrings. Any match kills the
+    create with an actionable error; the whole point of pass-through is to
+    be an escape hatch, so the denylist is deliberately short.
+    """
+    for arg in qemu_args:
+        for needle in QEMU_ARG_DENYLIST:
+            if needle in arg:
+                print(f"Error: kento manages {needle!r} directly — "
+                      f"--qemu-arg {arg!r} would collide with kento's own "
+                      "QEMU argv. Drop the flag or file an issue if you "
+                      "need it overridable.", file=sys.stderr)
+                sys.exit(1)
+
+
+def _validate_pve_args(pve_args: list[str]) -> None:
+    """Reject --pve-arg values that duplicate kento-managed PVE config keys.
+
+    See PVE_ARG_DENYLIST. Same escape-hatch reasoning as qemu-arg.
+    """
+    for arg in pve_args:
+        for needle in PVE_ARG_DENYLIST:
+            if needle in arg:
+                print(f"Error: kento manages {needle!r} directly — "
+                      f"--pve-arg {arg!r} would collide with kento's own "
+                      "PVE config. Drop the flag or file an issue if you "
+                      "need it overridable.", file=sys.stderr)
+                sys.exit(1)
 
 
 def _run_cleanup(undos: list[tuple[str, object]]) -> None:
@@ -257,9 +290,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            ssh_host_key_dir: str | None = None,
            mac: str | None = None,
            config_mode: str = "auto",
+           qemu_args: list[str] | None = None,
+           pve_args: list[str] | None = None,
            net_type: str | None = None,
            force: bool = False) -> None:
     require_root()
+
+    # Validate pass-through denylists before any state mutation. Failures
+    # here are pure user-input errors; fail fast with a clear pointer at
+    # the offending value.
+    if qemu_args:
+        _validate_qemu_args(qemu_args)
+    if pve_args:
+        _validate_pve_args(pve_args)
 
     # Validate and read SSH key files early (before any filesystem changes)
     ssh_key_contents: str | None = None
@@ -505,6 +548,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-state").write_text(str(state_dir) + "\n")
         (container_dir / "kento-mode").write_text(mode + "\n")
         (container_dir / "kento-name").write_text(name + "\n")
+
+        # Persist pass-through flags (v1.2.0 Phase B). Consumed by:
+        #   - vm.py start_vm() : appends kento-qemu-args to QEMU argv (B2)
+        #   - pve.py write_*_config() : appends kento-pve-args lines (B3)
+        #   - info.py --verbose : surfaces both (B4)
+        # Only create the file if flags were passed — consumers tolerate
+        # absence. Preserved verbatim across scrub.
+        if qemu_args:
+            (container_dir / "kento-qemu-args").write_text(
+                "\n".join(qemu_args) + "\n")
+        if pve_args:
+            (container_dir / "kento-pve-args").write_text(
+                "\n".join(pve_args) + "\n")
 
         # Write static IP config if requested
         if ip or dns or searchdomain:

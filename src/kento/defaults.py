@@ -16,6 +16,44 @@ VM_MACHINE = "q35"
 VM_SERIAL = "ttyS0"
 VM_DISPLAY = False       # -nographic
 
+# --- Pass-through denylists (v1.2.0 Phase B) ---
+# Substrings that, if present anywhere in a --qemu-arg value, get rejected.
+# Kept short on purpose: pass-through is an escape hatch, so err on the side
+# of permitting. These specifically name flags kento already emits in vm.py
+# / pve.py generate_qm_args — re-emitting them would either duplicate or
+# conflict with the kento-managed version.
+#   -kernel / -initrd : kento owns these (boot from image-provided kernel;
+#     future --kernel/--initrd will be dedicated flags).
+#   virtiofs / rootfs (inside an arg): kento's virtiofs share — a second
+#     -device or -drive naming either would collide with the mount tag.
+#   memory-backend-memfd / memfd-size : kento generates this and scrub
+#     resyncs its size= to PVE's memory: field.
+#   -chardev / -serial : reserved for v1.4.0 VM interactive (serial socket).
+QEMU_ARG_DENYLIST = (
+    "-kernel",
+    "-initrd",
+    "virtiofs",
+    "rootfs",
+    "memory-backend-memfd",
+    "memfd-size",
+    "-chardev",
+    "-serial",
+)
+
+# Substrings that, if present in a --pve-arg value, get rejected.
+# Target only kento-managed keys that would silently clobber generated
+# config: rootfs path, mp0 mount (reserved for virtiofs-equivalent future
+# work), arch, hostname. Everything else (tags, onboot, unprivileged,
+# features, lxc.* raw keys, etc.) is fair game.
+PVE_ARG_DENYLIST = (
+    "rootfs:",
+    "mp0:",
+    "lxc.rootfs.path",
+    "arch:",
+    "hostname:",
+)
+
+
 # --- Config file paths ---
 CONFIG_DIR = Path("/etc/kento")
 LXC_CONFIG_FILE = CONFIG_DIR / "lxc.conf"
