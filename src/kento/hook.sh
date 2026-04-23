@@ -179,7 +179,7 @@ case "$HOOK_TYPE" in
         # processes run in /sys/fs/cgroup/lxc/<vmid>/ns/. Plain LXC has no
         # inner nesting; /sys/fs/cgroup/lxc/<name>/ns/ won't exist, so the
         # is-dir check below silently skips.
-        NS_CGROUP="/sys/fs/cgroup/lxc/$CONTAINER_ID/ns"
+        NS_CGROUP="${KENTO_TEST_NS_CGROUP:-/sys/fs/cgroup/lxc/$CONTAINER_ID/ns}"
         if [ -d "$NS_CGROUP" ]; then
             if [ -f "$CONTAINER_DIR/kento-memory" ]; then
                 MEM_MB=$(cat "$CONTAINER_DIR/kento-memory" | tr -d '[:space:]')

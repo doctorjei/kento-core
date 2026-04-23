@@ -163,7 +163,9 @@ def test_generate_hook_start_host_container_id_safe_under_set_u():
     assert 'CONTAINER_ID="${LXC_NAME:-${1:-}}"' in script
     # start-host body should use $CONTAINER_ID, not bare $1, for the cgroup
     # path and the port-forwarding call.
-    assert 'NS_CGROUP="/sys/fs/cgroup/lxc/$CONTAINER_ID/ns"' in script
+    # NS_CGROUP carries a KENTO_TEST_NS_CGROUP env override for Tier 1
+    # integration tests; the default still points at the PVE ns path.
+    assert 'NS_CGROUP="${KENTO_TEST_NS_CGROUP:-/sys/fs/cgroup/lxc/$CONTAINER_ID/ns}"' in script
     assert 'setup_port_forwarding "$CONTAINER_ID"' in script
 
 
