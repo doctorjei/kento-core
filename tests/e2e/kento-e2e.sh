@@ -2019,10 +2019,8 @@ fi  # end section_enabled "image"
 #   - ghcr.io/doctorjei/droste-hair:latest available in root's podman store
 #     (or pullable). If missing, SECTION D is skipped cleanly.
 #   - Kento source tree at /home/droste/kento-src/ (git checkout of main),
-#     used to build a wheel and push into the outer so it runs the
-#     in-development kento (KENTO_STATE_DIR + apparmor.profile=generated
-#     default are required and are not yet in PyPI v1.0.2). If missing,
-#     SECTION D is skipped.
+#     used to build a wheel and push into the outer so the nested inner
+#     gets the same version being tested. If missing, SECTION D is skipped.
 #   - Running script has NOPASSWD sudo and `pct` / `podman` on PATH.
 #
 # Inner image: localhost/kento-test-minimal:latest (Tier 2 busybox-init
