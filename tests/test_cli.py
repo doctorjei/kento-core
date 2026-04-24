@@ -511,6 +511,67 @@ class TestDispatchScope:
             "mybox", force=False, container_dir=lxc_dir, mode="lxc",
         )
 
+    def test_dispatch_vm_scope_reads_kento_mode_pve_vm(self, tmp_path):
+        """kento vm stop X must read kento-mode and dispatch with mode='pve-vm'.
+
+        Regression: _dispatch_multi previously hardcoded mode='vm' for the vm
+        scope, which caused pve-vm instances to be mishandled by stop/start/
+        destroy/scrub (e.g. taking the plain-VM code path instead of the PVE
+        teardown path).
+        """
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "pve-vm")
+
+        mock_shutdown = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.stop.shutdown", mock_shutdown):
+            main(["vm", "stop", "mybox"])
+
+        mock_shutdown.assert_called_once_with(
+            "mybox", force=False, container_dir=vm_dir, mode="pve-vm",
+        )
+
+    def test_dispatch_vm_scope_defaults_to_vm_when_mode_missing(self, tmp_path):
+        """Legacy vm instances without a kento-mode file fall back to mode='vm'."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        # Build a vm-namespace dir WITHOUT a kento-mode file (legacy layout).
+        vm_dir = vm_base / "mybox"
+        vm_dir.mkdir(parents=True)
+        (vm_dir / "kento-name").write_text("mybox")
+        (vm_dir / "kento-image").write_text("test-image")
+        assert not (vm_dir / "kento-mode").exists()
+
+        mock_shutdown = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.stop.shutdown", mock_shutdown):
+            main(["vm", "stop", "mybox"])
+
+        mock_shutdown.assert_called_once_with(
+            "mybox", force=False, container_dir=vm_dir, mode="vm",
+        )
+
+    def test_dispatch_lxc_scope_reads_kento_mode_pve_lxc(self, tmp_path):
+        """Symmetric guard: kento lxc stop X must dispatch with mode='pve-lxc'
+        for a pve-lxc instance, not the default 'lxc'.
+        """
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_dir = _make_container(lxc_base, "mybox", "mybox", "pve-lxc")
+
+        mock_shutdown = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.stop.shutdown", mock_shutdown):
+            main(["lxc", "stop", "mybox"])
+
+        mock_shutdown.assert_called_once_with(
+            "mybox", force=False, container_dir=lxc_dir, mode="pve-lxc",
+        )
+
 
 class TestRunCommand:
     """Tests for the 'kento run' command (create + start).
