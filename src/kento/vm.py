@@ -1,4 +1,4 @@
-"""Tenkei VM mode — QEMU + virtiofs VM management."""
+"""Gemet VM mode — QEMU + virtiofs VM management."""
 
 import hashlib
 import os

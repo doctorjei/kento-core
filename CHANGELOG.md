@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Tier 1 test harness and QEMU/PVE pass-through flags. Purely additive —
 no existing behavior changes.
 
+### Changed
+
+- Companion project `tenkei` has been renamed to `gemet`. Docs, the VM
+  mode overview, and the e2e harness's image references now point at
+  `github.com/doctorjei/gemet` and the `gemet-*-kento` image tags. No
+  code or behavior change in kento — this is a documentation-level sync
+  with the renamed companion repo. Users upgrading from v1.1.0 who were
+  looking for the old `tenkei` repo should follow the new name.
+
 ### Added
 
 - Tier 1 integration test harness under `tests/integration/`. Subprocess

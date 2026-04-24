@@ -231,7 +231,7 @@ are each usable on their own:
 - **kento** (this project) — composes OCI images into running LXC
   containers or QEMU VMs via overlayfs. Works with any OCI image, not
   just droste's.
-- **[tenkei](https://github.com/doctorjei/tenkei)** — provides the
+- **[gemet](https://github.com/doctorjei/gemet)** — provides the
   minimal kernel and initramfs for VM mode. Any compatible kernel +
   initramfs will work.
 

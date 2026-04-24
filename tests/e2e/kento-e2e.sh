@@ -22,7 +22,7 @@ set -u
 
 # ---------- constants ----------
 
-IMAGE="localhost/tenkei-bifrost-kento:1.4.2"
+IMAGE="localhost/gemet-bifrost-kento:1.4.2"
 BRIDGE="lxcbr0"
 LXC_IP="10.0.3.200/24"
 LXC_GW="10.0.3.1"
@@ -677,7 +677,7 @@ run_phase1() {
         fail "$label: mode file correct" "expected=$expected_mode actual=$actual_mode"
     fi
 
-    # Test 4: config-mode is injection (tenkei images have no cloud-init)
+    # Test 4: config-mode is injection (gemet images have no cloud-init)
     local cfg_mode
     cfg_mode="$(cat "$cdir/kento-config-mode" 2>/dev/null | tr -d '[:space:]')"
     if [ "$cfg_mode" = "injection" ]; then
@@ -1672,7 +1672,7 @@ fi  # end section_enabled "iso"
 #  SECTION B: MULTI-IMAGE TESTS
 # ==========================================================================
 #
-# Test different tenkei image variants to verify kento works beyond bifrost.
+# Test different gemet image variants to verify kento works beyond bifrost.
 
 if section_enabled "image"; then
 
@@ -1680,7 +1680,7 @@ diag "========================================"
 diag "SECTION B: Multi-image tests"
 diag "========================================"
 
-YGG_IMAGE="localhost/tenkei-ygg-kento:1.4.2"
+YGG_IMAGE="localhost/gemet-ygg-kento:1.4.2"
 
 # Pre-flight: check if yggdrasil image exists
 if podman image exists "$YGG_IMAGE" 2>/dev/null; then

@@ -13,7 +13,7 @@ The full sweep. Runs on a PVE host with kento installed and podman /
   scrub → stop → destroy → error paths) for all four modes: `lxc`,
   `pve-lxc`, `vm`, `pve-vm`. Also feature-isolation tests (plain, SSH
   key only, `--memory`, `--cores`, `--port`, `--ip`).
-- **Section B** — Yggdrasil image lifecycle (`tenkei-bifrost-kento`).
+- **Section B** — Yggdrasil image lifecycle (`gemet-bifrost-kento`).
 - **Section C** — cloud-init integration on `droste-hair` (LXC).
 - **Section D** — nested-LXC (tier 3): runs a `pve-lxc` outer and
   creates a plain-LXC inner from an in-development kento wheel pushed
@@ -31,7 +31,7 @@ Exit code is 0 iff all tests pass. Individual failures also leave
 ### Environment prerequisites
 
 - Root-side podman store has the test images pulled:
-  - `localhost/tenkei-bifrost-kento:1.4.2`
+  - `localhost/gemet-bifrost-kento:1.4.2`
   - `ghcr.io/doctorjei/droste-hair:latest` (Section C only)
 - `/home/droste/kento-src/` contains a clean copy of the kento source
   tree (Section D builds a wheel from it).

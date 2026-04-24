@@ -168,14 +168,14 @@ expressed in the cloud-init user-data / meta-data / network-config.
   OCI image is the root disk; there is no separate boot device).
   Compose via multi-stage Containerfile:
   ```dockerfile
-  FROM tenkei-kernel:<ver> AS kernel
+  FROM gemet-kernel:<ver> AS kernel
 
   FROM yggdrasil:<ver>
   COPY --from=kernel /boot/vmlinuz /boot/vmlinuz
   COPY --from=kernel /boot/initramfs.img /boot/initramfs.img
   ```
 - Initramfs must be able to `switch_root` to a virtiofs-backed rootfs.
-  Tenkei's initramfs handles this; other initramfs implementations
+  Gemet's initramfs handles this; other initramfs implementations
   must support `root=rootfs rootfstype=virtiofs` cmdline.
 - `/etc/fstab` in a VM image must follow the same rules as LXC
   (`nofail` for any block device references). Virtiofs mounts the

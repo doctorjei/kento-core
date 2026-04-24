@@ -5,16 +5,16 @@ to share the composed rootfs. Unlike LXC/PVE modes, the guest runs its
 own kernel — useful for workloads that need a real kernel, custom
 modules, or full hardware isolation.
 
-## Tenkei
+## Gemet
 
-VM mode relies on [tenkei](https://github.com/doctorjei/tenkei), a
+VM mode relies on [gemet](https://github.com/doctorjei/gemet), a
 separate project that provides a minimal Linux kernel and initramfs
-for booting OCI images as VMs. Tenkei's initramfs mounts a virtiofs
+for booting OCI images as VMs. Gemet's initramfs mounts a virtiofs
 share as the root filesystem and calls `switch_root` into `/sbin/init`
 — that's it. The kernel and initramfs are baked into the OCI image at
 `/boot/vmlinuz` and `/boot/initramfs.img`.
 
-Kento handles the lifecycle (overlayfs, virtiofsd, QEMU); tenkei
+Kento handles the lifecycle (overlayfs, virtiofsd, QEMU); gemet
 provides the boot payload.
 
 ## Requirements
