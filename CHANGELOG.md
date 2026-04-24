@@ -59,6 +59,30 @@ no existing behavior changes.
   leave it unset and the hook derives the path from the container ID as
   before.
 
+### Fixed
+
+- `kento vm stop <name>` and `kento vm rm <name>` (and `kento vm scrub`)
+  now correctly detect PVE-VM mode instead of hardcoding `mode="vm"` in
+  the `vm` CLI scope. Previously the scoped form short-circuited mode
+  resolution at `cli.py` `_dispatch_multi`, so the running/stopped check
+  for a `pve-vm` instance consulted the plain-VM `kento-qemu-pid` file
+  (always absent on PVE-VM) and returned False. Symptom: `kento vm stop`
+  printed "Already stopped" on a running PVE-VM while `kento vm list`
+  (which reads `kento-mode` correctly) reported "running", and the
+  subsequent `kento vm rm` failed with "umount: target is busy" because
+  the PVE-owned QEMU still held virtiofsd and the overlay. The scope
+  now reads `kento-mode` the same way `list`, `info`, and `resolve_any`
+  always did. The top-level shortcut form (`kento stop <name>`) was
+  unaffected.
+- `kento vm rm -f` and `kento vm stop -f` now retry a busy rootfs
+  unmount after clearing stray processes (`fuser -km`) and fall back
+  to lazy unmount under `-f`, so a wedged virtiofsd/QEMU no longer
+  blocks teardown.
+- `is_running()` now applies a 5s timeout to `qm status` and `pct
+  status` so an unreachable PVE doesn't hang `stop`/`destroy`
+  indefinitely; on timeout we assume the instance may be running and
+  attempt the stop rather than short-circuiting.
+
 ## [1.1.0] - 2026-04-23
 
 Plain-LXC AppArmor default flipped to `lxc.apparmor.profile = generated`,
