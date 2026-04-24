@@ -580,7 +580,7 @@ class TestIsRunningPveVm:
         assert is_running(d, "pve-vm") is True
         mock_run.assert_called_once_with(
             ["qm", "status", "100"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=5,
         )
 
     @patch("subprocess.run")
@@ -597,11 +597,82 @@ class TestIsRunningPveVm:
         d.mkdir()
         assert is_running(d, "pve-vm") is False
 
+
+# --- is_running timeout / non-zero rc defensive paths ---
+
+
+class TestIsRunningPveTimeouts:
+    """Defensive failure paths for PVE status queries.
+
+    On timeout or non-zero rc, is_running returns True so callers (kento
+    stop) still attempt a stop. Calling stop on an already-stopped
+    instance is idempotent (F15); skipping stop on a running instance
+    would leak state.
+    """
+
     @patch("subprocess.run")
-    def test_qm_failure(self, mock_run, tmp_path):
+    def test_is_running_pve_vm_qm_timeout(self, mock_run, tmp_path, capsys):
+        import subprocess as _sp
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-vmid").write_text("100\n")
+        mock_run.side_effect = _sp.TimeoutExpired(cmd=["qm", "status", "100"], timeout=5)
+        assert is_running(d, "pve-vm") is True
+        captured = capsys.readouterr()
+        assert "qm status timed out" in captured.err
+        assert "assuming instance may be running" in captured.err
+
+    @patch("subprocess.run")
+    def test_is_running_pve_lxc_pct_timeout(self, mock_run, tmp_path, capsys):
+        import subprocess as _sp
+        d = tmp_path / "100"
+        d.mkdir()
+        mock_run.side_effect = _sp.TimeoutExpired(cmd=["pct", "status", "100"], timeout=5)
+        assert is_running(d, "pve") is True
+        captured = capsys.readouterr()
+        assert "pct status timed out" in captured.err
+        assert "assuming instance may be running" in captured.err
+
+    @patch("subprocess.run")
+    def test_is_running_pve_vm_qm_nonzero_rc(self, mock_run, tmp_path, capsys):
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-vmid").write_text("100\n")
         mock_run.return_value.returncode = 1
         mock_run.return_value.stdout = ""
-        assert is_running(d, "pve-vm") is False
+        assert is_running(d, "pve-vm") is True
+        captured = capsys.readouterr()
+        assert "qm status returned non-zero" in captured.err
+
+    @patch("subprocess.run")
+    def test_is_running_pve_lxc_pct_nonzero_rc(self, mock_run, tmp_path, capsys):
+        d = tmp_path / "100"
+        d.mkdir()
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = ""
+        assert is_running(d, "pve") is True
+        captured = capsys.readouterr()
+        assert "pct status returned non-zero" in captured.err
+
+    @patch("subprocess.run")
+    def test_is_running_pve_vm_passes_timeout_kwarg(self, mock_run, tmp_path):
+        """The qm status call must include timeout=5."""
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-vmid").write_text("100\n")
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "status: running"
+        is_running(d, "pve-vm")
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("timeout") == 5
+
+    @patch("subprocess.run")
+    def test_is_running_pve_lxc_passes_timeout_kwarg(self, mock_run, tmp_path):
+        """The pct status call must include timeout=5."""
+        d = tmp_path / "100"
+        d.mkdir()
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "status: running"
+        is_running(d, "pve")
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("timeout") == 5

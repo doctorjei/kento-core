@@ -207,7 +207,15 @@ def next_instance_name(base_name: str, scan_dir: Path,
 
 
 def is_running(container_dir: Path, mode: str) -> bool:
-    """Check if a container is running, using the mode-appropriate method."""
+    """Check if a container is running, using the mode-appropriate method.
+
+    For PVE modes (pve, pve-vm) we wrap the status query with a 5-second
+    timeout. An unreachable PVE node or hung pmxcfs would otherwise make
+    `kento stop` hang indefinitely. On timeout or non-zero rc we return
+    True (safe default — issuing a stop on an already-stopped instance is
+    a benign no-op via run_or_die's idempotency guards in the callers,
+    whereas skipping a stop on a still-running instance leaks state).
+    """
     import subprocess
     if mode == "vm":
         from kento.vm import is_vm_running
@@ -217,17 +225,47 @@ def is_running(container_dir: Path, mode: str) -> bool:
         if not vmid_file.is_file():
             return False
         vmid = vmid_file.read_text().strip()
-        result = subprocess.run(
-            ["qm", "status", vmid],
-            capture_output=True, text=True,
-        )
-        return result.returncode == 0 and "running" in result.stdout
+        try:
+            result = subprocess.run(
+                ["qm", "status", vmid],
+                capture_output=True, text=True, timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                "kento: warning: qm status timed out; assuming instance "
+                "may be running",
+                file=sys.stderr,
+            )
+            return True
+        if result.returncode != 0:
+            print(
+                "kento: warning: qm status returned non-zero; assuming "
+                "instance may be running",
+                file=sys.stderr,
+            )
+            return True
+        return "running" in result.stdout
     elif mode == "pve":
-        result = subprocess.run(
-            ["pct", "status", container_dir.name],
-            capture_output=True, text=True,
-        )
-        return result.returncode == 0 and "running" in result.stdout
+        try:
+            result = subprocess.run(
+                ["pct", "status", container_dir.name],
+                capture_output=True, text=True, timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                "kento: warning: pct status timed out; assuming instance "
+                "may be running",
+                file=sys.stderr,
+            )
+            return True
+        if result.returncode != 0:
+            print(
+                "kento: warning: pct status returned non-zero; assuming "
+                "instance may be running",
+                file=sys.stderr,
+            )
+            return True
+        return "running" in result.stdout
     else:
         result = subprocess.run(
             ["lxc-info", "-n", container_dir.name, "-sH"],
