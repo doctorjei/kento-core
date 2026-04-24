@@ -503,9 +503,10 @@ wait_ssh() {
     local port="$2"
     local key="$3"
     local timeout="$4"
+    local user="${5:-root}"
     local deadline=$((SECONDS + timeout))
     while [ $SECONDS -lt $deadline ]; do
-        if ssh "${SSH_OPTS[@]}" -i "$key" -p "$port" "root@${host}" true 2>/dev/null; then
+        if ssh "${SSH_OPTS[@]}" -i "$key" -p "$port" "${user}@${host}" true 2>/dev/null; then
             return 0
         fi
         sleep 2
@@ -1942,9 +1943,11 @@ if podman image exists "$HAIR_IMAGE" 2>/dev/null; then
     fi
 
     # C1.7: end-to-end — boot the container and verify cloud-init actually ran.
+    # droste-hair is a Debian image; Debian cloud-init sets disable_root: true
+    # by default, so SSH as the `debian` user instead of root.
     set_last_instance "$HAIR_LXC" "lxc"
     hair_e2e_out="$(kento lxc create "$HAIR_IMAGE" --name "$HAIR_LXC" \
-        --network bridge=$BRIDGE --ssh-key "${SSH_KEY}.pub" --no-pve 2>&1)"
+        --network bridge=$BRIDGE --ssh-key "${SSH_KEY}.pub" --ssh-key-user debian --no-pve 2>&1)"
     hair_e2e_rc=$?
     if [ $hair_e2e_rc -eq 0 ]; then
         hair_start_out="$(kento start "$HAIR_LXC" 2>&1)"
@@ -1960,10 +1963,10 @@ if podman image exists "$HAIR_IMAGE" 2>/dev/null; then
                     [ -n "$hair_ip" ] && break
                     sleep 1
                 done
-                if [ -n "$hair_ip" ] && wait_ssh "$hair_ip" 22 "$SSH_KEY" "$SSH_TIMEOUT"; then
+                if [ -n "$hair_ip" ] && wait_ssh "$hair_ip" 22 "$SSH_KEY" "$SSH_TIMEOUT" debian; then
                     # cloud-init status --wait blocks until cloud-init is done; exits 0 on success.
                     hair_ci_out="$(timeout 60 ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" -p 22 \
-                        "root@${hair_ip}" 'cloud-init status --wait' </dev/null 2>&1)"
+                        "debian@${hair_ip}" 'cloud-init status --wait' </dev/null 2>&1)"
                     hair_ci_rc=$?
                     if [ $hair_ci_rc -eq 0 ]; then
                         pass "$HAIR_LABEL: cloud-init ran"
