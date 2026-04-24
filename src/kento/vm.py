@@ -112,6 +112,59 @@ def _is_mountpoint(path: Path) -> bool:
     ).returncode == 0
 
 
+def _umount_with_retry(path: Path, force: bool) -> bool:
+    """Umount ``path`` with a busy-mount escape hatch.
+
+    Two-stage strategy:
+
+    1. Plain ``umount <path>``. If it succeeds, return True.
+    2. On failure, try to free up the mount: invoke ``fuser -km <path>``
+       to kill any holders (best-effort — fuser may not be installed and
+       any failure here is swallowed), then retry with ``umount -l``
+       (lazy unmount, which detaches the mount on the last reference).
+
+    If the lazy umount also fails:
+
+    * ``force=True``: log a warning and return True so the caller (e.g.
+      ``destroy -f``) can still proceed with rmtree. The lazy umount,
+      even on failure path, is best-effort cleanup; the kernel detaches
+      whenever the last reference drops.
+    * ``force=False``: return False and let the caller raise.
+    """
+    # First attempt — plain umount.
+    result = subprocess.run(["umount", str(path)], capture_output=True, text=True)
+    if result.returncode == 0:
+        return True
+
+    stderr = (result.stderr or "").strip()
+    print(f"Warning: umount {path} failed (exit {result.returncode}): {stderr}",
+          file=sys.stderr)
+
+    # Best-effort: kill processes holding the mount. fuser is in psmisc,
+    # which is not always installed; tolerate either FileNotFoundError or
+    # a non-zero return.
+    try:
+        subprocess.run(
+            ["fuser", "-km", str(path)],
+            capture_output=True,
+        )
+    except (FileNotFoundError, OSError):
+        pass
+
+    # Retry with lazy umount.
+    lazy = subprocess.run(["umount", "-l", str(path)], capture_output=True, text=True)
+    if lazy.returncode == 0:
+        return True
+
+    lazy_stderr = (lazy.stderr or "").strip()
+    if force:
+        print(f"Warning: lazy umount {path} also failed (exit {lazy.returncode}): "
+              f"{lazy_stderr}; proceeding anyway (rmtree will detach on last ref).",
+              file=sys.stderr)
+        return True
+    return False
+
+
 def mount_rootfs(container_dir: Path, layers: str, state_dir: Path) -> None:
     """Mount overlayfs at container_dir/rootfs on the host."""
     rootfs = container_dir / "rootfs"
@@ -313,11 +366,13 @@ def stop_vm(container_dir: Path, *, force: bool = False) -> None:
     _kill_and_wait(container_dir / "kento-qemu-pid", force=force)
     _kill_and_wait(container_dir / "kento-virtiofsd-pid", force=force)
 
-    # Unmount rootfs
+    # Unmount rootfs. Use the busy-mount-hardened helper so a wedged QEMU
+    # or virtiofsd that left a stale handle doesn't permanently block stop.
+    # stop_vm only flips to lazy/force semantics when called with force=True
+    # (the destroy -f path); a plain stop preserves the strict failure mode.
     rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
-        result = subprocess.run(["umount", str(rootfs)])
-        if result.returncode != 0:
+        if not _umount_with_retry(rootfs, force=force):
             print(f"Error: failed to unmount {rootfs}. Is the instance still running?",
                   file=sys.stderr)
             sys.exit(1)

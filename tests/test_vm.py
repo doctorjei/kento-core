@@ -675,7 +675,9 @@ class TestStopVm:
 
         stop_vm(tmp_path)
 
-        mock_run.assert_called_once_with(["umount", str(tmp_path / "rootfs")])
+        mock_run.assert_called_once_with(
+            ["umount", str(tmp_path / "rootfs")], capture_output=True, text=True
+        )
 
     @patch("kento.vm._is_mountpoint", return_value=False)
     @patch("kento.vm._kill_and_wait")

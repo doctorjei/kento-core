@@ -342,3 +342,132 @@ class TestDestroyPveVm:
         assert len(unmount_calls) == 1
         hold_calls = [c for c in podman_calls if "rm" in c[0][0]]
         assert len(hold_calls) == 1
+
+
+# --- Busy-mount hardening tests (Fix 2) ---
+
+
+def _make_pve_vm_container(tmp_path):
+    """Build a pve-vm fixture used by busy-mount tests."""
+    d = tmp_path / "test"
+    d.mkdir()
+    (d / "rootfs").mkdir()
+    (d / "kento-image").write_text("myimage\n")
+    (d / "kento-mode").write_text("pve-vm\n")
+    (d / "kento-name").write_text("test\n")
+    (d / "kento-state").write_text(str(d) + "\n")
+    (d / "kento-vmid").write_text("100\n")
+    return d
+
+
+def test_destroy_pve_vm_force_umount_retry(tmp_path):
+    """destroy -f on a wedged pve-vm rootfs: plain umount fails, fuser kills
+    holders, lazy umount succeeds. Verify the three-call sequence and that
+    destroy reaches cleanup (rmtree) successfully."""
+    d = _make_pve_vm_container(tmp_path)
+
+    # Mock kento.destroy.subprocess.run (mountpoint check + podman + qm stop).
+    def destroy_run(args, **kwargs):
+        result = subprocess.CompletedProcess(args, 0)
+        if "mountpoint" in args:
+            result.returncode = 0  # IS a mountpoint — exercise the umount path
+        return result
+
+    # Mock kento.vm.subprocess.run for the helper. Track ordered calls so we
+    # can assert the umount → fuser -km → umount -l sequence.
+    vm_calls = []
+
+    def vm_run(args, **kwargs):
+        vm_calls.append(list(args))
+        if args[:1] == ["umount"] and "-l" not in args:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="target is busy")
+        if args[:2] == ["fuser", "-km"]:
+            return subprocess.CompletedProcess(args, 0)
+        if args[:2] == ["umount", "-l"]:
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0)
+
+    with patch("kento.destroy.subprocess.run", side_effect=destroy_run), \
+         patch("kento.vm.subprocess.run", side_effect=vm_run), \
+         patch("kento.destroy.require_root"), \
+         patch("kento.destroy.is_running", return_value=False), \
+         patch("kento.destroy.resolve_container", return_value=d), \
+         patch("kento.pve.delete_qm_config"), \
+         patch("kento.vm_hook.delete_snippets_wrapper"):
+        destroy("test", force=True)
+
+    # Verify the sequence: plain umount -> fuser -km -> lazy umount.
+    rootfs_str = str(d / "rootfs")
+    helper_calls = [c for c in vm_calls
+                    if c[:1] == ["umount"] or c[:1] == ["fuser"]]
+    assert helper_calls == [
+        ["umount", rootfs_str],
+        ["fuser", "-km", rootfs_str],
+        ["umount", "-l", rootfs_str],
+    ]
+    # destroy returned 0 (no SystemExit) and the container dir was removed.
+    assert not d.exists()
+
+
+def test_destroy_pve_vm_force_lazy_fallback(tmp_path):
+    """destroy -f when even lazy umount fails: warn and proceed with rmtree."""
+    d = _make_pve_vm_container(tmp_path)
+
+    def destroy_run(args, **kwargs):
+        result = subprocess.CompletedProcess(args, 0)
+        if "mountpoint" in args:
+            result.returncode = 0
+        return result
+
+    def vm_run(args, **kwargs):
+        if args[:1] == ["umount"] and "-l" not in args:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="target is busy")
+        if args[:2] == ["fuser", "-km"]:
+            return subprocess.CompletedProcess(args, 0)
+        if args[:2] == ["umount", "-l"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="still busy")
+        return subprocess.CompletedProcess(args, 0)
+
+    with patch("kento.destroy.subprocess.run", side_effect=destroy_run), \
+         patch("kento.vm.subprocess.run", side_effect=vm_run), \
+         patch("kento.destroy.require_root"), \
+         patch("kento.destroy.is_running", return_value=False), \
+         patch("kento.destroy.resolve_container", return_value=d), \
+         patch("kento.pve.delete_qm_config"), \
+         patch("kento.vm_hook.delete_snippets_wrapper"):
+        # force=True must NOT raise even though lazy umount also failed.
+        destroy("test", force=True)
+
+    # rmtree proceeded — the container_dir is gone.
+    assert not d.exists()
+
+
+def test_destroy_pve_vm_no_force_lazy_fallback_raises(tmp_path):
+    """Without -f, a fully-wedged umount must surface as SystemExit."""
+    d = _make_pve_vm_container(tmp_path)
+
+    def destroy_run(args, **kwargs):
+        result = subprocess.CompletedProcess(args, 0)
+        if "mountpoint" in args:
+            result.returncode = 0
+        return result
+
+    def vm_run(args, **kwargs):
+        if args[:1] == ["umount"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="busy")
+        if args[:2] == ["fuser", "-km"]:
+            return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0)
+
+    with patch("kento.destroy.subprocess.run", side_effect=destroy_run), \
+         patch("kento.vm.subprocess.run", side_effect=vm_run), \
+         patch("kento.destroy.require_root"), \
+         patch("kento.destroy.is_running", return_value=False), \
+         patch("kento.destroy.resolve_container", return_value=d), \
+         patch("kento.pve.delete_qm_config"), \
+         patch("kento.vm_hook.delete_snippets_wrapper"):
+        with pytest.raises(SystemExit):
+            destroy("test", force=False)
+
+    # Container dir survives — destroy bailed before rmtree.
+    assert d.exists()

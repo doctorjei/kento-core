@@ -57,12 +57,15 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
                 print(f"Warning: stop tool not found ({e.filename}); proceeding with cleanup.",
                       file=sys.stderr)
 
-    # Unmount rootfs if still mounted
+    # Unmount rootfs if still mounted. Use the busy-mount-hardened helper:
+    # under -f we want a wedged instance (qm timeout, leaked virtiofsd, etc.)
+    # to still succeed via fuser-kill + lazy umount fallback rather than hang
+    # the destroy. Without -f we keep strict semantics — fail loudly.
     rootfs = container_dir / "rootfs"
     if subprocess.run(["mountpoint", "-q", str(rootfs)],
                       capture_output=True).returncode == 0:
-        result = subprocess.run(["umount", str(rootfs)])
-        if result.returncode != 0:
+        from kento.vm import _umount_with_retry
+        if not _umount_with_retry(rootfs, force=force):
             print(f"Error: failed to unmount {rootfs}. Is the container still running?",
                   file=sys.stderr)
             sys.exit(1)
