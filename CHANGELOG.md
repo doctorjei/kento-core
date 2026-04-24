@@ -5,7 +5,10 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - UNRELEASED
+
+Tier 1 test harness and QEMU/PVE pass-through flags. Purely additive —
+no existing behavior changes.
 
 ### Changed
 
@@ -20,6 +23,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gemet and droste as subprojects and kanibako as an independent
   consumer. Repos remain federated; this is a documentation-only
   clarification of the relationships.
+
+### Added
+
+- Tier 1 integration test harness under `tests/integration/`. Subprocess
+  execution of the real generated `kento-hook` against a `tmp_path`
+  LXC-style state dir, catching hook-runtime bugs that template-level
+  mocks miss. Covers hook-version v0 and v1 invocation shapes, the
+  `pre-mount` overlayfs branch (skipped when not root), `post-stop`
+  cleanup, the DHCP port-forward worker, and PVE-inner ns cgroup writes.
+- `Makefile` with `test`, `test-integration`, and `test-all` targets.
+  Default `pytest tests/` still runs only the unit suite; the integration
+  tier runs via `make test-integration` and is fast (~0.3 s on the agent
+  box).
+- `--qemu-arg <string>` pass-through flag on `kento vm create` (repeatable).
+  Each value is appended verbatim to the QEMU command line after kento's
+  own flags, so `--qemu-arg '-m 2048'` overrides the kento-provided
+  `-m 512`. Rejected on `kento lxc create`.
+- `--pve-arg <string>` pass-through flag for PVE modes (repeatable). Each
+  value is appended verbatim as a line in the generated PVE LXC or qm
+  config. Rejected on plain LXC, plain VM, and any invocation with
+  `--no-pve`.
+- Short denylists (`QEMU_ARG_DENYLIST`, `PVE_ARG_DENYLIST` in
+  `defaults.py`) reject pass-through values that would collide with
+  kento-managed keys (`-kernel`, `-initrd`, `memfd`, `rootfs:`, `arch:`,
+  `hostname:`, `lxc.rootfs.path`, etc.). Everything else is permitted —
+  pass-through is an escape hatch, not a vetted API.
+- `kento info --verbose` surfaces any `--qemu-arg` / `--pve-arg` values
+  the instance was created with under a new "Pass-through flags:"
+  section. `kento info --json` gains top-level `qemu_args` and `pve_args`
+  keys (always present, empty list when unset) for stable machine
+  consumption.
+- `KENTO_TEST_NS_CGROUP` environment variable on `hook.sh` as a test-only
+  override for the PVE-inner ns cgroup write path. Production invocations
+  leave it unset and the hook derives the path from the container ID as
+  before.
 
 ## [1.1.0] - 2026-04-23
 
