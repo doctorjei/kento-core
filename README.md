@@ -217,6 +217,7 @@ and its writable layer. Errors if the instance is running unless
 - [Instance Lifecycle](docs/container-lifecycle.md) — naming, state, scrub, sudo behavior
 - [Troubleshooting](docs/troubleshooting.md) — error messages and fixes
 - [Architecture](docs/architecture.md) — overlayfs, hooks, startup sequences, internals
+- [Changelog](CHANGELOG.md) — release history
 
 ## Related projects
 
