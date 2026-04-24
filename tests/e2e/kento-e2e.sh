@@ -496,6 +496,24 @@ wait_running() {
     return 1
 }
 
+# ---------- helper: wait for STOPPED (i.e. NOT running) in kento list ----------
+# Used by phase5b. Returns 0 once the instance no longer shows "running" in
+# kento list, 1 if the timeout elapses while still running. We treat absence
+# from the list as "stopped" too — destroy-during-stop windows shouldn't trip
+# the regression assertion.
+wait_stopped() {
+    local name="$1"
+    local timeout="$2"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        if ! kento list 2>/dev/null | grep -qE "^${name}\s.*running"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # ---------- helper: wait for SSH ----------
 
 wait_ssh() {
@@ -1076,6 +1094,240 @@ run_phase5() {
     return 0
 }
 
+# ---------- Phase 5b: Scoped stop / rm regression guard ----------
+#
+# Phase 5 above exercises only the top-level shortcut form (`kento stop NAME`,
+# `kento destroy -f NAME`) which routes through resolve_any() and reads
+# kento-mode directly — that path always worked. The SCOPED form
+# (`kento vm stop`, `kento lxc stop`, `kento vm rm`, `kento lxc rm`) goes
+# through _dispatch_multi() in cli.py, which had a mode-resolution bug that
+# made `kento vm stop` short-circuit with "Already stopped" on running
+# pve-vm instances. The original E2E never hit the scoped form at all.
+#
+# This phase creates its OWN scratch instance (e2e-${mode}-scoped) and runs
+# create -> start -> scoped-stop -> scoped-rm against it, cross-checking
+# against ground truth (qm/pct/lxc-info) at each step. It does not touch
+# the Phase-1..5 instance.
+run_phase5b_scoped_stop() {
+    local mode="$1"
+    local name="e2e-${mode}-scoped"
+    local label="$mode-scoped"
+    set_last_instance "$name" "$mode"
+
+    subgroup_begin "phase5b-scoped-$mode" || return 0
+    diag "--- Phase 5b: Scoped stop/rm ($mode) ---"
+
+    # Mode -> CLI scope (vm or lxc).
+    local scope=""
+    case "$mode" in
+        pve-vm|vm)   scope="vm"  ;;
+        pve-lxc|lxc) scope="lxc" ;;
+    esac
+
+    # ----- Test A: create + start scratch instance -----
+    local cmd
+    cmd="$(build_create_cmd "$mode" "$name")"
+    # Swap the canonical e2e port so we don't collide with Phase 1's instance,
+    # which is still alive on its own port.
+    case "$mode" in
+        lxc)     cmd="${cmd//--port 10200:22/--port 10210:22}" ;;
+        pve-lxc) cmd="${cmd//--port 10201:22/--port 10211:22}" ;;
+    esac
+    local output
+    output=$(timeout -k 5 "$KTO_CREATE" bash -c "$cmd" 2>&1)
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        fail "$label: scratch create" "exit code $rc" "$output"
+        # Skip the remaining 5 phase5b tests cleanly — no scratch to act on.
+        skip "$label: scoped stop succeeds + ground truth stopped" "scratch create failed"
+        skip "$label: scoped stop is idempotent (Already stopped)"     "scratch create failed"
+        skip "$label: scoped stop on running does NOT short-circuit"   "scratch create failed"
+        skip "$label: scoped rm without -f on running fails cleanly"   "scratch create failed"
+        skip "$label: scoped rm with -f succeeds + dir removed"        "scratch create failed"
+        force_teardown "$name" "$mode"
+        subgroup_end
+        return 0
+    fi
+    pass "$label: scratch create"
+
+    local cdir
+    cdir="$(get_container_dir "$name" "$mode")"
+
+    # Resolve VMID for PVE modes for ground-truth cross-checks.
+    local vmid=""
+    case "$mode" in
+        pve-lxc)
+            vmid="$(basename "$cdir")"
+            ;;
+        pve-vm)
+            [ -f "$cdir/kento-vmid" ] && vmid="$(tr -d '[:space:]' < "$cdir/kento-vmid")"
+            ;;
+    esac
+
+    # Helper: ground-truth stopped predicate. Returns 0 when stopped.
+    # Captures last-seen output in GT_OUT for diagnostic on failure.
+    GT_OUT=""
+    gt_stopped() {
+        case "$mode" in
+            lxc)
+                GT_OUT="$(timeout 10 lxc-info -n "$name" -sH 2>&1)"
+                echo "$GT_OUT" | grep -qi "STOPPED"
+                ;;
+            pve-lxc)
+                GT_OUT="$(timeout 10 pct status "$vmid" 2>&1)"
+                echo "$GT_OUT" | grep -qi "stopped"
+                ;;
+            pve-vm)
+                GT_OUT="$(timeout 10 qm status "$vmid" 2>&1)"
+                echo "$GT_OUT" | grep -qi "stopped"
+                ;;
+            vm)
+                # No external truth source for plain vm; fall back to
+                # kento list (best available — same source the bug poisoned).
+                GT_OUT="$(timeout 10 kento list 2>&1)"
+                ! echo "$GT_OUT" | grep -qE "^${name}\s.*running"
+                ;;
+        esac
+    }
+
+    # Start
+    local start_tmo="$KTO_START_LXC"
+    case "$mode" in vm|pve-vm) start_tmo="$KTO_START_VM" ;; esac
+    run_kento "$start_tmo" start "$name"
+    local boot_to
+    boot_to="$(boot_timeout_for_mode "$mode")"
+    if [ "$RUN_RC" -ne 0 ] || ! wait_running "$name" "$boot_to"; then
+        # Couldn't get to a running state — bail with skips for the running-state-dependent assertions.
+        diag "phase5b: start did not reach running (rc=$RUN_RC); skipping running-state tests"
+        skip "$label: scoped stop succeeds + ground truth stopped" "start failed"
+        skip "$label: scoped stop is idempotent (Already stopped)" "start failed"
+        skip "$label: scoped stop on running does NOT short-circuit" "start failed"
+        skip "$label: scoped rm without -f on running fails cleanly" "start failed"
+        skip "$label: scoped rm with -f succeeds + dir removed" "start failed"
+        force_teardown "$name" "$mode"
+        subgroup_end
+        return 0
+    fi
+
+    # ----- Test B: scoped stop succeeds AND ground truth says stopped -----
+    run_kento "$KTO_STOP" "$scope" stop "$name"
+    if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+        fail "$label: scoped stop succeeds + ground truth stopped" \
+            "TIMEOUT after ${KTO_STOP}s" "$RUN_OUTPUT"
+        force_teardown "$name" "$mode"
+        subgroup_end
+        return 0
+    fi
+    if [ "$RUN_RC" -ne 0 ]; then
+        fail "$label: scoped stop succeeds + ground truth stopped" \
+            "kento $scope stop rc=$RUN_RC" "$RUN_OUTPUT"
+    else
+        # Allow a brief settle window — qm/pct can lag a beat behind kento.
+        local stopped_ok=0
+        local stop_deadline=$((SECONDS + 15))
+        while [ $SECONDS -lt $stop_deadline ]; do
+            if gt_stopped; then
+                stopped_ok=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$stopped_ok" -eq 1 ]; then
+            pass "$label: scoped stop succeeds + ground truth stopped"
+        else
+            fail "$label: scoped stop succeeds + ground truth stopped" \
+                "kento ok but ground truth still running" \
+                "kento out: $RUN_OUTPUT" "ground truth: $GT_OUT"
+        fi
+    fi
+
+    # ----- Test C: idempotent scoped stop on already-stopped -----
+    run_kento "$KTO_STOP" "$scope" stop "$name"
+    if [ "$RUN_RC" -eq 0 ] && echo "$RUN_OUTPUT" | grep -q "Already stopped"; then
+        pass "$label: scoped stop is idempotent (Already stopped)"
+    else
+        fail "$label: scoped stop is idempotent (Already stopped)" \
+            "rc=$RUN_RC, did not see 'Already stopped'" "$RUN_OUTPUT"
+    fi
+
+    # ----- Test D: scoped stop on running must NOT short-circuit -----
+    # This is the direct regression guard for the _dispatch_multi bug:
+    # `kento vm stop NAME` on a freshly-started pve-vm used to print
+    # "Already stopped" instantly because the dispatcher couldn't read
+    # kento-mode and bailed out. We start the instance, then assert that
+    # `kento <scope> stop` does NOT print "Already stopped".
+    run_kento "$start_tmo" start "$name"
+    if [ "$RUN_RC" -ne 0 ] || ! wait_running "$name" "$boot_to"; then
+        skip "$label: scoped stop on running does NOT short-circuit" \
+            "could not restart for regression check"
+    else
+        run_kento "$KTO_STOP" "$scope" stop "$name"
+        if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+            fail "$label: scoped stop on running does NOT short-circuit" \
+                "TIMEOUT after ${KTO_STOP}s" "$RUN_OUTPUT"
+            force_teardown "$name" "$mode"
+        elif [ "$RUN_RC" -eq 0 ] && echo "$RUN_OUTPUT" | grep -q "Already stopped"; then
+            fail "$label: scoped stop on running does NOT short-circuit" \
+                "REGRESSION: kento $scope stop printed 'Already stopped' on running instance" \
+                "$RUN_OUTPUT"
+        elif [ "$RUN_RC" -eq 0 ]; then
+            # Bonus check: confirm it actually stopped per ground truth.
+            wait_stopped "$name" 15 || true
+            pass "$label: scoped stop on running does NOT short-circuit"
+        else
+            fail "$label: scoped stop on running does NOT short-circuit" \
+                "rc=$RUN_RC" "$RUN_OUTPUT"
+        fi
+    fi
+
+    # ----- Test E: scoped rm without -f on running fails cleanly -----
+    # Restart, then attempt `kento <scope> rm NAME` (no -f) and assert
+    # it exits nonzero AND output contains neither a Python traceback
+    # nor the old "target is busy" panic.
+    run_kento "$start_tmo" start "$name"
+    if [ "$RUN_RC" -ne 0 ] || ! wait_running "$name" "$boot_to"; then
+        skip "$label: scoped rm without -f on running fails cleanly" \
+            "could not restart for rm-without-force check"
+    else
+        run_kento "$KTO_DESTROY" "$scope" rm "$name"
+        if [ "$RUN_RC" -eq 0 ]; then
+            fail "$label: scoped rm without -f on running fails cleanly" \
+                "rm without -f succeeded on running instance" "$RUN_OUTPUT"
+        elif echo "$RUN_OUTPUT" | grep -qE "Traceback|target is busy"; then
+            fail "$label: scoped rm without -f on running fails cleanly" \
+                "panic-like output detected" "$RUN_OUTPUT"
+        else
+            pass "$label: scoped rm without -f on running fails cleanly"
+        fi
+    fi
+
+    # ----- Test F: scoped rm with -f succeeds + dir removed -----
+    run_kento "$KTO_DESTROY" "$scope" rm -f "$name"
+    if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+        fail "$label: scoped rm with -f succeeds + dir removed" \
+            "TIMEOUT after ${KTO_DESTROY}s" "$RUN_OUTPUT"
+        force_teardown "$name" "$mode"
+    elif [ "$RUN_RC" -ne 0 ]; then
+        fail "$label: scoped rm with -f succeeds + dir removed" \
+            "rc=$RUN_RC" "$RUN_OUTPUT"
+        force_teardown "$name" "$mode"
+    elif [ -n "$cdir" ] && [ -d "$cdir" ]; then
+        fail "$label: scoped rm with -f succeeds + dir removed" \
+            "directory still exists: $cdir" "$RUN_OUTPUT"
+        force_teardown "$name" "$mode"
+    else
+        pass "$label: scoped rm with -f succeeds + dir removed"
+    fi
+
+    # Defensive: make sure nothing is left around for Phase 6 / next mode.
+    if kento list 2>/dev/null | grep -qE "^${name}\s"; then
+        force_teardown "$name" "$mode"
+    fi
+
+    subgroup_end
+    return 0
+}
+
 # ---------- Phase 6: Error paths ----------
 
 run_phase6() {
@@ -1186,6 +1438,12 @@ for mode in "${MODES[@]}"; do
             done
         fi
 
+        # Phase 5b runs BEFORE phase 5 — it spins up its own scratch
+        # instance (e2e-${mode}-scoped) so the canonical Phase-1..5 instance
+        # is untouched. Guards against the _dispatch_multi "Already stopped"
+        # short-circuit regression on `kento <vm|lxc> stop`.
+        run_phase5b_scoped_stop "$mode"
+
         run_phase5 "$mode"
     else
         # Skip phases 2-5 tests if create failed
@@ -1198,6 +1456,9 @@ for mode in "${MODES[@]}"; do
                  "directory removed" "image hold removed"; do
             skip "$mode: $t" "create failed"
         done
+        # Phase 5b is self-contained; still attempt it even when the
+        # canonical create failed — it has its own skip-on-failure path.
+        run_phase5b_scoped_stop "$mode"
     fi
 
     run_phase6 "$mode"
