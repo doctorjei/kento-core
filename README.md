@@ -221,22 +221,26 @@ and its writable layer. Errors if the instance is running unless
 
 ## Related projects
 
-Kento is part of a stack of independent projects that work together but
-are each usable on their own:
+Kento is the top-level brand of a small federated stack — each repo
+is its own, but the positioning is umbrella-over-subprojects.
 
-- **[kanibako](https://github.com/doctorjei/kanibako)** — container
-  management platform built on droste images and kento.
+**Subprojects:**
+
+- **[gemet](https://github.com/doctorjei/gemet)** — produces the
+  minimal kernel and initramfs that kento's VM mode boots. Any
+  compatible kernel + initramfs will work; gemet is the reference
+  implementation.
 - **[droste](https://github.com/doctorjei/droste)** — builds layered
-  OCI images (process containers, system containers, VMs).
-- **kento** (this project) — composes OCI images into running LXC
-  containers or QEMU VMs via overlayfs. Works with any OCI image, not
-  just droste's.
-- **[gemet](https://github.com/doctorjei/gemet)** — provides the
-  minimal kernel and initramfs for VM mode. Any compatible kernel +
-  initramfs will work.
+  OCI images (paper / cloth / wool tiers) that compose cleanly under
+  kento. Kento was originally extracted from droste's OCI-backed LXC
+  mount system.
 
-Kento was originally extracted from droste's OCI-backed LXC mount
-system.
+**Independent:**
+
+- **[kanibako](https://github.com/doctorjei/kanibako)** — consumer of
+  the kento ecosystem. Disposable-sandbox platform for AI coding
+  agents. Built on kento + gemet-produced images; released on its own
+  cadence.
 
 ## License
 

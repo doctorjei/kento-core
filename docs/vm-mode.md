@@ -8,7 +8,7 @@ modules, or full hardware isolation.
 ## Gemet
 
 VM mode relies on [gemet](https://github.com/doctorjei/gemet), a
-separate project that provides a minimal Linux kernel and initramfs
+kento subproject that provides a minimal Linux kernel and initramfs
 for booting OCI images as VMs. Gemet's initramfs mounts a virtiofs
 share as the root filesystem and calls `switch_root` into `/sbin/init`
 — that's it. The kernel and initramfs are baked into the OCI image at
