@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code or behavior change in kento — this is a documentation-level sync
   with the renamed companion repo. Users upgrading from v1.1.0 who were
   looking for the old `tenkei` repo should follow the new name.
+- README `Related projects` section and `docs/vm-mode.md` now reflect
+  the kento umbrella positioning: kento is the top-level brand, with
+  gemet and droste as subprojects and kanibako as an independent
+  consumer. Repos remain federated; this is a documentation-only
+  clarification of the relationships.
 
 ## [1.1.0] - 2026-04-23
 
