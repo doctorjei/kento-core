@@ -136,8 +136,40 @@ class TestShutdownPveVm:
 
         mock_run.assert_called_once()
         assert list(mock_run.call_args[0][0]) == [
-            "qm", "shutdown", "100", "--timeout", "60", "--forceStop", "1"
+            "qm", "shutdown", "100", "--timeout", "30", "--forceStop"
         ]
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
+    @patch("kento.stop.require_root")
+    def test_timeout_overrides_default(self, mock_root, mock_run, mock_running, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test", timeout=60)
+
+        mock_run.assert_called_once()
+        assert list(mock_run.call_args[0][0]) == [
+            "qm", "shutdown", "100", "--timeout", "60", "--forceStop"
+        ]
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
+    @patch("kento.stop.require_root")
+    def test_graceful_only_drops_timeout_and_forcestop(self, mock_root, mock_run, mock_running, tmp_path):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test", graceful_only=True)
+
+        mock_run.assert_called_once()
+        assert list(mock_run.call_args[0][0]) == ["qm", "shutdown", "100"]
 
     @patch("kento.stop.is_running", return_value=True)
     @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
@@ -155,6 +187,107 @@ class TestShutdownPveVm:
 
         mock_run.assert_called_once()
         assert list(mock_run.call_args[0][0]) == ["qm", "stop", "100"]
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.stop.require_root")
+    def test_warning_fires_when_qm_reports_fallback(self, mock_root, mock_running,
+                                                     tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        def _fallback(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="VM still running - terminating now with SIGTERM\n",
+                stderr="",
+            )
+
+        with patch("kento.subprocess_util.subprocess.run", side_effect=_fallback), \
+             patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test")
+
+        captured = capsys.readouterr()
+        assert "did not honor ACPI shutdown within 30s" in captured.err
+        assert "hard-stopped" in captured.err
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.stop.require_root")
+    def test_no_warning_when_graceful_succeeds(self, mock_root, mock_running,
+                                                tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        def _clean(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("kento.subprocess_util.subprocess.run", side_effect=_clean), \
+             patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test")
+
+        captured = capsys.readouterr()
+        assert "did not honor ACPI" not in captured.err
+        assert "hard-stopped" not in captured.err
+
+
+class TestShutdownFlagMutex:
+    """The three new pve-vm shutdown flags (--timeout, --graceful-only,
+    --force) have meaningful pairwise conflicts; the API rejects them
+    rather than silently picking a winner."""
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.stop.require_root")
+    def test_graceful_only_and_force_conflict(self, mock_root, mock_running,
+                                                tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            with pytest.raises(SystemExit) as exc:
+                shutdown("test", force=True, graceful_only=True)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "--graceful-only" in captured.err
+        assert "--force" in captured.err
+        assert "mutually exclusive" in captured.err
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.stop.require_root")
+    def test_graceful_only_and_timeout_conflict(self, mock_root, mock_running,
+                                                  tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            with pytest.raises(SystemExit) as exc:
+                shutdown("test", graceful_only=True, timeout=45)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "--timeout" in captured.err
+        assert "--graceful-only" in captured.err
+
+    @patch("kento.stop.is_running", return_value=True)
+    @patch("kento.stop.require_root")
+    def test_force_and_timeout_conflict(self, mock_root, mock_running,
+                                          tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        with patch("kento.stop.resolve_container", return_value=d):
+            with pytest.raises(SystemExit) as exc:
+                shutdown("test", force=True, timeout=45)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "--timeout" in captured.err
+        assert "--force" in captured.err
 
 
 # --- run_or_die error-path tests (F8) ---

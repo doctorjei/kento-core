@@ -492,6 +492,7 @@ class TestDispatchScope:
 
         mock_shutdown.assert_called_once_with(
             "mybox", force=False, container_dir=vm_dir, mode="vm",
+            timeout=None, graceful_only=False,
         )
 
     def test_lxc_scope_destroy(self, tmp_path):
@@ -531,6 +532,7 @@ class TestDispatchScope:
 
         mock_shutdown.assert_called_once_with(
             "mybox", force=False, container_dir=vm_dir, mode="pve-vm",
+            timeout=None, graceful_only=False,
         )
 
     def test_dispatch_vm_scope_defaults_to_vm_when_mode_missing(self, tmp_path):
@@ -552,6 +554,7 @@ class TestDispatchScope:
 
         mock_shutdown.assert_called_once_with(
             "mybox", force=False, container_dir=vm_dir, mode="vm",
+            timeout=None, graceful_only=False,
         )
 
     def test_dispatch_lxc_scope_reads_kento_mode_pve_lxc(self, tmp_path):
@@ -570,6 +573,41 @@ class TestDispatchScope:
 
         mock_shutdown.assert_called_once_with(
             "mybox", force=False, container_dir=lxc_dir, mode="pve-lxc",
+            timeout=None, graceful_only=False,
+        )
+
+    def test_vm_stop_passes_timeout_through(self, tmp_path):
+        """kento vm stop --timeout 90 threads timeout=90 into shutdown()."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "pve-vm")
+
+        mock_shutdown = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.stop.shutdown", mock_shutdown):
+            main(["vm", "stop", "--timeout", "90", "mybox"])
+
+        mock_shutdown.assert_called_once_with(
+            "mybox", force=False, container_dir=vm_dir, mode="pve-vm",
+            timeout=90, graceful_only=False,
+        )
+
+    def test_vm_stop_passes_graceful_only_through(self, tmp_path):
+        """kento vm stop --graceful-only threads graceful_only=True into shutdown()."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        vm_dir = _make_container(vm_base, "mybox", "mybox", "pve-vm")
+
+        mock_shutdown = MagicMock()
+        with patch("kento.LXC_BASE", lxc_base), \
+             patch("kento.VM_BASE", vm_base), \
+             patch("kento.stop.shutdown", mock_shutdown):
+            main(["vm", "stop", "--graceful-only", "mybox"])
+
+        mock_shutdown.assert_called_once_with(
+            "mybox", force=False, container_dir=vm_dir, mode="pve-vm",
+            timeout=None, graceful_only=True,
         )
 
 

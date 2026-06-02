@@ -5,6 +5,18 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - unreleased
+
+### Fixed
+
+- `kento vm stop` against a pve-vm instance no longer hangs forever when
+  the guest ignores ACPI. The default `qm shutdown` now uses
+  `--timeout 30 --forceStop`, falling through to a hard stop after the
+  graceful window elapses. New `--timeout N`, `--graceful-only`, and
+  (existing) `--force` flags expose the bounded-shutdown knobs; conflicting
+  combinations are rejected with a clear error. A warning is emitted when
+  qm reports it had to fall through to SIGTERM.
+
 ## [1.2.0] - 2026-04-24
 
 Tier 1 test harness and QEMU/PVE pass-through flags. Purely additive —
