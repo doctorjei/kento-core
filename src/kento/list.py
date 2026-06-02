@@ -6,7 +6,7 @@ from pathlib import Path
 from kento import LXC_BASE, VM_BASE, is_running, read_mode
 
 
-def list_containers(scope: str | None = None) -> None:
+def list_containers(scope: str | None = None, show_size: bool = False) -> None:
     rows = []
 
     image_files = []
@@ -30,25 +30,30 @@ def list_containers(scope: str | None = None) -> None:
 
         status = "running" if is_running(container_dir, mode) else "stopped"
 
-        state_file = container_dir / "kento-state"
-        state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else container_dir
-        upper_dir = state_dir / "upper"
-        if upper_dir.is_dir():
-            du = subprocess.run(
-                ["du", "-sh", str(upper_dir)],
-                capture_output=True, text=True,
-            )
-            upper_size = du.stdout.split()[0] if du.returncode == 0 else "?"
+        if show_size:
+            state_file = container_dir / "kento-state"
+            state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else container_dir
+            upper_dir = state_dir / "upper"
+            if upper_dir.is_dir():
+                du = subprocess.run(
+                    ["du", "-sh", str(upper_dir)],
+                    capture_output=True, text=True,
+                )
+                upper_size = du.stdout.split()[0] if du.returncode == 0 else "?"
+            else:
+                upper_size = "0"
+            rows.append((display_name, ctype, image, status, upper_size))
         else:
-            upper_size = "0"
-
-        rows.append((display_name, ctype, image, status, upper_size))
+            rows.append((display_name, ctype, image, status))
 
     if not rows:
         print("(no instances found)")
         return
 
-    headers = ("NAME", "TYPE", "IMAGE", "STATUS", "UPPER SIZE")
+    if show_size:
+        headers = ("NAME", "TYPE", "IMAGE", "STATUS", "UPPER SIZE")
+    else:
+        headers = ("NAME", "TYPE", "IMAGE", "STATUS")
     widths = []
     for i, header in enumerate(headers):
         col_max = max((len(row[i]) for row in rows), default=0)

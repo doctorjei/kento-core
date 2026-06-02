@@ -515,3 +515,111 @@ def test_scope_vm_shows_only_vm(mock_run, tmp_path, capsys):
     output = capsys.readouterr().out
     assert "testvm" in output
     assert "mybox" not in output
+
+
+# --- show_size opt-in tests (v1.2.1) ---
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_default_omits_upper_size_column(mock_run, tmp_path, capsys):
+    """By default the UPPER SIZE column is absent from the header and rows."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers()
+
+    output = capsys.readouterr().out
+    assert "UPPER SIZE" not in output
+    assert "mybox" in output
+    assert "STATUS" in output
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_show_size_true_includes_upper_size_column(mock_run, tmp_path, capsys):
+    """show_size=True restores the UPPER SIZE column."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(show_size=True)
+
+    output = capsys.readouterr().out
+    assert "UPPER SIZE" in output
+    assert "16K" in output
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_default_does_not_invoke_du(mock_run, tmp_path, capsys):
+    """Without show_size, subprocess.run is never called with 'du'."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers()
+
+    for call in mock_run.call_args_list:
+        argv = call.args[0] if call.args else call.kwargs.get("args", [])
+        assert "du" not in argv, f"du should not be invoked, got call: {argv}"
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_show_size_invokes_du_per_row(mock_run, tmp_path, capsys):
+    """With show_size=True, du -sh is called once per instance row."""
+    for name in ("alpha", "bravo"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "kento-image").write_text("img:latest\n")
+        (d / "kento-state").write_text(str(d) + "\n")
+        (d / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(show_size=True)
+
+    du_calls = [
+        call for call in mock_run.call_args_list
+        if (call.args and "du" in call.args[0])
+        or ("du" in call.kwargs.get("args", []))
+    ]
+    assert len(du_calls) == 2
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_default_columns_widths_align_without_size(mock_run, tmp_path, capsys):
+    """Default output's four columns line up without UPPER SIZE."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers()
+
+    output = capsys.readouterr().out
+    lines = output.strip().split("\n")
+    # header + separator + 1 data row
+    assert len(lines) == 3
+    # Separator is dashes split by "  " into 4 groups (4 columns)
+    sep_groups = lines[1].split("  ")
+    assert len(sep_groups) == 4
+    assert all(set(g) == {"-"} for g in sep_groups)

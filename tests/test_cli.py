@@ -267,6 +267,52 @@ class TestVmCommands:
         assert "list" in output
 
 
+class TestListSizeFlag:
+    """--size / -s opt-in for the UPPER SIZE column (v1.2.1 perf fix)."""
+
+    def test_bare_list_default_passes_show_size_false(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["list"])
+        mock_lc.assert_called_once_with(scope=None, show_size=False)
+
+    def test_bare_list_with_size_long(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["list", "--size"])
+        mock_lc.assert_called_once_with(scope=None, show_size=True)
+
+    def test_bare_list_with_size_short(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["list", "-s"])
+        mock_lc.assert_called_once_with(scope=None, show_size=True)
+
+    def test_bare_ls_with_size(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["ls", "--size"])
+        mock_lc.assert_called_once_with(scope=None, show_size=True)
+
+    def test_lxc_list_default_show_size_false(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["lxc", "list"])
+        mock_lc.assert_called_once_with(scope="lxc", show_size=False)
+
+    def test_lxc_list_with_size(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["lxc", "list", "--size"])
+        mock_lc.assert_called_once_with(scope="lxc", show_size=True)
+
+    def test_vm_list_with_size(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["vm", "list", "-s"])
+        mock_lc.assert_called_once_with(scope="vm", show_size=True)
+
+    def test_bare_list_help_mentions_size(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["list", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--size" in output
+
+
 class TestTopLevelHelp:
     """Test top-level help includes both lxc and vm groups."""
 

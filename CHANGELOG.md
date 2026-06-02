@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.1] - unreleased
 
+### Changed
+
+- `kento list` no longer runs `du -sh upper/` per row by default. On
+  long-running containers the per-row `du` dominated wallclock (>5s
+  observed for a handful of instances) since `upper/` accumulates many
+  small files. The UPPER SIZE column is now opt-in via `--size` / `-s`;
+  the same data remains available per-instance via `kento info <name>
+  --verbose`.
+
 ### Fixed
 
 - `kento vm stop` against a pve-vm instance no longer hangs forever when
