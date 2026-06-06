@@ -91,7 +91,7 @@ Options:
 | `--name NAME` | auto | Instance name (auto-generated if omitted) |
 | `--pve` / `--no-pve` | auto | Force or disable PVE integration (auto-detected by default) |
 | `--network MODE` | auto | Network mode: `bridge`, `bridge=<name>`, `host`, `usermode`, `none` |
-| `--nesting / --no-nesting` | on | Enable LXC nesting |
+| `--allow-nesting` | off | Allow nesting: nested containers (LXC modes) or exposed vmx/svm for nested VMs (VM modes) |
 | `--vmid N` | auto | PVE VMID (PVE modes only) |
 | `--memory MB` | varies | Memory limit in MB (default depends on mode) |
 | `--cores N` | varies | Number of CPU cores (default depends on mode) |

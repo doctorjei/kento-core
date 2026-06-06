@@ -5,6 +5,40 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - unreleased
+
+### Added
+
+- `--allow-nesting` flag on `kento <lxc|vm> create` / `run` (all four
+  modes). One flag, one concept — "allow this instance to nest things":
+  in LXC / PVE-LXC modes it permits the container to run nested
+  containers (the `nesting.conf` include, `/dev/fuse` + `/dev/net/tun`
+  bind mounts, and PVE `features: nesting=1`); in VM / PVE-VM modes it
+  exposes the host CPU's virtualization extensions (vmx/svm) so the guest
+  can run hardware-accelerated nested VMs. The setting is persisted in
+  `kento-nesting`, preserved across `scrub`, and surfaced in
+  `kento info` (and `--json`) for every mode. Default: **off**.
+
+### Changed
+
+- **BREAKING: nesting now defaults to off, and `--nesting` is replaced by
+  `--allow-nesting`.** Previously LXC nesting defaulted on (via the
+  `--nesting`/`--no-nesting` flag) and VM mode passed `-cpu host`
+  verbatim (which exposed vmx/svm on a nesting-enabled host). Both are
+  now off by default and gated behind the single `--allow-nesting` flag.
+  To restore the old behavior, pass `--allow-nesting` at create time.
+  - LXC / PVE-LXC: a default `create` no longer includes `nesting.conf`,
+    the fuse/tun bind mounts, or `features: nesting=1`. The
+    `apparmor.profile = generated` systemd-256 fix is unaffected (it is
+    gated on LXC mode, not on the nesting flag), so guests still boot.
+  - VM / PVE-VM: kento now emits `-cpu host,vmx=off,svm=off` by default,
+    deterministically masking the virt extensions even on a
+    nesting-enabled host. With `--allow-nesting` it emits `-cpu host`.
+    For PVE-VM the `-cpu` is injected into kento's `args:` payload and
+    re-emitted on `scrub`.
+  - Deployments relying on default-on LXC nesting (e.g. nested-container
+    sandboxes) must add `--allow-nesting` to their `create` invocations.
+
 ## [1.2.1] - unreleased
 
 ### Changed

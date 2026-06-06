@@ -42,7 +42,7 @@ non-PVE host.
 - **Network bridge:** `lxcbr0` (override with `--network bridge=<name>`)
 - **Config location:** `/var/lib/lxc/<name>/config`
 - **Memory/CPU:** no limit by default (override with `--memory` / `--cores`)
-- **Nesting:** enabled by default (`--no-nesting` to disable)
+- **Nesting:** disabled by default (`--allow-nesting` to permit nested containers)
 - **AppArmor:** per-container profile via `lxc.apparmor.profile = generated` (see below)
 
 The instance runs systemd as PID 1 in a shared kernel namespace.
