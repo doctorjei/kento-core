@@ -53,6 +53,19 @@ def create_image_hold(image: str, name: str) -> None:
     )
 
 
+def ensure_image_hold(image: str, name: str) -> None:
+    """Idempotent — create the image hold only if missing (backfills pre-hold guests)."""
+    try:
+        exists = subprocess.run(
+            [*_podman_cmd(), "container", "exists", f"kento-hold.{name}"],
+            capture_output=True,
+        )
+        if exists.returncode != 0:
+            create_image_hold(image, name)
+    except Exception:
+        pass
+
+
 def remove_image_hold(name: str) -> None:
     """Remove the podman hold container for the given kento container."""
     hold_name = f"kento-hold.{name}"

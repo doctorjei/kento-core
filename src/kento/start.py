@@ -23,6 +23,15 @@ def start(name: str, *, container_dir: Path | None = None, mode: str | None = No
         print(f"Already running: {name}")
         return
 
+    # Backfill the image-hold container if missing (self-heals guests created
+    # before the hold mechanism). Cheap `container exists` check; runs on every
+    # start but NOT on the already-running early-return above.
+    from kento.layers import ensure_image_hold
+    image = (container_dir / "kento-image").read_text().strip()
+    hold_name = (container_dir / "kento-name").read_text().strip() \
+        if (container_dir / "kento-name").is_file() else name
+    ensure_image_hold(image, hold_name)
+
     if mode == "vm":
         from kento.vm import start_vm
         start_vm(container_dir, name)

@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from kento.layers import resolve_layers, _podman_cmd
+from kento.layers import resolve_layers, ensure_image_hold, _podman_cmd
 
 
 def _mock_run(args, **kwargs):
@@ -59,6 +59,61 @@ def test_resolve_layers_missing_image(mock_run):
     mock_run.side_effect = _mock_run_no_image
     with pytest.raises(SystemExit):
         resolve_layers("nonexistent:latest")
+
+
+class TestEnsureImageHold:
+    """ensure_image_hold backfills the hold container only when missing."""
+
+    def _exists_check_cmd(self, calls):
+        for c in calls:
+            cmd = list(c.args[0])
+            if "container" in cmd and "exists" in cmd:
+                return cmd
+        return None
+
+    @patch("kento.layers.subprocess.run")
+    def test_creates_hold_when_missing(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = list(args)
+            if "exists" in cmd:
+                return subprocess.CompletedProcess(cmd, 1)  # missing
+            return subprocess.CompletedProcess(cmd, 0)
+
+        mock_run.side_effect = side_effect
+        ensure_image_hold("myimage:latest", "mybox")
+
+        # exists-check uses `podman container exists kento-hold.mybox`
+        exists_cmd = self._exists_check_cmd(mock_run.call_args_list)
+        assert exists_cmd == ["podman", "container", "exists", "kento-hold.mybox"]
+
+        # create_image_hold was invoked
+        create_calls = [list(c.args[0]) for c in mock_run.call_args_list
+                        if "create" in list(c.args[0])]
+        assert len(create_calls) == 1
+        cmd = create_calls[0]
+        assert "--name" in cmd and "kento-hold.mybox" in cmd
+        assert "io.kento.hold-for=mybox" in cmd
+        assert "myimage:latest" in cmd
+
+    @patch("kento.layers.subprocess.run")
+    def test_no_create_when_hold_exists(self, mock_run):
+        def side_effect(args, **kwargs):
+            cmd = list(args)
+            if "exists" in cmd:
+                return subprocess.CompletedProcess(cmd, 0)  # present
+            return subprocess.CompletedProcess(cmd, 0)
+
+        mock_run.side_effect = side_effect
+        ensure_image_hold("myimage:latest", "mybox")
+
+        create_calls = [c for c in mock_run.call_args_list
+                        if "create" in list(c.args[0])]
+        assert create_calls == []
+
+    @patch("kento.layers.subprocess.run", side_effect=OSError("podman gone"))
+    def test_tolerates_subprocess_failure(self, mock_run):
+        # best-effort: never raises even if podman blows up
+        ensure_image_hold("myimage:latest", "mybox")
 
 
 class TestPodmanCmd:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_container
 from kento.hook import write_hook
-from kento.layers import resolve_layers
+from kento.layers import ensure_image_hold, resolve_layers
 from kento.vm_hook import write_vm_hook
 
 
@@ -144,6 +144,12 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     image = (container_dir / "kento-image").read_text().strip()
     layers = resolve_layers(image)
     (container_dir / "kento-layers").write_text(layers + "\n")
+
+    # Backfill the image-hold container if it's missing (self-heals guests
+    # created before the hold mechanism existed). Store-level, mode-agnostic.
+    hold_name = (container_dir / "kento-name").read_text().strip() \
+        if (container_dir / "kento-name").is_file() else name
+    ensure_image_hold(image, hold_name)
 
     # Regenerate the mode-appropriate hook so fresh image paths land in it.
     # Plain VM mode has no hook (QEMU starts from Python), but pve-vm does —

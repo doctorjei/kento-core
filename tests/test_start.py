@@ -12,6 +12,16 @@ def _ok(*args, **kwargs):
     return subprocess.CompletedProcess(args[0] if args else [], 0, stdout="", stderr="")
 
 
+@pytest.fixture(autouse=True)
+def _hold_noop():
+    """Default the image-hold backfill to a no-op so unrelated start tests
+    don't touch real podman. (`subprocess.run` is a shared global, so patching
+    layers.subprocess.run would collide with kento.subprocess_util's patch;
+    patching the function is clean.)"""
+    with patch("kento.layers.ensure_image_hold"):
+        yield
+
+
 @patch("kento.start.is_running", return_value=False)
 @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
 @patch("kento.start.require_root")
@@ -151,6 +161,7 @@ class TestStartFailurePaths:
     def test_pve_vm_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path, capsys):
         d = tmp_path / "test"
         d.mkdir()
+        (d / "kento-image").write_text("myimage\n")
         (d / "kento-mode").write_text("pve-vm\n")
         (d / "kento-vmid").write_text("100\n")
 
@@ -165,6 +176,63 @@ class TestStartFailurePaths:
         captured = capsys.readouterr()
         assert "Error: failed to start PVE VM test" in captured.err
         assert "qm refused" in captured.err
+
+
+# --- Image-hold backfill on start ---
+
+
+class TestStartBackfillsHold:
+    @patch("kento.start.is_running", return_value=False)
+    @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
+    @patch("kento.start.require_root")
+    def test_start_backfills_hold(self, mock_root, mock_run,
+                                  mock_running, tmp_path):
+        """start() invokes ensure_image_hold with the image + kento-name."""
+        d = tmp_path / "mybox"
+        d.mkdir()
+        (d / "kento-image").write_text("debian:12\n")
+        (d / "kento-mode").write_text("lxc\n")
+        (d / "kento-name").write_text("mybox\n")
+
+        with patch("kento.start.resolve_container", return_value=d), \
+             patch("kento.layers.ensure_image_hold") as mock_ensure:
+            start("mybox")
+
+        mock_ensure.assert_called_once_with("debian:12", "mybox")
+
+    @patch("kento.start.is_running", return_value=False)
+    @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
+    @patch("kento.start.require_root")
+    def test_start_backfills_hold_falls_back_to_name(self, mock_root, mock_run,
+                                                     mock_running, tmp_path):
+        """No kento-name file -> backfill uses the passed name."""
+        d = tmp_path / "mybox"
+        d.mkdir()
+        (d / "kento-image").write_text("debian:12\n")
+        (d / "kento-mode").write_text("lxc\n")
+
+        with patch("kento.start.resolve_container", return_value=d), \
+             patch("kento.layers.ensure_image_hold") as mock_ensure:
+            start("mybox")
+
+        mock_ensure.assert_called_once_with("debian:12", "mybox")
+
+    @patch("kento.start.is_running", return_value=True)
+    @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
+    @patch("kento.start.require_root")
+    def test_no_backfill_when_already_running(self, mock_root, mock_run,
+                                              mock_running, tmp_path):
+        """Already-running early return must NOT touch the hold backfill."""
+        d = tmp_path / "mybox"
+        d.mkdir()
+        (d / "kento-image").write_text("debian:12\n")
+        (d / "kento-mode").write_text("lxc\n")
+
+        with patch("kento.start.resolve_container", return_value=d), \
+             patch("kento.layers.ensure_image_hold") as mock_ensure:
+            start("mybox")
+
+        mock_ensure.assert_not_called()
 
 
 # --- F15: idempotency ---
