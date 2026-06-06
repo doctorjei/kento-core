@@ -198,6 +198,45 @@ def test_info_json_ssh_user_default_root(mock_running, tmp_path, capsys):
 
 
 @patch("kento.info.is_running", return_value=False)
+def test_info_nesting_allowed_human(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path, **{"kento-nesting": "1\n"})
+    info("mybox", container_dir=d, mode="lxc")
+    output = capsys.readouterr().out
+    assert "Nesting:    allowed" in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_nesting_disabled_human(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path, **{"kento-nesting": "0\n"})
+    info("mybox", container_dir=d, mode="vm")
+    output = capsys.readouterr().out
+    assert "Nesting:    disabled" in output
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_nesting_json(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path, **{"kento-nesting": "1\n"})
+    info("mybox", container_dir=d, mode="vm", as_json=True)
+    import json as json_mod
+    data = json_mod.loads(capsys.readouterr().out)
+    assert data["nesting"] is True
+
+    two = tmp_path / "two"
+    two.mkdir()
+    d2 = _make_container(two, **{"kento-nesting": "0\n"})
+    info("mybox", container_dir=d2, mode="lxc", as_json=True)
+    data2 = json_mod.loads(capsys.readouterr().out)
+    assert data2["nesting"] is False
+
+
+@patch("kento.info.is_running", return_value=False)
+def test_info_nesting_absent_no_line(mock_running, tmp_path, capsys):
+    d = _make_container(tmp_path)
+    info("mybox", container_dir=d, mode="lxc")
+    assert "Nesting:" not in capsys.readouterr().out
+
+
+@patch("kento.info.is_running", return_value=False)
 def test_info_hides_optional_when_absent(mock_running, tmp_path, capsys):
     """Optional fields should not appear when metadata files are missing."""
     d = _make_container(tmp_path)

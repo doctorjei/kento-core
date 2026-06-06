@@ -313,6 +313,38 @@ class TestListSizeFlag:
         assert "--size" in output
 
 
+class TestAllowNestingFlag:
+    """--allow-nesting unified flag (default off in all modes)."""
+
+    def test_default_off(self):
+        with patch("kento.create.create") as mock_create:
+            main(["vm", "create", "myimg"])
+        assert mock_create.call_args.kwargs["nesting"] is False
+
+    def test_allow_nesting_on(self):
+        with patch("kento.create.create") as mock_create:
+            main(["vm", "create", "--allow-nesting", "myimg"])
+        assert mock_create.call_args.kwargs["nesting"] is True
+
+    def test_no_allow_nesting(self):
+        with patch("kento.create.create") as mock_create:
+            main(["vm", "create", "--no-allow-nesting", "myimg"])
+        assert mock_create.call_args.kwargs["nesting"] is False
+
+    def test_lxc_allow_nesting_on(self):
+        with patch("kento.create.create") as mock_create:
+            main(["lxc", "create", "--allow-nesting", "myimg"])
+        assert mock_create.call_args.kwargs["nesting"] is True
+
+    def test_old_nesting_flag_removed(self, capsys):
+        # The old --nesting flag no longer exists.
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create", "--nesting", "myimg"])
+        assert exc.value.code != 0
+        err = capsys.readouterr().err
+        assert "--nesting" in err or "unrecognized" in err
+
+
 class TestTopLevelHelp:
     """Test top-level help includes both lxc and vm groups."""
 

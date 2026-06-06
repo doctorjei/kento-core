@@ -120,6 +120,20 @@ class TestGetLxcDefaults:
             "nesting": False,
         }
 
+    def test_nesting_default_off(self):
+        # Unified --allow-nesting flag flips the default to off.
+        assert LXC_NESTING is False
+        with patch("kento.defaults.LXC_CONFIG_FILE", Path("/nonexistent/lxc.conf")):
+            result = get_lxc_defaults()
+        assert result["nesting"] is False
+
+    def test_nesting_config_override_on(self, tmp_path):
+        f = tmp_path / "lxc.conf"
+        f.write_text("nesting = true\n")
+        with patch("kento.defaults.LXC_CONFIG_FILE", f):
+            result = get_lxc_defaults()
+        assert result["nesting"] is True
+
 
 # --- TestEnsureConfigFiles ---
 
@@ -168,7 +182,7 @@ class TestEnsureConfigFiles:
 
         lxc_text = lxc_file.read_text()
         assert "# tty = 2" in lxc_text
-        assert "# nesting = True" in lxc_text
+        assert "# nesting = False" in lxc_text
         assert "# mount_auto = proc:mixed sys:mixed cgroup:mixed" in lxc_text
 
         vm_text = vm_file.read_text()

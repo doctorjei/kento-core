@@ -124,6 +124,10 @@ def info(name: str, *, container_dir: Path, mode: str,
     if mac:
         data["mac"] = mac
 
+    nesting = _read_meta(container_dir, "kento-nesting")
+    if nesting is not None:
+        data["nesting"] = (nesting == "1")
+
     tz = _read_meta(container_dir, "kento-tz")
     if tz:
         data["timezone"] = tz
@@ -209,6 +213,8 @@ def _print_human(data: dict, verbose: bool, *,
         print(f"Network:    {data['network']}")
     if "mac" in data:
         print(f"MAC:        {data['mac']}")
+    if "nesting" in data:
+        print(f"Nesting:    {'allowed' if data['nesting'] else 'disabled'}")
     if "timezone" in data:
         print(f"Timezone:   {data['timezone']}")
     if data.get("ssh_user", "root") != "root":

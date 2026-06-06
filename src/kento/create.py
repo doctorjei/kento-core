@@ -95,7 +95,7 @@ def _run_cleanup(undos: list[tuple[str, object]]) -> None:
 
 def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     net_type: str | None = None,
-                    nesting: bool = True,
+                    nesting: bool = False,
                     ip: str | None = None, gateway: str | None = None,
                     env: list[str] | None = None,
                     port: str | None = None,
@@ -275,7 +275,7 @@ def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
 
 
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
-           nesting: bool = True,
+           nesting: bool = False,
            start: bool = False, mode: str,
            pve: bool | None = None,
            vmid: int = 0, memory: int | None = None, cores: int | None = None,
@@ -420,11 +420,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             print(f"Error: --gateway requires bridge networking; got --network {network['type']}.",
                   file=sys.stderr)
             sys.exit(1)
-    if mode in ("vm", "pve-vm"):
-        if not nesting:
-            print("Warning: --nesting has no effect in VM mode "
-                  "(it's an LXC-only concept). Ignoring.", file=sys.stderr)
-
     # F7 + F11: hold the cross-process kento lock across the entire
     # allocate-and-commit sequence. Two concurrent `kento create` processes
     # would otherwise race on next_instance_name / next_vmid / container_dir
@@ -662,6 +657,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             effective_cores = cores if cores is not None else vm_defaults["cores"]
             (container_dir / "kento-memory").write_text(str(effective_memory) + "\n")
             (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
+            (container_dir / "kento-nesting").write_text(
+                "1\n" if nesting else "0\n")
 
             # Write port mapping (usermode networking only).
             # Hold kento_lock around allocate_port so two concurrent creates
@@ -734,6 +731,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 elif network["type"] == "bridge":
                     print(f"  Bridge:  {bridge}")
                 print(f"  Config:  {qm_conf}")
+                print(f"  Nesting: {'allowed' if nesting else 'disabled'}")
                 print(f"  Dir:     {container_dir}")
             else:
                 # Plain VM mode (no PVE)
@@ -742,6 +740,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 print(f"  Image:   {image}")
                 if network["type"] == "usermode":
                     print(f"  Port:    {host_port}:{guest_port}")
+                print(f"  Nesting: {'allowed' if nesting else 'disabled'}")
                 print(f"  Dir:     {container_dir}")
         else:
             # Port forwarding for LXC/PVE modes. Hold kento_lock across
@@ -769,6 +768,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 (container_dir / "kento-memory").write_text(str(memory) + "\n")
             if cores is not None:
                 (container_dir / "kento-cores").write_text(str(cores) + "\n")
+            (container_dir / "kento-nesting").write_text(
+                "1\n" if nesting else "0\n")
 
             # Generate hook (LXC/PVE only) + inject.sh (shared with VM/PVE-VM modes)
             write_hook(container_dir, layers, name, state_dir)
@@ -822,7 +823,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 print(f"  VMID:    {vmid}")
             if port is not None:
                 print(f"  Port:    {host_port}:{guest_port}")
-            print(f"  Nesting: {nesting}")
+            print(f"  Nesting: {'allowed' if nesting else 'disabled'}")
             print(f"  Config:  {config_path}")
 
         if start:

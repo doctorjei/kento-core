@@ -125,7 +125,7 @@ def delete_pve_config(vmid: int) -> None:
 
 def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         bridge: str | None = None, net_type: str | None = None,
-                        nesting: bool = True,
+                        nesting: bool = False,
                         ip: str | None = None,
                         gateway: str | None = None,
                         nameserver: str | None = None,

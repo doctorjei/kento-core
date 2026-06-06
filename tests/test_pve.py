@@ -143,18 +143,18 @@ class TestDetectMode:
 
 class TestGeneratePveConfig:
     def test_basic_config(self):
+        # Default (nesting off): no nesting features.
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "ostype: unmanaged" in cfg
         assert "hostname: test" in cfg
         assert "rootfs: /var/lib/lxc/100/rootfs" in cfg
         assert "net0:" not in cfg  # no networking by default
-        assert "features: nesting=1" in cfg
-        assert "lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional" in cfg
-        assert "lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional" in cfg
-        assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
-        assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
+        assert "features: nesting=1" not in cfg
+        assert "dev/.lxc/proc" not in cfg
+        assert "/dev/fuse" not in cfg
+        assert "/dev/net/tun" not in cfg
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
-        assert "lxc.mount.auto: proc:rw sys:rw cgroup:rw" in cfg
+        assert "lxc.mount.auto: proc:mixed sys:mixed cgroup:mixed" in cfg
         assert "lxc.tty.max: 2" in cfg
         assert "arch: amd64" in cfg
         assert "memory:" not in cfg
@@ -177,6 +177,16 @@ class TestGeneratePveConfig:
         assert "dev/.lxc/proc" not in cfg
         assert "/dev/fuse" not in cfg
         assert "lxc.mount.auto: proc:mixed sys:mixed cgroup:mixed" in cfg
+
+    def test_nesting_enabled(self):
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  nesting=True)
+        assert "features: nesting=1" in cfg
+        assert "lxc.mount.entry: proc dev/.lxc/proc proc create=dir,optional" in cfg
+        assert "lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional" in cfg
+        assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
+        assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
+        assert "lxc.mount.auto: proc:rw sys:rw cgroup:rw" in cfg
 
     def test_no_bridge(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),

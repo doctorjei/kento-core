@@ -6,7 +6,7 @@ from pathlib import Path
 LXC_TTY = 2
 LXC_MOUNT_AUTO = "proc:mixed sys:mixed cgroup:mixed"
 LXC_MOUNT_AUTO_NESTING = "proc:rw sys:rw cgroup:rw"
-LXC_NESTING = True
+LXC_NESTING = False
 
 # --- VM defaults ---
 VM_MEMORY = 512          # MB

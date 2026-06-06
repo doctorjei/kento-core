@@ -13,6 +13,7 @@ from kento.vm import VM_BASE
 
 class TestGenerateConfig:
     def test_basic_config(self, tmp_path):
+        # Default (nesting off): base config + apparmor, but no nesting features.
         cfg = generate_config("test", tmp_path)
         assert "lxc.uts.name = test" in cfg
         assert f"lxc.rootfs.path = dir:{tmp_path}/rootfs" in cfg
@@ -20,13 +21,22 @@ class TestGenerateConfig:
         assert "lxc.hook.post-stop" in cfg
         assert "lxc.net.0" not in cfg
         assert "lxc.tty.max = 2" in cfg
-        assert "lxc.mount.auto = proc:rw sys:rw cgroup:rw" in cfg
+        assert "lxc.mount.auto = proc:mixed sys:mixed cgroup:mixed" in cfg
         assert "lxc.init.cmd" not in cfg
         assert "lxc.apparmor.profile = generated" in cfg
         assert "lxc.pty.max" not in cfg
+        assert "nesting.conf" not in cfg
+        assert "/dev/fuse" not in cfg
+        assert "/dev/net/tun" not in cfg
+
+    def test_nesting_enabled(self, tmp_path):
+        cfg = generate_config("test", tmp_path, nesting=True)
+        assert "lxc.mount.auto = proc:rw sys:rw cgroup:rw" in cfg
         assert "nesting.conf" in cfg
         assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
         assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
+        # apparmor block stays regardless of nesting.
+        assert "lxc.apparmor.profile = generated" in cfg
 
     def test_custom_bridge(self, tmp_path):
         cfg = generate_config("test", tmp_path, bridge="br0")
@@ -53,14 +63,16 @@ class TestGenerateConfig:
         assert "ipv4.gateway" not in cfg
 
     def test_nesting_disabled(self, tmp_path):
-        cfg = generate_config("test", tmp_path, nesting=False)
+        cfg = generate_config("test", tmp_path, mode="lxc", nesting=False)
         assert "lxc.mount.auto = proc:mixed sys:mixed cgroup:mixed" in cfg
         assert "nesting.conf" not in cfg
         assert "/dev/fuse" not in cfg
         assert "/dev/net/tun" not in cfg
+        # apparmor block must stay even with nesting off (load-bearing for boot).
+        assert "lxc.apparmor.profile = generated" in cfg
 
     def test_lxc_emits_generated_apparmor_lines(self, tmp_path):
-        cfg = generate_config("test", tmp_path, mode="lxc")
+        cfg = generate_config("test", tmp_path, mode="lxc", nesting=True)
         assert "lxc.include = /usr/share/lxc/config/common.conf" in cfg
         assert "lxc.apparmor.profile = generated" in cfg
         assert "lxc.apparmor.allow_nesting = 1" in cfg
@@ -442,6 +454,56 @@ class TestCreate:
             with pytest.raises(SystemExit):
                 create("myimage:latest", name="shared", mode="lxc",
                        )
+
+
+class TestNestingPersistence:
+    """kento-nesting file written for all modes (Pass 1 of --allow-nesting)."""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_default_off(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-nesting").read_text().strip() == "0"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_nesting_on(self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", nesting=True)
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-nesting").read_text().strip() == "1"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_default_off(self, mock_root, mock_layers, mock_run, tmp_path):
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        with patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or vm_base) / n):
+            create("myimage:latest", name="test", mode="vm")
+        vm_dir = vm_base / "test"
+        assert (vm_dir / "kento-nesting").read_text().strip() == "0"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_nesting_on(self, mock_root, mock_layers, mock_run, tmp_path):
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        with patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or vm_base) / n):
+            create("myimage:latest", name="test", mode="vm", nesting=True)
+        vm_dir = vm_base / "test"
+        assert (vm_dir / "kento-nesting").read_text().strip() == "1"
 
 
 class TestStaticIp:
