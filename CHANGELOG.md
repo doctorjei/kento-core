@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can run hardware-accelerated nested VMs. The setting is persisted in
   `kento-nesting`, preserved across `scrub`, and surfaced in
   `kento info` (and `--json`) for every mode. Default: **off**.
+- `kento images` and `kento prune` — safe image garbage collection
+  built on the hold-container mechanism. `kento images [--in-use]` is
+  read-only and lists kento-managed images (referenced by an instance or
+  pinned by a hold) with their referencing instances, hold status, and
+  in-use/orphaned classification. `kento prune [--yes]` is a
+  safe-by-default alternative to `podman system prune -a`: dry-run unless
+  `--yes`, it removes only *orphaned* hold containers (whose instance no
+  longer exists) and the images they freed, never touching an image that
+  still backs a live instance.
+- `kento scrub` and `kento start` now backfill the image-hold container
+  if it is missing. Instances created before the hold mechanism existed
+  were vulnerable to `podman system prune -a` removing their backing
+  layers; they now self-heal on their next start or scrub.
 
 ### Changed
 

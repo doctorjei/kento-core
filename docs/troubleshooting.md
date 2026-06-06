@@ -272,3 +272,27 @@ sudo kento scrub <name>
 ```
 
 This re-resolves layers from the current podman store.
+
+### `podman system prune -a` ate my instance's layers
+
+kento pins each instance's image against podman GC with a stopped
+*hold container* named `kento-hold.<name>`. As long as the hold exists,
+`podman image prune` / `podman system prune -a` / `podman rmi` refuse to
+remove the backing image. Instances created before this mechanism
+existed have no hold and are vulnerable.
+
+Two safeguards:
+
+- **Self-healing:** `kento scrub <name>` and `kento start <name>` now
+  create the hold if it is missing, so older instances get protected on
+  their next start or scrub.
+- **Safe cleanup:** prefer `kento prune` over `podman system prune -a`.
+  It is dry-run by default and removes only *orphaned* holds (whose
+  instance no longer exists) plus the images they freed — never an image
+  still backing a live instance.
+
+```
+kento images            # see in-use vs orphaned kento-managed images
+kento prune             # dry-run: show what would be reclaimed
+sudo kento prune --yes  # actually reclaim orphaned holds + freed images
+```
