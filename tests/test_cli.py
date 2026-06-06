@@ -436,6 +436,73 @@ class TestPullCommand:
         assert "Traceback" not in err
 
 
+class TestImagesCommand:
+    """Tests for the bare-only 'kento images' command."""
+
+    def test_images_dispatches(self):
+        """kento images calls list_images with in_use_only=False."""
+        with patch("kento.images.list_images") as mock_list:
+            main(["images"])
+        mock_list.assert_called_once_with(in_use_only=False)
+
+    def test_images_in_use_flag(self):
+        """kento images --in-use sets in_use_only=True."""
+        with patch("kento.images.list_images") as mock_list:
+            main(["images", "--in-use"])
+        mock_list.assert_called_once_with(in_use_only=True)
+
+    def test_images_not_under_lxc(self):
+        """kento lxc images is not a registered subcommand."""
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "images"])
+        assert exc.value.code != 0
+
+    def test_images_not_under_vm(self):
+        """kento vm images is not a registered subcommand."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "images"])
+        assert exc.value.code != 0
+
+
+class TestPruneCommand:
+    """Tests for the bare-only 'kento prune' command."""
+
+    def test_prune_dispatches_dry_run(self):
+        """kento prune (no --yes) calls prune with yes=False, requires root."""
+        with patch("kento.require_root"), \
+             patch("kento.images.prune") as mock_prune:
+            main(["prune"])
+        mock_prune.assert_called_once_with(yes=False)
+
+    def test_prune_yes_flag(self):
+        """kento prune --yes sets yes=True."""
+        with patch("kento.require_root"), \
+             patch("kento.images.prune") as mock_prune:
+            main(["prune", "--yes"])
+        mock_prune.assert_called_once_with(yes=True)
+
+    def test_prune_requires_root(self):
+        """kento prune gates on require_root before pruning."""
+        with patch("kento.require_root", side_effect=SystemExit(1)) as mock_root, \
+             patch("kento.images.prune") as mock_prune:
+            with pytest.raises(SystemExit):
+                main(["prune"])
+        mock_root.assert_called_once()
+        mock_prune.assert_not_called()
+
+    def test_prune_not_under_lxc(self):
+        """kento lxc prune is not a registered subcommand."""
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "prune"])
+        assert exc.value.code != 0
+
+    def test_prune_not_under_vm(self):
+        """kento vm prune is not a registered subcommand."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "prune"])
+        assert exc.value.code != 0
+
+
 class TestParseNetwork:
     """Tests for _parse_network() validation logic."""
 
@@ -781,6 +848,8 @@ class TestRunCommand:
         output = capsys.readouterr().out
         assert "list" in output
         assert "pull" in output
+        assert "images" in output
+        assert "prune" in output
 
 
 class TestSSHKeyFlag:
