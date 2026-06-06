@@ -435,10 +435,10 @@ class TestStartVm:
         machine_idx = qemu_args.index("-machine")
         assert qemu_args[machine_idx + 1] == "q35"
 
-        # KVM enabled
+        # KVM enabled. No kento-nesting file → nesting off → vmx/svm masked.
         assert "-enable-kvm" in qemu_args
         cpu_idx = qemu_args.index("-cpu")
-        assert qemu_args[cpu_idx + 1] == "host"
+        assert qemu_args[cpu_idx + 1] == "host,vmx=off,svm=off"
 
         # Nographic
         assert "-nographic" in qemu_args
@@ -506,6 +506,62 @@ class TestStartVm:
         assert "-cpu" not in qemu_args
         # Without kento-port, no network args
         assert "-netdev" not in qemu_args
+
+    @patch("kento.vm.VM_KVM", True)
+    @patch("kento.vm.VM_MACHINE", "q35")
+    @patch("kento.vm.VM_MEMORY", 512)
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def _run_start_with_nesting(self, mock_mount, mock_popen, mock_running,
+                                mock_find, mock_run, tmp_path, nesting):
+        """Helper: start a VM with the given kento-nesting content (or None)
+        and return the QEMU argv. nesting is "1", "0", or None (absent)."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+        if nesting is not None:
+            (lxc_dir / "kento-nesting").write_text(nesting + "\n")
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+        return mock_popen.call_args_list[1][0][0]
+
+    def test_start_qemu_nesting_on(self, tmp_path):
+        """kento-nesting=="1" → -cpu host (vmx/svm exposed)."""
+        qemu_args = self._run_start_with_nesting(tmp_path=tmp_path, nesting="1")
+        cpu_idx = qemu_args.index("-cpu")
+        assert qemu_args[cpu_idx + 1] == "host"
+        assert "host,vmx=off,svm=off" not in qemu_args
+
+    def test_start_qemu_nesting_off_explicit(self, tmp_path):
+        """kento-nesting=="0" → -cpu host,vmx=off,svm=off (masked)."""
+        qemu_args = self._run_start_with_nesting(tmp_path=tmp_path, nesting="0")
+        cpu_idx = qemu_args.index("-cpu")
+        assert qemu_args[cpu_idx + 1] == "host,vmx=off,svm=off"
+
+    def test_start_qemu_nesting_absent(self, tmp_path):
+        """No kento-nesting file → treated as off → masked."""
+        qemu_args = self._run_start_with_nesting(tmp_path=tmp_path, nesting=None)
+        cpu_idx = qemu_args.index("-cpu")
+        assert qemu_args[cpu_idx + 1] == "host,vmx=off,svm=off"
 
     @patch("kento.vm.is_vm_running", return_value=True)
     def test_start_already_running_is_idempotent(self, mock_running, tmp_path, capsys):

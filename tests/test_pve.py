@@ -598,6 +598,9 @@ class TestGenerateQmArgs:
     def test_kvm_disabled(self):
         args = generate_qm_args(Path("/d"), kvm=False)
         assert "-enable-kvm" not in args
+        # -cpu is gated on kvm (the `host` model requires KVM); with kvm off
+        # kento emits no -cpu and PVE's own default applies under TCG.
+        assert "-cpu" not in args
 
     def test_contains_kernel_and_initrd(self):
         args = generate_qm_args(Path("/var/lib/kento/vm/t"), memory=512)
@@ -658,6 +661,35 @@ class TestGenerateQmArgs:
         assert args.endswith(" -device=virtio-rng-pci")
         # No double-space from an empty token.
         assert "  " not in args
+
+    # --- Nesting (v1.3.0): kento-managed -cpu masking -------------------
+
+    def test_cpu_nesting_off_explicit(self, tmp_path):
+        """kento-nesting=="0" → -cpu host,vmx=off,svm=off in args."""
+        (tmp_path / "kento-nesting").write_text("0\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "-cpu host,vmx=off,svm=off" in args
+
+    def test_cpu_nesting_absent_masks(self, tmp_path):
+        """No kento-nesting file → treated as off → masked."""
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "-cpu host,vmx=off,svm=off" in args
+
+    def test_cpu_nesting_on(self, tmp_path):
+        """kento-nesting=="1" → -cpu host (no vmx/svm masking)."""
+        (tmp_path / "kento-nesting").write_text("1\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "-cpu host" in args
+        assert "vmx=off" not in args
+        assert "svm=off" not in args
+
+    def test_cpu_before_passthrough(self, tmp_path):
+        """kento's -cpu precedes user pass-through so --qemu-arg '-cpu ...'
+        wins (QEMU honours the last -cpu)."""
+        (tmp_path / "kento-nesting").write_text("1\n")
+        (tmp_path / "kento-qemu-args").write_text("-cpu=host,vmx=on\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert args.index("-cpu host") < args.index("-cpu=host,vmx=on")
 
 
 class TestGeneratePveConfigPassthrough:
@@ -885,3 +917,36 @@ class TestSyncQmArgsToMemory:
         assert memory is None
         # args: line untouched when we can't parse memory.
         assert conf.read_text() == qm
+
+    def test_scrub_reemits_cpu_for_nesting_on(self, tmp_path):
+        """Nesting (v1.3.0): scrub rewrites args: via generate_qm_args, which
+        reads kento-nesting live. kento-nesting persists across scrub, so the
+        correct -cpu is re-emitted. nesting=="1" → -cpu host."""
+        qm = (
+            "memory: 1024\n"
+            "args: -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        (container / "kento-nesting").write_text("1\n")
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        args_line = [l for l in conf.read_text().splitlines()
+                     if l.startswith("args:")][0]
+        assert "-cpu host" in args_line
+        assert "vmx=off" not in args_line
+
+    def test_scrub_reemits_cpu_masked_for_nesting_off(self, tmp_path):
+        """nesting=="0" (or absent) → scrub re-emits masked -cpu."""
+        qm = (
+            "memory: 1024\n"
+            "args: -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        (container / "kento-nesting").write_text("0\n")
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        args_line = [l for l in conf.read_text().splitlines()
+                     if l.startswith("args:")][0]
+        assert "-cpu host,vmx=off,svm=off" in args_line

@@ -275,6 +275,11 @@ def start_vm(container_dir: Path, name: str) -> None:
         cores = cores_file.read_text().strip()
     else:
         cores = str(VM_CORES)
+    # Nesting (v1.3.0): kento-nesting holds "1" (expose vmx/svm so the guest
+    # can run accelerated nested VMs) or "0"/absent (mask them). Same read
+    # pattern as kento-memory/kento-cores above.
+    nesting_file = container_dir / "kento-nesting"
+    nesting_on = nesting_file.is_file() and nesting_file.read_text().strip() == "1"
     qemu_cmd = ["qemu-system-x86_64",
          "-kernel", str(kernel),
          "-initrd", str(initramfs),
@@ -283,7 +288,14 @@ def start_vm(container_dir: Path, name: str) -> None:
          "-machine", VM_MACHINE,
     ]
     if VM_KVM:
-        qemu_cmd += ["-enable-kvm", "-cpu", "host"]
+        # CPU model is always `host`. Nesting OFF deterministically strips the
+        # hardware virt extensions (vmx/svm) even on a nesting-enabled host, so
+        # the guest cannot start its own accelerated VMs unless --allow-nesting
+        # was set. No KVM → no -cpu (TCG default); nesting needs KVM anyway.
+        # Emitted before the kento-qemu-args pass-through below so a user
+        # --qemu-arg '-cpu ...' can still override (QEMU honours the last -cpu).
+        cpu = "host" if nesting_on else "host,vmx=off,svm=off"
+        qemu_cmd += ["-enable-kvm", "-cpu", cpu]
     qemu_cmd += [
          "-nographic",
          "-chardev", f"socket,id=vfs,path={socket_path}",

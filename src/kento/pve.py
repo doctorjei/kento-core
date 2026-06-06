@@ -267,6 +267,19 @@ def generate_qm_args(container_dir: Path, *,
     args_parts = []
     if kvm:
         args_parts.append("-enable-kvm")
+        # Nesting (v1.3.0): inject kento's own -cpu. kento-nesting holds "1"
+        # (expose vmx/svm for nested accelerated VMs) or "0"/absent (mask them).
+        # CPU model is always `host`; nesting OFF deterministically strips vmx/svm.
+        # Gated on kvm because the `host` model requires KVM; without it PVE's
+        # own default -cpu applies under TCG (matches vm.py's `if VM_KVM` gating).
+        # [E2E-VALIDATE] D-strict: assumes PVE accepts a duplicate -cpu in args:
+        # and QEMU honors the last one. Fallback if not: D-simple (cpu: host config
+        # field). Emitted before the kento-qemu-args pass-through below so a user
+        # --qemu-arg '-cpu ...' still wins.
+        nesting_file = container_dir / "kento-nesting"
+        nesting_on = nesting_file.is_file() and nesting_file.read_text().strip() == "1"
+        cpu = "host" if nesting_on else "host,vmx=off,svm=off"
+        args_parts.append(f"-cpu {cpu}")
     args_parts += [
         f"-kernel {rootfs}/boot/vmlinuz",
         f"-initrd {rootfs}/boot/initramfs.img",
