@@ -19,6 +19,29 @@ if [ -f "$CONFIG_MODE_FILE" ]; then
     CONFIG_MODE=$(cat "$CONFIG_MODE_FILE" | tr -d '[:space:]')
 fi
 
+# --allow-nesting: inject a networkd drop-in so the guest leaves nested
+# host-side veths unmanaged (fixes nested LXC/docker/podman bridging on
+# networkd images). Excludes eth0 (Name=!eth0) so the guest's own uplink —
+# itself a veth-kind device inside an LXC — is untouched. Runs BEFORE the
+# cloudinit early-exit so both injection and cloudinit guests get it.
+NESTING="0"
+NESTING_FILE="$CONTAINER_DIR/kento-nesting"
+if [ -f "$NESTING_FILE" ]; then
+    NESTING=$(cat "$NESTING_FILE" | tr -d '[:space:]')
+fi
+if [ "$NESTING" = "1" ]; then
+    NEST_NET_DIR="$ROOTFS/etc/systemd/network"
+    mkdir -p "$NEST_NET_DIR"
+    {
+        echo "[Match]"
+        echo "Kind=veth"
+        echo "Name=!eth0"
+        echo ""
+        echo "[Link]"
+        echo "Unmanaged=yes"
+    } > "$NEST_NET_DIR/10-kento-nested-veth.network"
+fi
+
 if [ "$CONFIG_MODE" = "cloudinit" ]; then
     # Copy pre-generated NoCloud seed files to guest rootfs
     SEED_SRC="$CONTAINER_DIR/cloud-seed"

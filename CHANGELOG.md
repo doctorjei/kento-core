@@ -5,6 +5,24 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Nested-bridging support inside guests. When `--allow-nesting` is set,
+  kento injects a systemd-networkd drop-in into the guest at
+  `/etc/systemd/network/10-kento-nested-veth.network`
+  (`[Match] Kind=veth` + `Name=!eth0` → `[Link] Unmanaged=yes`). Without
+  it, a networkd-based guest reconciles the host-side veths created by
+  nested LXC/docker/podman off their bridge — the same `[Match]
+  Type=ether` failure class that strips veth bridge membership ~seconds
+  after start — breaking nested container networking. The guest's own
+  `eth0` uplink is explicitly excluded (inside an LXC it is itself a
+  veth-kind device), so it is untouched. Written only when nesting is
+  enabled, into the writable overlay layer (reversible by `scrub`,
+  never mutating the image), in all four modes and both injection and
+  cloud-init config modes. Default behavior (nesting off) is unchanged.
+
 ## [1.3.0] - 2026-06-07
 
 ### Added

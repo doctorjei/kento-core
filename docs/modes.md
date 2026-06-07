@@ -68,6 +68,18 @@ break plain-LXC on recent OCI images:
 `generated` fixes both without dropping host-boundary confinement.
 No flag is required.
 
+### Nested networking
+
+When `--allow-nesting` is set (any mode), kento drops a
+`/etc/systemd/network/10-kento-nested-veth.network` unit into the guest
+(`[Match] Kind=veth` + `Name=!eth0` → `[Link] Unmanaged=yes`). This keeps
+the guest's own systemd-networkd from reconciling the host-side veths that
+nested LXC/docker/podman attach to an in-guest bridge — otherwise networkd
+strips them off the bridge moments after start and nested containers lose
+their network. The guest's own `eth0` is excluded, so its uplink is
+unaffected. The file lands in the writable overlay layer (cleared by
+`scrub`) and is inert on guests that do not run systemd-networkd.
+
 ## pve-lxc mode
 
 Proxmox VE containers -- same LXC underneath, but integrated with the

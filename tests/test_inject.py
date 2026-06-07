@@ -432,6 +432,148 @@ class TestInjectDHCPNetworkExecution:
         assert "Domains=example.org" in content
 
 
+# ---------------------------------------------------------------------------
+# --allow-nesting nested-veth drop-in
+# ---------------------------------------------------------------------------
+
+def test_inject_has_nested_veth_block():
+    """Script reads kento-nesting and writes the nested-veth drop-in."""
+    script = generate_inject()
+    assert "kento-nesting" in script
+    assert "10-kento-nested-veth.network" in script
+    assert "Kind=veth" in script
+    assert "Name=!eth0" in script
+    assert "Unmanaged=yes" in script
+
+
+def test_inject_nested_veth_before_cloudinit_exit():
+    """The nested-veth block must run before the cloudinit early-exit."""
+    script = generate_inject()
+    nest_pos = script.index("10-kento-nested-veth.network")
+    cloudinit_pos = script.index('if [ "$CONFIG_MODE" = "cloudinit" ]')
+    assert nest_pos < cloudinit_pos
+
+
+class TestInjectNestedVethExecution:
+    """Execute inject.sh to verify the --allow-nesting nested-veth drop-in.
+
+    The drop-in leaves nested host-side veths unmanaged (Kind=veth) while
+    protecting the guest's own uplink (Name=!eth0). Gated solely on
+    kento-nesting == 1; covers both injection and cloudinit config modes and
+    all modes.
+    """
+
+    EXPECTED = (
+        "[Match]\n"
+        "Kind=veth\n"
+        "Name=!eth0\n"
+        "\n"
+        "[Link]\n"
+        "Unmanaged=yes\n"
+    )
+
+    def _setup(self, tmp_path, mode="lxc"):
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        (rootfs / "etc").mkdir()
+        container = tmp_path / "container"
+        container.mkdir()
+        (container / "kento-mode").write_text(mode)
+        return rootfs, container
+
+    def _run(self, rootfs, container):
+        import subprocess
+        script = write_inject(container)
+        subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            check=True,
+        )
+
+    def _dropin(self, rootfs):
+        return rootfs / "etc" / "systemd" / "network" / "10-kento-nested-veth.network"
+
+    def test_nesting_on_writes_dropin_exact(self, tmp_path):
+        """kento-nesting=1 (lxc) → drop-in with exact expected contents."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-nesting").write_text("1\n")
+        self._run(rootfs, container)
+        dropin = self._dropin(rootfs)
+        assert dropin.is_file()
+        assert dropin.read_text() == self.EXPECTED
+
+    def test_nesting_off_no_dropin(self, tmp_path):
+        """kento-nesting=0 → drop-in absent."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-nesting").write_text("0\n")
+        self._run(rootfs, container)
+        assert not self._dropin(rootfs).exists()
+
+    def test_no_nesting_file_no_dropin(self, tmp_path):
+        """No kento-nesting file at all → drop-in absent."""
+        rootfs, container = self._setup(tmp_path)
+        self._run(rootfs, container)
+        assert not self._dropin(rootfs).exists()
+
+    def test_cloudinit_mode_still_writes_dropin(self, tmp_path):
+        """cloudinit mode + nesting=1 → drop-in present (runs before exit)."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "kento-config-mode").write_text("cloudinit\n")
+        (container / "kento-nesting").write_text("1\n")
+        self._run(rootfs, container)
+        dropin = self._dropin(rootfs)
+        assert dropin.is_file()
+        assert dropin.read_text() == self.EXPECTED
+
+    def test_vm_mode_writes_dropin(self, tmp_path):
+        """nesting=1 in vm mode → drop-in present (gated only on nesting)."""
+        rootfs, container = self._setup(tmp_path, mode="vm")
+        (container / "kento-nesting").write_text("1\n")
+        self._run(rootfs, container)
+        dropin = self._dropin(rootfs)
+        assert dropin.is_file()
+        assert dropin.read_text() == self.EXPECTED
+
+    def test_dropin_dir_created_when_absent(self, tmp_path):
+        """--network none/host: no /etc/systemd/network yet → mkdir -p it."""
+        rootfs, container = self._setup(tmp_path)
+        # No config/link at all; dir does not pre-exist.
+        (container / "kento-nesting").write_text("1\n")
+        assert not (rootfs / "etc" / "systemd" / "network").exists()
+        self._run(rootfs, container)
+        assert self._dropin(rootfs).is_file()
+
+    def test_eth0_static_unit_undisturbed_by_nesting(self, tmp_path):
+        """Static eth0 unit is byte-identical with nesting off vs on."""
+        def build(nesting):
+            rootfs, container = self._setup(tmp_path / nesting)
+            (container / "config").write_text(
+                "lxc.net.0.link = lxcbr0\n"
+                "lxc.net.0.ipv4.address = 10.0.0.5/24\n"
+                "lxc.net.0.ipv4.gateway = 10.0.0.1\n"
+            )
+            (container / "kento-nesting").write_text(nesting + "\n")
+            self._run(rootfs, container)
+            return (rootfs / "etc" / "systemd" / "network" / "10-static.network").read_text()
+        (tmp_path / "0").mkdir()
+        (tmp_path / "1").mkdir()
+        assert build("0") == build("1")
+
+    def test_eth0_dhcp_unit_undisturbed_by_nesting(self, tmp_path):
+        """DHCP eth0 unit is byte-identical with nesting off vs on."""
+        def build(nesting):
+            rootfs, container = self._setup(tmp_path / nesting)
+            (container / "config").write_text(
+                "lxc.net.0.type = veth\n"
+                "lxc.net.0.link = lxcbr0\n"
+            )
+            (container / "kento-nesting").write_text(nesting + "\n")
+            self._run(rootfs, container)
+            return (rootfs / "etc" / "systemd" / "network" / "10-dhcp.network").read_text()
+        (tmp_path / "0").mkdir()
+        (tmp_path / "1").mkdir()
+        assert build("0") == build("1")
+
+
 def test_inject_has_mount_point_creation():
     script = generate_inject()
     assert "mount point directories for mp" in script
