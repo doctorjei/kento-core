@@ -62,6 +62,10 @@ if [ "$MODE" = "pve" ]; then
             if [ -n "$CFG_IP" ] && [ "$CFG_IP" != "dhcp" ]; then
                 STATIC_IP="$CFG_IP"
                 STATIC_GW="${CFG_GW:-}"
+            else
+                # net0 present but no static ip (ip=dhcp or omitted) — the
+                # bridged veth is eth0 and needs a DHCP .network injected.
+                WANT_DHCP=1
             fi
         fi
         # Top-level PVE directives
@@ -87,9 +91,15 @@ else
         CFG_IP=$(sed -n 's/^lxc\.net\.0\.ipv4\.address *= *//p' "$CONFIG_FILE")
         CFG_GW=$(sed -n 's/^lxc\.net\.0\.ipv4\.gateway *= *//p' "$CONFIG_FILE")
         CFG_HOSTNAME=$(sed -n 's/^lxc\.uts\.name *= *//p' "$CONFIG_FILE")
+        CFG_LINK=$(sed -n 's/^lxc\.net\.0\.link *= *//p' "$CONFIG_FILE")
         if [ -n "$CFG_IP" ]; then
             STATIC_IP="$CFG_IP"
             STATIC_GW="${CFG_GW:-}"
+        elif [ "$MODE" = "lxc" ] && [ -n "$CFG_LINK" ]; then
+            # Bridge attached (lxc.net.0.link) but no static ip — the veth is
+            # eth0, so DHCP needs a matching .network. `--network none` has no
+            # link line, so this stays off there.
+            WANT_DHCP=1
         fi
     fi
 fi
@@ -126,6 +136,20 @@ if [ -n "$STATIC_IP" ]; then
         [ -n "${STATIC_DNS:-}" ] && echo "DNS=$STATIC_DNS"
         [ -n "${STATIC_SEARCH:-}" ] && echo "Domains=$STATIC_SEARCH"
     } > "$NET_DIR/10-static.network"
+elif [ "${WANT_DHCP:-0}" = 1 ]; then
+    # LXC/pve-lxc bridge + DHCP: the image may only match Name=en* (VM-oriented
+    # networkd config), but the LXC veth is eth0, so add a matching DHCP unit.
+    NET_DIR="$ROOTFS/etc/systemd/network"
+    mkdir -p "$NET_DIR"
+    {
+        echo "[Match]"
+        echo "Name=eth0"
+        echo ""
+        echo "[Network]"
+        echo "DHCP=yes"
+        [ -n "${STATIC_DNS:-}" ] && echo "DNS=$STATIC_DNS"
+        [ -n "${STATIC_SEARCH:-}" ] && echo "Domains=$STATIC_SEARCH"
+    } > "$NET_DIR/10-dhcp.network"
 elif [ -n "${STATIC_DNS:-}" ] || [ -n "${STATIC_SEARCH:-}" ]; then
     # No static IP but DNS/search set — use resolved drop-in
     RESOLVED_DIR="$ROOTFS/etc/systemd/resolved.conf.d"

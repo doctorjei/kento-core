@@ -52,6 +52,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Deployments relying on default-on LXC nesting (e.g. nested-container
     sandboxes) must add `--allow-nesting` to their `create` invocations.
 
+### Fixed
+
+- VM start no longer holds the caller's stdin / controlling session.
+  `start_vm` launched QEMU (which binds the serial console to stdio under
+  `-nographic`) and virtiofsd with stdout/stderr redirected but stdin
+  inherited and no new session, so QEMU held the caller's fd 0. Over a
+  non-interactive ssh-exec channel or in a pipeline, `kento start` would
+  hang until the VM exited. Both daemons now launch with `stdin=DEVNULL`
+  and `start_new_session=True`.
+- DHCP-mode LXC instances now get an `eth0` network unit. kento injected
+  an `eth0` `.network` only when a static IP was set; with bridge
+  networking and no `--ip` it relied on the image's own networkd config.
+  VM-oriented images match `Name=en*` (predictable NIC naming) while the
+  LXC veth is `eth0`, so the container never received a DHCP lease. kento
+  now writes a `10-dhcp.network` (`Name=eth0`, `DHCP=yes`) for LXC and
+  PVE-LXC bridge-with-DHCP instances; `--network none` is unaffected.
+
 ## [1.2.1] - unreleased
 
 ### Changed

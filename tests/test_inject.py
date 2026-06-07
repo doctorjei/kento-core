@@ -103,6 +103,13 @@ def test_inject_resolved_dropin_for_dns_without_ip():
     assert "90-kento.conf" in script
 
 
+def test_inject_lxc_dhcp_network_for_bridge_without_ip():
+    """LXC/pve-lxc bridge + DHCP injects an eth0 DHCP .network."""
+    script = generate_inject()
+    assert "10-dhcp.network" in script
+    assert "DHCP=yes" in script
+
+
 def test_inject_injects_timezone():
     script = generate_inject()
     assert "/etc/localtime" in script
@@ -330,6 +337,92 @@ class TestInjectSSHUserExecution:
         ak = rootfs / "root" / ".ssh" / "authorized_keys"
         assert ak.is_file()
         assert "ssh-rsa AAAA" in ak.read_text()
+
+
+class TestInjectDHCPNetworkExecution:
+    """Execute inject.sh to verify DHCP .network injection for bridged LXC.
+
+    Static-IP LXC already gets an eth0 .network; these cover the DHCP-mode
+    parity gap (VM-oriented images match Name=en*, but the veth is eth0).
+    """
+
+    def _setup(self, tmp_path):
+        rootfs = tmp_path / "rootfs"
+        rootfs.mkdir()
+        (rootfs / "etc").mkdir()
+        container = tmp_path / "container"
+        container.mkdir()
+        (container / "kento-mode").write_text("lxc")
+        return rootfs, container
+
+    def _run(self, rootfs, container):
+        import subprocess
+        script = write_inject(container)
+        subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            check=True,
+        )
+
+    def test_bridge_dhcp_writes_dhcp_network(self, tmp_path):
+        """lxc.net.0.link present, no ipv4.address → 10-dhcp.network (eth0)."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "config").write_text(
+            "lxc.uts.name = box\n"
+            "lxc.net.0.type = veth\n"
+            "lxc.net.0.link = lxcbr0\n"
+        )
+        self._run(rootfs, container)
+        net_dir = rootfs / "etc" / "systemd" / "network"
+        dhcp = net_dir / "10-dhcp.network"
+        assert dhcp.is_file()
+        content = dhcp.read_text()
+        assert "Name=eth0" in content
+        assert "DHCP=yes" in content
+        # The static unit must NOT be written in DHCP mode.
+        assert not (net_dir / "10-static.network").exists()
+
+    def test_static_ip_keeps_static_no_dhcp(self, tmp_path):
+        """lxc.net.0.ipv4.address set → 10-static.network, never 10-dhcp."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "config").write_text(
+            "lxc.net.0.link = lxcbr0\n"
+            "lxc.net.0.ipv4.address = 10.0.0.5/24\n"
+            "lxc.net.0.ipv4.gateway = 10.0.0.1\n"
+        )
+        self._run(rootfs, container)
+        net_dir = rootfs / "etc" / "systemd" / "network"
+        static = net_dir / "10-static.network"
+        assert static.is_file()
+        assert "Address=10.0.0.5/24" in static.read_text()
+        assert not (net_dir / "10-dhcp.network").exists()
+
+    def test_network_none_writes_neither(self, tmp_path):
+        """No lxc.net.0.link (--network none) → no .network file at all."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "config").write_text(
+            "lxc.uts.name = box\n"
+        )
+        self._run(rootfs, container)
+        net_dir = rootfs / "etc" / "systemd" / "network"
+        assert not (net_dir / "10-dhcp.network").exists()
+        assert not (net_dir / "10-static.network").exists()
+
+    def test_dhcp_carries_dns_and_search(self, tmp_path):
+        """DNS/search from kento-net flow into the DHCP unit."""
+        rootfs, container = self._setup(tmp_path)
+        (container / "config").write_text(
+            "lxc.net.0.link = lxcbr0\n"
+        )
+        (container / "kento-net").write_text(
+            "dns=1.1.1.1\nsearchdomain=example.org\n"
+        )
+        self._run(rootfs, container)
+        dhcp = rootfs / "etc" / "systemd" / "network" / "10-dhcp.network"
+        assert dhcp.is_file()
+        content = dhcp.read_text()
+        assert "DHCP=yes" in content
+        assert "DNS=1.1.1.1" in content
+        assert "Domains=example.org" in content
 
 
 def test_inject_has_mount_point_creation():
