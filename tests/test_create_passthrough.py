@@ -51,7 +51,7 @@ class TestQemuArgCli:
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "--qemu-arg is not supported for LXC" in err
-        assert "--lxc-config" in err  # pointer to future flag
+        assert "--lxc-arg" in err  # pointer to the plain-LXC pass-through flag
 
     def test_qemu_arg_rejected_on_lxc_run(self, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -59,6 +59,64 @@ class TestQemuArgCli:
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "--qemu-arg is not supported for LXC" in err
+
+
+class TestLxcArgCli:
+    """--lxc-arg: exposed on LXC scope, plain-LXC only."""
+
+    def test_lxc_arg_in_lxc_create_help(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["lxc", "create", "--help"])
+        assert exc.value.code == 0
+        assert "--lxc-arg" in capsys.readouterr().out
+
+    def test_lxc_arg_passes_through_on_plain_lxc(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create), \
+             patch("kento.pve.is_pve", return_value=False):
+            main(["lxc", "create",
+                  "--lxc-arg", "lxc.cgroup2.devices.allow = c 10:200 rwm",
+                  "--lxc-arg", "lxc.cap.drop = sys_module",
+                  "debian:12"])
+        assert mock_create.call_args[1]["lxc_args"] == [
+            "lxc.cgroup2.devices.allow = c 10:200 rwm",
+            "lxc.cap.drop = sys_module",
+        ]
+
+    def test_lxc_arg_default_none(self):
+        mock_create = MagicMock()
+        with patch("kento.create.create", mock_create), \
+             patch("kento.pve.is_pve", return_value=False):
+            main(["lxc", "create", "debian:12"])
+        assert mock_create.call_args[1]["lxc_args"] is None
+
+    def test_lxc_arg_rejected_on_vm_scope(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create",
+                  "--lxc-arg", "lxc.cap.drop = sys_module", "debian:12"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--lxc-arg is not applicable to VM modes" in err
+
+    def test_lxc_arg_rejected_on_pve_host(self, capsys):
+        """On a PVE host (auto-detect) --lxc-arg redirects to --pve-arg."""
+        with pytest.raises(SystemExit) as exc, \
+                patch("kento.pve.is_pve", return_value=True):
+            main(["lxc", "create",
+                  "--lxc-arg", "lxc.cap.drop = sys_module", "debian:12"])
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--lxc-arg is not supported on a PVE host" in err
+        assert "--pve-arg" in err
+
+    def test_lxc_arg_rejected_on_explicit_pve(self, capsys):
+        with pytest.raises(SystemExit) as exc, \
+                patch("kento.pve.is_pve", return_value=True):
+            main(["lxc", "create", "--pve",
+                  "--lxc-arg", "lxc.cap.drop = sys_module", "debian:12"])
+        assert exc.value.code == 1
+        assert "--lxc-arg is not supported on a PVE host" in \
+            capsys.readouterr().err
 
 
 class TestPveArgCli:
@@ -97,7 +155,7 @@ class TestPveArgCli:
 
     def test_pve_arg_on_plain_lxc_rejected(self, capsys):
         """--pve-arg on plain LXC (is_pve() False, auto-detect) errors with
-        a pointer to the future --lxc-config flag."""
+        a pointer to the --lxc-arg flag (the plain-LXC pass-through)."""
         with pytest.raises(SystemExit) as exc, \
                 patch("kento.pve.is_pve", return_value=False):
             main(["lxc", "create",
@@ -105,7 +163,7 @@ class TestPveArgCli:
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "--pve-arg is not supported for plain LXC" in err
-        assert "--lxc-config" in err
+        assert "--lxc-arg" in err
 
     def test_pve_arg_on_plain_vm_rejected(self, capsys):
         """--pve-arg on plain VM (is_pve() False, auto-detect) errors."""
@@ -217,6 +275,118 @@ class TestQemuArgStorage:
                        qemu_args=["-object memory-backend-memfd,id=mem2,size=1G"])
         err = capsys.readouterr().err
         assert "memory-backend-memfd" in err
+
+
+class TestLxcArgStorage:
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_args_written_and_in_config(self, mock_root, mock_layers,
+                                            mock_run, tmp_path):
+        """--lxc-arg values land in kento-lxc-args AND the generated config."""
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.pve.is_pve", return_value=False):
+            create("myimage:latest", name="test", mode="lxc",
+                   lxc_args=["lxc.cgroup2.devices.allow = c 10:200 rwm",
+                             "lxc.cap.drop = sys_module"])
+
+        d = lxc_base / "test"
+        out = (d / "kento-lxc-args").read_text()
+        assert out == ("lxc.cgroup2.devices.allow = c 10:200 rwm\n"
+                       "lxc.cap.drop = sys_module\n")
+        config = (d / "config").read_text()
+        assert "lxc.cgroup2.devices.allow = c 10:200 rwm" in config
+        assert "lxc.cap.drop = sys_module" in config
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_no_lxc_args_no_file(self, mock_root, mock_layers,
+                                 mock_run, tmp_path):
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.pve.is_pve", return_value=False):
+            create("myimage:latest", name="test", mode="lxc")
+        assert not (lxc_base / "test" / "kento-lxc-args").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_arg_denied_key_rejected(self, mock_root, mock_layers,
+                                         mock_run, tmp_path, capsys):
+        """A denied structural key (lxc.rootfs.path) kills the create."""
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.pve.is_pve", return_value=False):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc",
+                       lxc_args=["lxc.rootfs.path = /evil"])
+        err = capsys.readouterr().err
+        assert "lxc.rootfs.path" in err
+        assert "kento manages" in err
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_arg_denied_net_prefix_rejected(self, mock_root, mock_layers,
+                                                mock_run, tmp_path, capsys):
+        """The lxc.net. prefix denial catches lxc.net.0.* keys."""
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.pve.is_pve", return_value=False):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc",
+                       lxc_args=["lxc.net.0.type = phys"])
+        assert "lxc.net." in capsys.readouterr().err
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_arg_rejected_on_vm_mode(self, mock_root, mock_layers,
+                                         mock_run, tmp_path, capsys):
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        with patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or vm_base) / n), \
+             patch("kento.pve.is_pve", return_value=False):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="vm",
+                       lxc_args=["lxc.cap.drop = sys_module"])
+        assert "not applicable to VM modes" in capsys.readouterr().err
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_arg_rejected_on_pve_lxc_mode(self, mock_root, mock_layers,
+                                              mock_run, tmp_path, capsys):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.pve.PVE_DIR", pve):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="pve",
+                       lxc_args=["lxc.cap.drop = sys_module"])
+        err = capsys.readouterr().err
+        assert "--lxc-arg is not supported on a PVE host" in err
 
 
 class TestPveArgStorage:

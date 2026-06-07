@@ -170,6 +170,74 @@ def test_lxc_pve_arg_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Plain LXC: --lxc-arg pass-through block (replace / clear / skip + denylist)
+# ---------------------------------------------------------------------------
+
+def test_lxc_arg_replace(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "config").write_text(_LXC_CONFIG)
+    (d / "kento-lxc-args").write_text("lxc.cap.drop = old\n")
+    # Reflect the existing block in the config, as create would have appended.
+    (d / "config").write_text(_LXC_CONFIG + "lxc.cap.drop = old\n")
+    with _env(d, "lxc"):
+        assert set_cmd("box", lxc_args=["lxc.cap.drop = sys_module"]) == 0
+    content = (d / "config").read_text()
+    assert "lxc.cap.drop = old" not in content
+    assert "lxc.cap.drop = sys_module" in content
+    assert (d / "kento-lxc-args").read_text() == "lxc.cap.drop = sys_module\n"
+    # Structural lines preserved.
+    assert "lxc.rootfs.path = dir:/x/rootfs" in content
+
+
+def test_lxc_arg_clear(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "config").write_text(_LXC_CONFIG + "lxc.cap.drop = old\n")
+    (d / "kento-lxc-args").write_text("lxc.cap.drop = old\n")
+    with _env(d, "lxc"):
+        assert set_cmd("box", lxc_args=[""]) == 0
+    assert not (d / "kento-lxc-args").exists()
+    assert "lxc.cap.drop = old" not in (d / "config").read_text()
+
+
+def test_lxc_arg_skip_leaves_untouched(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "config").write_text(_LXC_CONFIG + "lxc.cap.drop = keep\n")
+    (d / "kento-lxc-args").write_text("lxc.cap.drop = keep\n")
+    with _env(d, "lxc"):
+        # Setting only memory must not disturb the lxc-args block.
+        assert set_cmd("box", memory=1024) == 0
+    assert (d / "kento-lxc-args").read_text() == "lxc.cap.drop = keep\n"
+    assert "lxc.cap.drop = keep" in (d / "config").read_text()
+
+
+def test_lxc_arg_denied_key_rejected(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "config").write_text(_LXC_CONFIG)
+    with _env(d, "lxc"):
+        assert set_cmd("box", lxc_args=["lxc.rootfs.path = /evil"]) == 1
+    assert not (d / "kento-lxc-args").exists()
+
+
+def test_lxc_arg_rejected_on_vm(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    with _env(d, "vm"):
+        assert set_cmd("box", lxc_args=["lxc.cap.drop = x"]) == 1
+    assert not (d / "kento-lxc-args").exists()
+
+
+def test_lxc_arg_rejected_on_pve_lxc(tmp_path):
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
+    with _env(d, "pve"), _pve_patch(pve_dir):
+        assert set_cmd("box", lxc_args=["lxc.cap.drop = x"]) == 1
+    assert not (d / "kento-lxc-args").exists()
+
+
+# ---------------------------------------------------------------------------
 # PVE-LXC: surgical .conf rewrite
 # ---------------------------------------------------------------------------
 

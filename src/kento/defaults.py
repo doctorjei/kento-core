@@ -53,6 +53,35 @@ PVE_ARG_DENYLIST = (
     "hostname:",
 )
 
+# Substrings that, if present in a --lxc-arg value, get rejected. These are
+# the keys generate_config() (create.py) emits structurally for plain-LXC's
+# native config, plus the two cgroup lines `kento set` manages. Re-emitting
+# any of them via pass-through would either duplicate or clobber the
+# kento-managed line — the very wiring (rootfs, hooks, network, apparmor,
+# mount/tty, resource limits) that makes the instance boot.
+#   lxc.uts.name           : container name (kento owns it).
+#   lxc.rootfs.path        : overlay rootfs dir (kento owns it).
+#   lxc.hook.              : pre-start/post-stop/start-host/version hooks.
+#   lxc.net.               : the veth/none NIC wiring (--network owns it).
+#   lxc.mount.auto         : the proc/sys/cgroup auto-mounts.
+#   lxc.tty.max            : kento default.
+#   lxc.apparmor.          : profile/allow_nesting/allow_incomplete.
+#   lxc.cgroup2.memory.max : kento manages via --memory / `kento set`.
+#   lxc.cgroup2.cpu.max    : kento manages via --cores / `kento set`.
+# Everything else (lxc.mount.entry, lxc.environment, lxc.cgroup2.* other
+# than the two above, lxc.idmap, lxc.cap.*, etc.) is fair game.
+LXC_ARG_DENYLIST = (
+    "lxc.uts.name",
+    "lxc.rootfs.path",
+    "lxc.hook.",
+    "lxc.net.",
+    "lxc.mount.auto",
+    "lxc.tty.max",
+    "lxc.apparmor.",
+    "lxc.cgroup2.memory.max",
+    "lxc.cgroup2.cpu.max",
+)
+
 
 # --- Config file paths ---
 CONFIG_DIR = Path("/etc/kento")

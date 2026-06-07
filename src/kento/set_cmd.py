@@ -16,6 +16,7 @@ Field validity (mode strings: "lxc", "pve" (pve-lxc!), "vm", "pve-vm"):
   memory / cores : all four modes.
   mac / qemu_args: VM modes only (vm, pve-vm).
   pve_args       : PVE modes only (pve, pve-vm).
+  lxc_args       : plain LXC only ("lxc").
 
 List semantics for qemu_args / pve_args (argparse action="append",
 default=None):
@@ -29,6 +30,7 @@ import sys
 from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_any
+from kento.defaults import LXC_ARG_DENYLIST
 
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
@@ -151,7 +153,7 @@ def _drop_passthrough_block(content: str, known_lines: list[str]) -> str:
 
 
 def set_cmd(name, *, memory=None, cores=None, mac=None,
-            qemu_args=None, pve_args=None) -> int:
+            qemu_args=None, pve_args=None, lxc_args=None) -> int:
     """Mutate scalar settings on a stopped instance. Returns an exit code."""
     require_root()
 
@@ -161,9 +163,10 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
 
     # No fields at all -> usage error.
     if (memory is None and cores is None and mac is None
-            and qemu_args is None and pve_args is None):
+            and qemu_args is None and pve_args is None and lxc_args is None):
         print("Error: nothing to set. Provide at least one of --memory, "
-              "--cores, --mac, --qemu-arg, --pve-arg.", file=sys.stderr)
+              "--cores, --mac, --qemu-arg, --pve-arg, --lxc-arg.",
+              file=sys.stderr)
         return 1
 
     if is_running(container_dir, mode):
@@ -187,12 +190,35 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
         if mode == "lxc":
             print("Error: --pve-arg is not supported for plain LXC; it appends "
                   "lines to the PVE lxc config and only applies on PVE hosts. "
-                  "Plain LXC has no PVE config.", file=sys.stderr)
+                  "Plain LXC has no PVE config. For plain-LXC native config "
+                  "pass-through use --lxc-arg.", file=sys.stderr)
         else:  # vm
             print("Error: --pve-arg is not supported for plain VM; it appends "
                   "lines to the PVE qm config and only applies on PVE hosts. "
                   "Plain VM has no PVE config.", file=sys.stderr)
         return 1
+    if lxc_args is not None and mode != "lxc":
+        if mode == "pve":
+            print("Error: --lxc-arg is not supported on a PVE host. On PVE the "
+                  "LXC config is the PVE config; use --pve-arg, which carries "
+                  "raw lxc.* lines.", file=sys.stderr)
+        else:  # vm / pve-vm
+            print("Error: --lxc-arg is not applicable to VM modes (no native "
+                  "LXC config).", file=sys.stderr)
+        return 1
+
+    # Denylist: reject --lxc-arg values that collide with kento's structural
+    # plain-LXC config lines (mirrors create.py's _validate_lxc_args, but
+    # returns an exit code instead of sys.exit).
+    if lxc_args is not None:
+        for arg in lxc_args:
+            for needle in LXC_ARG_DENYLIST:
+                if needle in arg:
+                    print(f"Error: kento manages {needle!r} directly — "
+                          f"--lxc-arg {arg!r} would collide with kento's own "
+                          "plain-LXC config. Drop the flag or file an issue "
+                          "if you need it overridable.", file=sys.stderr)
+                    return 1
 
     if mac is not None and not _MAC_RE.match(mac):
         print(f"Error: invalid MAC address {mac!r}; expected format "
@@ -211,7 +237,7 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
     if mode == "vm":
         _apply_vm(container_dir, memory, cores, mac, qemu_args)
     elif mode == "lxc":
-        _apply_lxc(container_dir, memory, cores)
+        _apply_lxc(container_dir, memory, cores, lxc_args)
     elif mode == "pve":
         _apply_pve_lxc(container_dir, memory, cores, pve_args)
     elif mode == "pve-vm":
@@ -259,7 +285,9 @@ def _apply_vm(container_dir, memory, cores, mac, qemu_args) -> None:
 # Plain LXC: metadata + patch native `config` cgroup lines.
 # ---------------------------------------------------------------------------
 
-def _apply_lxc(container_dir, memory, cores) -> None:
+def _apply_lxc(container_dir, memory, cores, lxc_args=None) -> None:
+    from kento.pve import _read_passthrough_lines
+
     config_path = container_dir / "config"
     content = config_path.read_text() if config_path.is_file() else ""
     changed = False
@@ -273,6 +301,24 @@ def _apply_lxc(container_dir, memory, cores) -> None:
         content = _replace_config_raw(
             content, "lxc.cgroup2.cpu.max", f"{cores * 100000} 100000")
         changed = True
+
+    # lxc_args: drop the OLD pass-through block (read before overwriting the
+    # metadata file), update/clear kento-lxc-args, then re-append the new
+    # block at the end of `config`. Mirrors _apply_pve_lxc's pve_args path.
+    lxc_action = _classify_list(lxc_args)
+    if lxc_action != "skip":
+        old_block = _read_passthrough_lines(container_dir / "kento-lxc-args")
+        content = _drop_passthrough_block(content, old_block)
+        changed = True
+        if lxc_action == "clear":
+            (container_dir / "kento-lxc-args").unlink(missing_ok=True)
+        else:  # replace
+            (container_dir / "kento-lxc-args").write_text(
+                "\n".join(_nonempty(lxc_args)) + "\n")
+            new_block = _read_passthrough_lines(container_dir / "kento-lxc-args")
+            body = content.rstrip("\n")
+            content = body + "\n" + "\n".join(new_block) + "\n"
+
     if changed:
         config_path.write_text(content)
 

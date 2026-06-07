@@ -90,9 +90,8 @@ The `--vmid` flag only works with PVE modes. Remove `--vmid` or add
 
 `--qemu-arg` appends verbatim flags to the QEMU argv, so it only
 applies to VM modes (plain `vm` and `pve-vm`). LXC modes never invoke
-QEMU. For PVE-LXC config pass-through use `--pve-arg` instead; raw
-config pass-through for plain LXC is not yet implemented (tracked as
-the future `--lxc-config` flag).
+QEMU. For PVE-LXC config pass-through use `--pve-arg`; for plain-LXC
+native config pass-through use `--lxc-arg`.
 
 ```
 sudo kento vm create <image> --qemu-arg '-device virtio-rng-pci'
@@ -102,8 +101,9 @@ sudo kento vm create <image> --qemu-arg '-device virtio-rng-pci'
 
 `--pve-arg` appends lines to the PVE qm/lxc config, which only exists
 on PVE hosts. Either run on a PVE host (kento will auto-detect and use
-pve-lxc), force it with `--pve`, or drop the flag. Plain-LXC raw config
-pass-through is a separate, not-yet-implemented feature (`--lxc-config`).
+pve-lxc), force it with `--pve`, or drop the flag. For plain-LXC raw
+config pass-through use the separate `--lxc-arg` flag, which appends
+lines verbatim to the native LXC `config`.
 
 ### "Error: --pve-arg is not supported for plain VM"
 

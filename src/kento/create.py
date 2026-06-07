@@ -10,7 +10,8 @@ from kento import (LXC_BASE, VM_BASE, _scan_namespace, next_instance_name,
                    require_root, sanitize_image_name, upper_base, validate_name)
 from kento.cloudinit import detect_cloudinit, write_seed
 from kento.defaults import (LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING,
-                            PVE_ARG_DENYLIST, QEMU_ARG_DENYLIST)
+                            LXC_ARG_DENYLIST, PVE_ARG_DENYLIST,
+                            QEMU_ARG_DENYLIST)
 from kento.hook import write_hook
 from kento.inject import write_inject
 from kento.layers import resolve_layers
@@ -74,6 +75,24 @@ def _validate_pve_args(pve_args: list[str]) -> None:
                       f"--pve-arg {arg!r} would collide with kento's own "
                       "PVE config. Drop the flag or file an issue if you "
                       "need it overridable.", file=sys.stderr)
+                sys.exit(1)
+
+
+def _validate_lxc_args(lxc_args: list[str]) -> None:
+    """Reject --lxc-arg values that duplicate kento-managed plain-LXC keys.
+
+    See LXC_ARG_DENYLIST. Same escape-hatch reasoning as qemu-arg/pve-arg:
+    the denylist names only the structural keys generate_config() emits (plus
+    the cgroup lines `kento set` manages); everything else is user-authored
+    and passed through verbatim.
+    """
+    for arg in lxc_args:
+        for needle in LXC_ARG_DENYLIST:
+            if needle in arg:
+                print(f"Error: kento manages {needle!r} directly — "
+                      f"--lxc-arg {arg!r} would collide with kento's own "
+                      "plain-LXC config. Drop the flag or file an issue if "
+                      "you need it overridable.", file=sys.stderr)
                 sys.exit(1)
 
 
@@ -190,6 +209,14 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
     if cores is not None:
         lines.append(f"lxc.cgroup2.cpu.max = {cores * 100000} 100000")
 
+    # Pass-through lines (E1b): each non-empty line in kento-lxc-args is
+    # appended verbatim AFTER kento's own lines. LXC's config parser is
+    # last-value-wins, so appending lets the user override non-structural
+    # defaults. The LXC_ARG_DENYLIST (checked in create.py / set_cmd.py)
+    # already rejected the structural collisions.
+    from kento.pve import _read_passthrough_lines
+    lines.extend(_read_passthrough_lines(lxc_dir / "kento-lxc-args"))
+
     return "\n".join(lines) + "\n"
 
 
@@ -292,6 +319,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            config_mode: str = "auto",
            qemu_args: list[str] | None = None,
            pve_args: list[str] | None = None,
+           lxc_args: list[str] | None = None,
            net_type: str | None = None,
            force: bool = False) -> None:
     require_root()
@@ -303,6 +331,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         _validate_qemu_args(qemu_args)
     if pve_args:
         _validate_pve_args(pve_args)
+    if lxc_args:
+        _validate_lxc_args(lxc_args)
 
     # Validate and read SSH key files early (before any filesystem changes)
     ssh_key_contents: str | None = None
@@ -351,6 +381,22 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 mode = "pve-vm"
             else:
                 mode = "pve"
+
+    # --lxc-arg targets plain-LXC's native config ONLY. On a PVE host the
+    # LXC config IS the PVE .conf (which carries raw lxc.* lines via
+    # --pve-arg), and VM modes have no native LXC config at all. Reject here
+    # — after PVE promotion so `mode` is the resolved one — rather than
+    # silently writing kento-lxc-args that nothing would ever consume.
+    if lxc_args:
+        if mode == "pve":
+            print("Error: --lxc-arg is not supported on a PVE host. On PVE "
+                  "the LXC config is the PVE config; use --pve-arg, which "
+                  "carries raw lxc.* lines.", file=sys.stderr)
+            sys.exit(1)
+        if mode in ("vm", "pve-vm"):
+            print("Error: --lxc-arg is not applicable to VM modes (no native "
+                  "LXC config).", file=sys.stderr)
+            sys.exit(1)
 
     # Pre-validate PVE snippets storage (before any filesystem writes).
     # pve-vm always needs it; pve-lxc needs it when port/memory/cores set
@@ -556,6 +602,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         if pve_args:
             (container_dir / "kento-pve-args").write_text(
                 "\n".join(pve_args) + "\n")
+        # --lxc-arg (E1b): raw lines into plain-LXC's native config. Written
+        # BEFORE generate_config() so it can read the file back and append
+        # the block verbatim after kento's own lines. Scope-guarded above to
+        # plain lxc only; preserved verbatim across scrub.
+        if lxc_args:
+            (container_dir / "kento-lxc-args").write_text(
+                "\n".join(lxc_args) + "\n")
 
         # Write static IP config if requested
         if ip or dns or searchdomain:
