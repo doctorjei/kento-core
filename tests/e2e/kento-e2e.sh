@@ -22,7 +22,7 @@ set -u
 
 # ---------- constants ----------
 
-IMAGE="localhost/gemet-bifrost-kento:1.4.2"
+IMAGE="localhost/gemet-bifrost-kento:1.7.0"
 BRIDGE="lxcbr0"
 LXC_IP="10.0.3.200/24"
 LXC_GW="10.0.3.1"
@@ -1942,7 +1942,7 @@ diag "========================================"
 diag "SECTION B: Multi-image tests"
 diag "========================================"
 
-YGG_IMAGE="localhost/gemet-ygg-kento:1.4.2"
+YGG_IMAGE="localhost/gemet-ygg-kento:1.7.0"
 
 # Pre-flight: check if yggdrasil image exists
 if podman image exists "$YGG_IMAGE" 2>/dev/null; then
