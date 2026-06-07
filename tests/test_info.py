@@ -849,6 +849,27 @@ def test_info_json_passthrough_both_files(mock_running, tmp_path, capsys):
 
 
 @patch("kento.info.is_running", return_value=False)
+def test_info_passthrough_lxc_args(mock_running, tmp_path, capsys):
+    """lxc_args surface in JSON and under --verbose human output, on par
+    with qemu_args / pve_args."""
+    d = _make_container(tmp_path)
+    (d / "kento-lxc-args").write_text(
+        "lxc.cgroup2.devices.allow = c 10:200 rwm\nlxc.cap.drop = sys_admin\n")
+
+    info("mybox", container_dir=d, mode="lxc", as_json=True)
+    data = json.loads(capsys.readouterr().out)
+    assert data["lxc_args"] == [
+        "lxc.cgroup2.devices.allow = c 10:200 rwm",
+        "lxc.cap.drop = sys_admin",
+    ]
+
+    info("mybox", container_dir=d, mode="lxc", verbose=True)
+    out = capsys.readouterr().out
+    assert "--lxc-arg:" in out
+    assert "lxc.cgroup2.devices.allow = c 10:200 rwm" in out
+
+
+@patch("kento.info.is_running", return_value=False)
 def test_info_json_passthrough_empty_when_absent(mock_running, tmp_path, capsys):
     """JSON output includes qemu_args / pve_args as empty lists when files
     are absent. Machine consumers get a stable schema."""
@@ -859,6 +880,7 @@ def test_info_json_passthrough_empty_when_absent(mock_running, tmp_path, capsys)
     data = json.loads(capsys.readouterr().out)
     assert data["qemu_args"] == []
     assert data["pve_args"] == []
+    assert data["lxc_args"] == []
 
 
 @patch("kento.info.is_running", return_value=False)

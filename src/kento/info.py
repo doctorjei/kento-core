@@ -166,6 +166,7 @@ def info(name: str, *, container_dir: Path, mode: str,
     # output surfaces them only under --verbose and only when non-empty.
     data["qemu_args"] = _read_passthrough_args(container_dir, "kento-qemu-args")
     data["pve_args"] = _read_passthrough_args(container_dir, "kento-pve-args")
+    data["lxc_args"] = _read_passthrough_args(container_dir, "kento-lxc-args")
 
     # Verbose additions
     if verbose:
@@ -249,7 +250,8 @@ def _print_human(data: dict, verbose: bool, *,
 
         qemu_args = data.get("qemu_args", [])
         pve_args = data.get("pve_args", [])
-        if qemu_args or pve_args:
+        lxc_args = data.get("lxc_args", [])
+        if qemu_args or pve_args or lxc_args:
             print("Pass-through flags:")
             if qemu_args:
                 print("  --qemu-arg:")
@@ -258,4 +260,8 @@ def _print_human(data: dict, verbose: bool, *,
             if pve_args:
                 print("  --pve-arg:")
                 for line in pve_args:
+                    print(f"    {line}")
+            if lxc_args:
+                print("  --lxc-arg:")
+                for line in lxc_args:
                     print(f"    {line}")

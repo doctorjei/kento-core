@@ -66,7 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owns — `lxc.uts.name`, `lxc.rootfs.path`, `lxc.hook.`, `lxc.net.`,
   `lxc.mount.auto`, `lxc.tty.max`, `lxc.apparmor.`, and the two cgroup
   lines `set` manages (`lxc.cgroup2.memory.max`, `lxc.cgroup2.cpu.max`).
-  Everything else passes through verbatim, last-value-wins.
+  Everything else passes through verbatim, last-value-wins. Surfaced in
+  `kento info` (JSON always; human output under `-v` when present), on
+  par with `--qemu-arg` / `--pve-arg`.
 - `kento suspend <name>` / `kento resume <name>` — pause and un-pause a
   running VM's vCPUs (a *pause to RAM*: the VM process keeps running and
   its memory is retained — this is **not** a shutdown). **VM-modes-only**:
