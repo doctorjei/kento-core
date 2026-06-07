@@ -6,7 +6,10 @@ subsequent refactor steps by the VM / PVE-VM code paths) with two positional
 args: ROOTFS and CONTAINER_DIR.
 """
 
+import os
 from pathlib import Path
+
+import pytest
 
 from kento.inject import generate_inject, write_inject
 
@@ -264,6 +267,10 @@ class TestInjectSSHUserExecution:
         assert ak.is_file()
         assert "ssh-rsa AAAA" in ak.read_text()
 
+    @pytest.mark.skipif(
+        os.geteuid() != 0,
+        reason="asserts chown to a fixed non-root uid (1000); requires root",
+    )
     def test_nonroot_user_resolves_home(self, tmp_path):
         """kento-ssh-user=droste resolves home from /etc/passwd and writes there."""
         rootfs, container = self._setup(tmp_path)
