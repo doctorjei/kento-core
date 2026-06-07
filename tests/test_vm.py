@@ -302,9 +302,10 @@ class TestStartVm:
     def test_start_detaches_daemons(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         # Both long-lived daemons (virtiofsd, qemu) must fully detach from the
         # caller: redirect stdin to /dev/null and run in their own session.
-        # Otherwise qemu (-nographic binds the guest serial console to stdio)
-        # holds the inherited stdin and a non-interactive `kento start` (e.g.
-        # over ssh-exec) hangs until the VM exits.
+        # Otherwise qemu holds the inherited stdin and a non-interactive
+        # `kento start` (e.g. over ssh-exec) hangs until the VM exits. (Serial
+        # now goes to a unix socket, not stdio, but detaching stdin is still
+        # the correct invariant.)
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -481,8 +482,21 @@ class TestStartVm:
         cpu_idx = qemu_args.index("-cpu")
         assert qemu_args[cpu_idx + 1] == "host,vmx=off,svm=off"
 
-        # Nographic
-        assert "-nographic" in qemu_args
+        # Display: -display none (not -nographic). -nographic would alias the
+        # guest serial to QEMU's stdio; we attach serial to a socket instead.
+        assert "-nographic" not in qemu_args
+        display_idx = qemu_args.index("-display")
+        assert qemu_args[display_idx + 1] == "none"
+
+        # Serial + QMP unix sockets (VM-interactive wiring).
+        serial_idx = qemu_args.index("-serial")
+        assert qemu_args[serial_idx + 1] == (
+            f"unix:{lxc_dir / 'serial.sock'},server=on,wait=off"
+        )
+        qmp_idx = qemu_args.index("-qmp")
+        assert qemu_args[qmp_idx + 1] == (
+            f"unix:{lxc_dir / 'qmp.sock'},server=on,wait=off"
+        )
 
         # virtiofs chardev and device
         socket_path = str(lxc_dir / "virtiofsd.sock")
@@ -763,6 +777,26 @@ class TestStopVm:
         mock_kw.assert_any_call(tmp_path / "kento-qemu-pid", force=False)
         mock_kw.assert_any_call(tmp_path / "kento-virtiofsd-pid", force=False)
         assert not (tmp_path / "virtiofsd.sock").exists()
+
+    @patch("kento.vm._is_mountpoint", return_value=False)
+    @patch("kento.vm._kill_and_wait")
+    def test_stop_unlinks_serial_and_qmp_sockets(self, mock_kw, mock_mp, tmp_path):
+        """stop_vm cleans up serial.sock and qmp.sock alongside virtiofsd.sock."""
+        (tmp_path / "virtiofsd.sock").write_text("")
+        (tmp_path / "serial.sock").write_text("")
+        (tmp_path / "qmp.sock").write_text("")
+
+        stop_vm(tmp_path)
+
+        assert not (tmp_path / "virtiofsd.sock").exists()
+        assert not (tmp_path / "serial.sock").exists()
+        assert not (tmp_path / "qmp.sock").exists()
+
+    @patch("kento.vm._is_mountpoint", return_value=False)
+    @patch("kento.vm._kill_and_wait")
+    def test_stop_socket_cleanup_tolerates_absent(self, mock_kw, mock_mp, tmp_path):
+        """Missing serial/qmp sockets (older instances) don't break stop."""
+        stop_vm(tmp_path)  # should not raise
 
     @patch("kento.vm.subprocess.run", return_value=subprocess.CompletedProcess([], 0))
     @patch("kento.vm._is_mountpoint", return_value=True)
@@ -1071,6 +1105,30 @@ class TestStartVmQemuArgsPassthrough:
         assert first_m < last_m
         assert qemu_args[first_m + 1] == "512"
         assert qemu_args[last_m + 1] == "2048"
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_serial_qmp_precede_passthrough(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """kento's -serial/-qmp must appear BEFORE any pass-through args so a
+        user --qemu-arg can still override them (QEMU last-occurrence wins)."""
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "kento-qemu-args").write_text("-device=virtio-rng-pci\n")
+        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        passthrough_idx = qemu_args.index("-device=virtio-rng-pci")
+        assert qemu_args.index("-serial") < passthrough_idx
+        assert qemu_args.index("-qmp") < passthrough_idx
+        assert qemu_args.index("-display") < passthrough_idx
 
     @patch("kento.subprocess_util.subprocess.run",
            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))

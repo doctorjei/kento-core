@@ -282,6 +282,15 @@ def start_vm(container_dir: Path, name: str) -> None:
     # pattern as kento-memory/kento-cores above.
     nesting_file = container_dir / "kento-nesting"
     nesting_on = nesting_file.is_file() and nesting_file.read_text().strip() == "1"
+    # Serial + QMP unix sockets (v1.4.0 VM-interactive). Mirror the
+    # virtiofsd.sock naming: Path under container_dir, str()'d into the argv.
+    # serial.sock carries the guest console (console=ttyS0 in -append below);
+    # a later `attach` command relays a tty to it. qmp.sock exposes QEMU's
+    # monitor protocol (item-1 suspend/resume prep). Both use server=on so
+    # QEMU is the listener, wait=off so it does NOT block at boot waiting for
+    # a client (QEMU is started detached).
+    serial_socket_path = container_dir / "serial.sock"
+    qmp_socket_path = container_dir / "qmp.sock"
     qemu_cmd = ["qemu-system-x86_64",
          "-kernel", str(kernel),
          "-initrd", str(initramfs),
@@ -299,7 +308,12 @@ def start_vm(container_dir: Path, name: str) -> None:
         cpu = "host" if nesting_on else "host,vmx=off,svm=off"
         qemu_cmd += ["-enable-kvm", "-cpu", cpu]
     qemu_cmd += [
-         "-nographic",
+         # -display none (not -nographic): suppress any graphical display
+         # without aliasing the guest serial to QEMU's stdio (QEMU is
+         # detached). Serial is attached explicitly to serial.sock below.
+         "-display", "none",
+         "-serial", f"unix:{serial_socket_path},server=on,wait=off",
+         "-qmp", f"unix:{qmp_socket_path},server=on,wait=off",
          "-chardev", f"socket,id=vfs,path={socket_path}",
          "-device", "vhost-user-fs-pci,chardev=vfs,tag=rootfs",
          "-object", f"memory-backend-memfd,id=mem,size={memory}M,share=on",
@@ -393,5 +407,7 @@ def stop_vm(container_dir: Path, *, force: bool = False) -> None:
                   file=sys.stderr)
             sys.exit(1)
 
-    # Clean up socket
+    # Clean up sockets (virtiofsd + serial/qmp from VM-interactive wiring).
     (container_dir / "virtiofsd.sock").unlink(missing_ok=True)
+    (container_dir / "serial.sock").unlink(missing_ok=True)
+    (container_dir / "qmp.sock").unlink(missing_ok=True)
