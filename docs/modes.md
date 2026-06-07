@@ -143,6 +143,34 @@ the VM appears in the Proxmox web UI.
 - **Instance directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** QEMU, virtiofsd, kernel + initramfs in image, PVE host
 
+## Interactive access
+
+Three commands open or run things inside an instance. Each is available
+at all three CLI levels (`kento <cmd>`, `kento lxc <cmd>`, `kento vm
+<cmd>`); the mechanism is chosen from the instance's recorded mode.
+
+| | lxc | pve-lxc | vm | pve-vm |
+|---|---|---|---|---|
+| `attach` / `enter` | `lxc-attach` | `pct enter` | serial console relay | `qm terminal` |
+| `exec` | `lxc-attach -- cmd` | `pct exec -- cmd` | use SSH | use SSH |
+| `logs` | `journalctl` via exec | `journalctl` via exec | use `attach` / SSH | use `attach` / SSH |
+
+- **`attach` (alias `enter`)** opens the interactive console. For plain
+  `vm`, kento connects a pure-Python relay to the guest's serial console
+  unix socket; detach with **Ctrl-] then Q**. The relay needs an
+  interactive terminal (it errors if stdin is not a tty) and a running
+  instance (it errors with a pointer to `kento start` when the serial
+  socket is absent). The guest image must run a getty on `ttyS0`
+  (`console=ttyS0`) or the console will be blank.
+- **`exec`** runs a command inside the instance:
+  `kento exec <name> -- <cmd...>` (the `--` is optional). It is
+  supported for `lxc` and `pve-lxc` only; on `vm` / `pve-vm` it errors
+  with a pointer to use SSH or `kento attach` (there is no in-guest
+  agent yet).
+- **`logs`** runs `journalctl` inside the guest via the exec mechanism,
+  forwarding extra arguments (e.g. `kento logs web -f -n 50`). `lxc` /
+  `pve-lxc` only; `vm` / `pve-vm` error with a pointer to `attach` / SSH.
+
 ## Comparison
 
 | | lxc | pve-lxc | vm | pve-vm |

@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `kento attach` (alias `enter`) — open an instance's interactive
+  console. The mechanism is per-mode: plain `vm` connects a pure-Python
+  relay to the guest's serial console over a unix socket; `lxc` uses
+  `lxc-attach`, `pve-lxc` uses `pct enter`, and `pve-vm` uses `qm
+  terminal`. Available at all three CLI levels (`kento attach`, `kento
+  lxc attach`, `kento vm attach`). The plain-vm serial relay needs an
+  interactive terminal (errors if stdin is not a tty) and a running
+  instance (errors with a pointer to `kento start` when the serial
+  socket is absent); detach with **Ctrl-] then Q**. The guest must run
+  a getty on `ttyS0` (`console=ttyS0`) or the console shows nothing.
+- `kento exec <name> -- <cmd...>` — run a command inside an instance
+  (the `--` is optional). Supported for `lxc` (`lxc-attach -- cmd`) and
+  `pve-lxc` (`pct exec -- cmd`); on `vm` / `pve-vm` it errors with a
+  pointer to use SSH or `kento attach` (no in-guest agent yet).
+  Available at all three CLI levels.
+- `kento logs <name> [journalctl-args...]` — run `journalctl` inside
+  the guest via the exec mechanism, forwarding extra arguments
+  (e.g. `kento logs web -f -n 50`). `lxc` / `pve-lxc` only; `vm` /
+  `pve-vm` error with a pointer to `attach` / SSH. Available at all
+  three CLI levels.
+- Plain `vm` mode now starts QEMU with `-display none` plus a serial
+  unix socket (`serial.sock`) and a QMP unix socket (`qmp.sock`) under
+  the instance directory, replacing the old `-nographic`. The sockets
+  are created at start and removed at stop; existing VM instances get
+  them on their next start (no migration needed). The serial socket
+  backs `kento attach`; the QMP socket is groundwork for future
+  suspend/resume. pve-vm already exposed `serial0: socket` (used by
+  `qm terminal`).
 - Nested-bridging support inside guests. When `--allow-nesting` is set,
   kento injects a systemd-networkd drop-in into the guest at
   `/etc/systemd/network/10-kento-nested-veth.network`

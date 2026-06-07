@@ -195,6 +195,42 @@ The VM is already started. Stop it before starting again:
 sudo kento vm stop <name>
 ```
 
+### `kento attach` on a VM shows a blank screen / no prompt
+
+The serial relay is connected, but the guest is not putting a login
+prompt on the serial line. Plain-VM `attach` reads the guest's serial
+console (`ttyS0`); the image must run a getty there and boot with
+`console=ttyS0`:
+
+```
+# Inside the composed rootfs (instance stopped):
+sudo ls /var/lib/kento/vm/<name>/rootfs/etc/systemd/system/getty.target.wants/
+```
+
+Look for `serial-getty@ttyS0.service`. Kento does not patch this at
+runtime — see the [image contract](image-contract.md). For VMs you can
+also just use SSH (`ssh -p <port> <user>@localhost`). Detach the serial
+console with **Ctrl-] then Q**.
+
+### "Error: serial socket not found" / "instance not running" on `attach`
+
+`kento attach` on a plain VM needs the guest's `serial.sock`, which only
+exists while the instance is running. Start it first:
+
+```
+sudo kento start <name>
+```
+
+The relay also requires an interactive terminal — running `kento attach`
+with stdin redirected or over a non-tty channel is rejected.
+
+### "Error: exec/logs is not supported for VM"
+
+`kento exec` and `kento logs` shell into the guest via `lxc-attach` /
+`pct exec`, which only exist for LXC and PVE-LXC instances. There is no
+in-guest agent for `vm` / `pve-vm`. Use SSH
+(`ssh -p <port> <user>@localhost`) or `kento attach` instead.
+
 ## VM boot issues
 
 If the VM starts (QEMU launches) but you can't reach it via SSH:

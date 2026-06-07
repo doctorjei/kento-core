@@ -132,7 +132,42 @@ works across all modes (it reads the mode from metadata). You can also
 use `kento lxc start` or `kento vm start` explicitly.
 
 For LXC/PVE instances, you can also use `lxc-attach` / `pct exec` directly.
-For VM instances, use `ssh -p <port> root@localhost`.
+For VM instances, use `ssh -p <port> root@localhost` or `kento attach`.
+
+### Attach / enter
+
+```
+sudo kento attach <name>
+sudo kento enter <name>
+```
+
+Opens the instance's interactive console. The mechanism depends on the
+mode: `lxc` uses `lxc-attach`, `pve-lxc` uses `pct enter`, `pve-vm`
+uses `qm terminal`, and plain `vm` connects a pure-Python relay to the
+guest's serial console. `enter` is an alias for `attach`.
+
+For plain VM, detach the serial console with **Ctrl-] then Q**. It
+requires an interactive terminal and a running instance, and the guest
+image must run a getty on `ttyS0` (`console=ttyS0`).
+
+### Exec
+
+```
+sudo kento exec <name> -- <cmd> [args ...]
+```
+
+Runs a command inside the instance (the `--` is optional). Supported
+for `lxc` and `pve-lxc` only; for `vm` / `pve-vm` use SSH or
+`kento attach`.
+
+### Logs
+
+```
+sudo kento logs <name> [journalctl-args ...]
+```
+
+Runs `journalctl` inside the guest, forwarding any extra arguments
+(e.g. `kento logs web -f -n 50`). `lxc` / `pve-lxc` only.
 
 ### Shutdown / stop
 
@@ -208,6 +243,8 @@ and its writable layer. Errors if the instance is running unless
 ├── kento-qemu-pid              # QEMU PID (when running)
 ├── kento-virtiofsd-pid         # virtiofsd PID (when running)
 ├── virtiofsd.sock              # virtiofsd socket (when running)
+├── serial.sock                 # guest serial console (kento attach; when running)
+├── qmp.sock                    # QMP control socket (when running)
 └── rootfs/                     # Overlayfs mount point
 ```
 
