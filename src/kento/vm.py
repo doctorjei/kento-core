@@ -253,8 +253,10 @@ def start_vm(container_dir: Path, name: str) -> None:
          f"--socket-path={socket_path}",
          f"--shared-dir={rootfs}",
          "--cache=auto"],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     (container_dir / "kento-virtiofsd-pid").write_text(str(virtiofsd.pid) + "\n")
 
@@ -334,8 +336,10 @@ def start_vm(container_dir: Path, name: str) -> None:
 
     qemu = subprocess.Popen(
         qemu_cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     (container_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
 

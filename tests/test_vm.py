@@ -299,6 +299,47 @@ class TestStartVm:
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
+    def test_start_detaches_daemons(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        # Both long-lived daemons (virtiofsd, qemu) must fully detach from the
+        # caller: redirect stdin to /dev/null and run in their own session.
+        # Otherwise qemu (-nographic binds the guest serial console to stdio)
+        # holds the inherited stdin and a non-interactive `kento start` (e.g.
+        # over ssh-exec) hangs until the VM exits.
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-port").write_text("10022:22\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 1001
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 1002
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        assert mock_popen.call_count == 2
+        # virtiofsd is the first Popen call, qemu the second.
+        for call in mock_popen.call_args_list:
+            kwargs = call[1]
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            assert kwargs["start_new_session"] is True
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
     def test_start_passes_port(self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
