@@ -109,7 +109,16 @@ Options:
 | `--mac XX:XX:...` | auto | Override MAC address (VM modes only) |
 | `--qemu-arg ARG` | none | Extra verbatim QEMU argument (VM modes only, repeatable; last occurrence wins) |
 | `--pve-arg "KEY: VALUE"` | none | Extra verbatim line appended to the PVE config (PVE modes only, repeatable) |
+| `--lxc-arg "KEY = VALUE"` | none | Extra verbatim line appended to the plain-LXC native config (plain LXC only, repeatable; last occurrence wins) |
 | `--start` | off | Start instance after creation |
+
+`--lxc-arg` is the plain-LXC counterpart to `--qemu-arg` (VM argv) and
+`--pve-arg` (PVE `.conf`). On a PVE host use `--pve-arg`, whose `.conf`
+already carries raw `lxc.*` lines; VM modes have no native LXC config.
+Structural keys kento owns (`lxc.rootfs.path`, `lxc.hook.*`, `lxc.net.*`,
+`lxc.apparmor.*`, `lxc.mount.auto`, `lxc.tty.max`, `lxc.uts.name`, and the
+`lxc.cgroup2.memory.max` / `lxc.cgroup2.cpu.max` lines `set` manages) are
+rejected; everything else passes through verbatim.
 
 ### Run (create + start)
 
@@ -178,6 +187,52 @@ sudo kento stop <name> [<name> ...]
 
 `shutdown` is the primary command; `stop` is an alias. Pass `-f` / `--force`
 to force an immediate stop (kill) instead of a graceful shutdown.
+
+### Suspend / resume
+
+```
+sudo kento suspend <name>
+sudo kento resume <name>
+```
+
+Pauses (and un-pauses) a running VM's vCPUs. This is a *pause to RAM* —
+the VM process keeps running and its memory is retained — **not** a
+shutdown. VM modes only: plain `vm` uses QMP `stop` / `cont` over
+`qmp.sock`; `pve-vm` uses `qm suspend` / `qm resume`. For `lxc` /
+`pve-lxc` it errors (use `kento stop` / `kento start`). The instance
+must be running. A plain-`vm` suspend is not persisted across a host
+reboot or if the QEMU process dies.
+
+### Set
+
+```
+sudo kento set <name> [flags]
+sudo kento set web --memory 2048 --cores 2
+sudo kento vm set vm1 --mac 52:54:00:12:34:56
+sudo kento vm set vm1 --qemu-arg '-cpu host' --qemu-arg '-smp 4'
+sudo kento set web --qemu-arg ''            # clear the QEMU pass-through list
+sudo kento lxc set ct1 --lxc-arg 'lxc.cgroup2.devices.allow = c 10:200 rwm'
+```
+
+Changes scalar settings on a **stopped** instance; the changes take
+effect on the instance's next start. Errors if the instance is running
+(stop it first). Available at all three CLI levels (`kento set`,
+`kento lxc set`, `kento vm set`).
+
+| Flag | Modes | Description |
+|------|-------|-------------|
+| `--memory MB` | all | Memory limit in MB |
+| `--cores N` | all | Number of CPU cores |
+| `--mac XX:XX:...` | vm, pve-vm | MAC address |
+| `--qemu-arg ARG` | vm, pve-vm | QEMU pass-through list (repeatable) |
+| `--pve-arg "KEY: VALUE"` | pve-lxc, pve-vm | PVE config pass-through list (repeatable) |
+| `--lxc-arg "KEY = VALUE"` | lxc | Plain-LXC native config pass-through list (repeatable) |
+
+Passing a flag for the wrong mode errors before anything is changed.
+For the list flags (`--qemu-arg` / `--pve-arg` / `--lxc-arg`): passing
+the flag with non-empty values REPLACES the stored list, passing it with
+an empty value (`--qemu-arg ''`) CLEARS it, and omitting it leaves the
+list untouched. An empty `set` (no flags) is a usage error.
 
 ### List
 

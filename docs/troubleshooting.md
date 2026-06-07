@@ -56,10 +56,13 @@ ls /var/lib/kento/vm/<id>/    # VM
 
 ### "Error: instance is running. Stop it first: kento stop \<name\>"
 
-Scrub requires the instance to be stopped. Stop it first:
+Both `kento scrub` and `kento set` require the instance to be stopped —
+`set` changes take effect on the next start, so it refuses to mutate a
+live instance. Stop it first, then retry:
 
 ```
 sudo kento shutdown <name>
+sudo kento set <name> --memory 2048   # then re-run set
 ```
 
 ### "Error: VMID must be >= 100"
@@ -117,14 +120,18 @@ drop the flag.
 
 ### "Error: kento manages '\<needle\>' directly"
 
-One of the pass-through flags (`--qemu-arg` or `--pve-arg`) has a value
-that collides with a flag kento manages itself. The denylists are
-deliberately short — they only cover things kento writes itself and
+One of the pass-through flags (`--qemu-arg`, `--pve-arg`, or `--lxc-arg`)
+has a value that collides with a key kento manages itself. The denylists
+are deliberately short — they only cover things kento writes itself and
 that would silently conflict:
 
 - QEMU: `-kernel`, `-initrd`, `virtiofs`, `rootfs`,
   `memory-backend-memfd`, `memfd-size`, `-chardev`, `-serial`.
 - PVE: `rootfs:`, `mp0:`, `lxc.rootfs.path`, `arch:`, `hostname:`.
+- LXC (`--lxc-arg`): `lxc.uts.name`, `lxc.rootfs.path`, `lxc.hook.*`,
+  `lxc.net.*`, `lxc.mount.auto`, `lxc.tty.max`, `lxc.apparmor.*`, and the
+  `lxc.cgroup2.memory.max` / `lxc.cgroup2.cpu.max` lines `kento set`
+  manages.
 
 Most of these have a dedicated kento flag already (`--memory` covers
 the memfd size; `--ip` / `--network` covers network keys). If you have
@@ -230,6 +237,42 @@ with stdin redirected or over a non-tty channel is rejected.
 `pct exec`, which only exist for LXC and PVE-LXC instances. There is no
 in-guest agent for `vm` / `pve-vm`. Use SSH
 (`ssh -p <port> <user>@localhost`) or `kento attach` instead.
+
+### "Error: suspend/resume is not supported for LXC instances"
+
+`kento suspend` / `kento resume` pause and un-pause a VM's vCPUs — there
+is no vCPU to pause in an LXC or PVE-LXC container. Use `kento stop` /
+`kento start` instead:
+
+```
+sudo kento stop <name>
+sudo kento start <name>
+```
+
+### "Error: instance is not running: \<name\>" on suspend/resume
+
+`suspend` pauses a *running* VM and `resume` un-pauses a *suspended*
+(still-running) one; neither can act on a stopped instance. Start it
+first:
+
+```
+sudo kento start <name>
+```
+
+### `kento resume` does nothing after a host reboot (plain VM)
+
+A plain-`vm` suspend is a vCPU pause via QMP `stop` over `qmp.sock` — the
+QEMU process keeps running and its RAM is retained, but the pause is
+**not** persisted. If the host reboots or the QEMU process dies, the
+suspended state is lost; there is no saved-state file to resume from.
+Start the instance fresh instead:
+
+```
+sudo kento start <name>
+```
+
+(`pve-vm` uses `qm suspend` / `qm resume`, which follow PVE's own
+suspend semantics.)
 
 ## VM boot issues
 

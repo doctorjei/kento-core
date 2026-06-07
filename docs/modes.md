@@ -44,6 +44,9 @@ non-PVE host.
 - **Memory/CPU:** no limit by default (override with `--memory` / `--cores`)
 - **Nesting:** disabled by default (`--allow-nesting` to permit nested containers)
 - **AppArmor:** per-container profile via `lxc.apparmor.profile = generated` (see below)
+- **Config pass-through:** `--lxc-arg "KEY = VALUE"` appends raw lines to
+  the native `config` (plain-LXC only; on PVE use `--pve-arg`). Available
+  on `create` / `run` and `kento set`.
 
 The instance runs systemd as PID 1 in a shared kernel namespace.
 
@@ -170,6 +173,41 @@ at all three CLI levels (`kento <cmd>`, `kento lxc <cmd>`, `kento vm
 - **`logs`** runs `journalctl` inside the guest via the exec mechanism,
   forwarding extra arguments (e.g. `kento logs web -f -n 50`). `lxc` /
   `pve-lxc` only; `vm` / `pve-vm` error with a pointer to `attach` / SSH.
+
+## Suspend / resume
+
+`kento suspend <name>` and `kento resume <name>` pause and un-pause a
+running VM's vCPUs — a *pause to RAM*, not a shutdown: the VM process
+keeps running and its memory is retained. **VM modes only.**
+
+| | lxc | pve-lxc | vm | pve-vm |
+|---|---|---|---|---|
+| `suspend` / `resume` | use `stop` / `start` | use `stop` / `start` | QMP `stop` / `cont` | `qm suspend` / `qm resume` |
+
+For `lxc` / `pve-lxc` there is no vCPU to pause, so both commands error
+with a pointer to `kento stop` / `kento start`. The instance must be
+running. A plain-`vm` suspend uses the `qmp.sock` unix socket and is not
+persisted across a host reboot or if the QEMU process dies.
+
+## Changing settings (`set`)
+
+`kento set <name> [flags]` mutates scalar settings on a **stopped**
+instance; the change takes effect on the next start (it errors if the
+instance is running). Available at all three CLI levels. Per-mode flag
+validity:
+
+| Flag | lxc | pve-lxc | vm | pve-vm |
+|---|---|---|---|---|
+| `--memory` / `--cores` | yes | yes | yes | yes |
+| `--mac` | — | — | yes | yes |
+| `--qemu-arg` | — | — | yes | yes |
+| `--pve-arg` | — | yes | — | yes |
+| `--lxc-arg` | yes | — | — | — |
+
+Passing a flag for a mode that does not support it errors before any
+change is made. The list flags (`--qemu-arg` / `--pve-arg` / `--lxc-arg`)
+replace the stored list when given non-empty values, clear it when given
+an empty value (`--qemu-arg ''`), and leave it untouched when omitted.
 
 ## Comparison
 

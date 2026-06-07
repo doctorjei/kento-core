@@ -37,6 +37,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backs `kento attach`; the QMP socket is groundwork for future
   suspend/resume. pve-vm already exposed `serial0: socket` (used by
   `qm terminal`).
+- `kento set <name> [flags]` — change scalar settings on a **stopped**
+  instance; the changes take effect on the instance's next start
+  (errors if the instance is running, with a pointer to `kento stop`).
+  Available at all three CLI levels (`kento set`, `kento lxc set`,
+  `kento vm set`). Flags and per-mode validity: `--memory MB` and
+  `--cores N` apply to all four modes; `--mac XX:XX:XX:XX:XX:XX` and
+  `--qemu-arg ARG` (repeatable) are VM-modes-only (`vm`, `pve-vm`);
+  `--pve-arg 'KEY: VALUE'` (repeatable) is PVE-modes-only (`pve-lxc`,
+  `pve-vm`); `--lxc-arg 'KEY = VALUE'` (repeatable) is plain-LXC-only.
+  Passing a flag for the wrong mode errors before anything is mutated.
+  The metadata files under the instance dir are the source of truth;
+  kento surgically re-emits only the kento-owned scalar lines in the
+  native `config` / PVE `.conf` / qm `.conf`, preserving every
+  structural and network line. List flags (`--qemu-arg` / `--pve-arg` /
+  `--lxc-arg`) REPLACE the stored list when given with non-empty
+  values, CLEAR it when given only an empty value (`--qemu-arg ''`),
+  and leave it untouched when omitted. An empty `set` (no flags) is a
+  usage error.
+- `--lxc-arg 'KEY = VALUE'` — the fourth config pass-through, alongside
+  `--qemu-arg` (VM argv) and `--pve-arg` (PVE config). Appends raw lines
+  verbatim to plain-LXC's native `config`, stored in
+  `<instance_dir>/kento-lxc-args` (one per line). Available on both
+  `kento create` / `run` and `kento set`, repeatable. **Plain-LXC only**:
+  on a PVE host use `--pve-arg` (the PVE `.conf` carries raw `lxc.*`
+  lines); VM modes have no native LXC config. A denylist
+  (`LXC_ARG_DENYLIST` in `defaults.py`) rejects the structural keys kento
+  owns — `lxc.uts.name`, `lxc.rootfs.path`, `lxc.hook.`, `lxc.net.`,
+  `lxc.mount.auto`, `lxc.tty.max`, `lxc.apparmor.`, and the two cgroup
+  lines `set` manages (`lxc.cgroup2.memory.max`, `lxc.cgroup2.cpu.max`).
+  Everything else passes through verbatim, last-value-wins.
+- `kento suspend <name>` / `kento resume <name>` — pause and un-pause a
+  running VM's vCPUs (a *pause to RAM*: the VM process keeps running and
+  its memory is retained — this is **not** a shutdown). **VM-modes-only**:
+  plain `vm` issues QMP `stop` / `cont` over `qmp.sock`; `pve-vm` runs
+  `qm suspend` / `qm resume`. `lxc` / `pve-lxc` error with a pointer to
+  `kento stop` / `kento start` (no vCPU to pause). Requires the instance
+  to be running (errors with a pointer to `kento start` otherwise).
+  Available at all three CLI levels. Note: a plain-`vm` suspend is not
+  persisted across a host reboot or if the QEMU process dies.
 - Nested-bridging support inside guests. When `--allow-nesting` is set,
   kento injects a systemd-networkd drop-in into the guest at
   `/etc/systemd/network/10-kento-nested-veth.network`

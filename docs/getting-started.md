@@ -148,9 +148,11 @@ pve-vm) with their name, image, status, mode, and writable layer size.
 
 Kento exposes a short list of first-class flags (`--memory`, `--cores`,
 `--network`, `--mac`, `--ssh-key`, ...). For everything else — a QEMU
-device kento doesn't know about, a PVE config key kento doesn't set —
-two escape-hatch flags let you inject raw config without waiting for a
-kento release.
+device kento doesn't know about, a PVE config key kento doesn't set, a
+raw `lxc.*` line — three escape-hatch flags let you inject raw config
+without waiting for a kento release: `--qemu-arg` (VM argv), `--pve-arg`
+(PVE config), and `--lxc-arg` (plain-LXC native config). All three are
+available on `create` / `run` and on `kento set`.
 
 ### `--qemu-arg` (VM modes only)
 
@@ -205,14 +207,33 @@ key.
 Kento rejects pass-through values that would clobber keys it manages
 (`rootfs:`, `mp0:`, `lxc.rootfs.path`, `arch:`, `hostname:`).
 
+### `--lxc-arg` (plain LXC only)
+
+Appends a verbatim line to plain-LXC's native `config`. Repeatable.
+Plain-LXC only — on a PVE host the LXC config *is* the PVE config, so
+use `--pve-arg` (whose `.conf` carries raw `lxc.*` lines); VM modes have
+no native LXC config. Kento errors at create time on the wrong mode.
+
+```
+sudo kento lxc create <image> --no-pve \
+    --lxc-arg 'lxc.cgroup2.devices.allow = c 10:200 rwm'
+sudo kento lxc create <image> --no-pve --lxc-arg 'lxc.environment = FOO=bar'
+```
+
+Last assignment of a repeated key wins. Kento rejects values that would
+clobber the structural lines it owns (`lxc.uts.name`, `lxc.rootfs.path`,
+`lxc.hook.*`, `lxc.net.*`, `lxc.mount.auto`, `lxc.tty.max`,
+`lxc.apparmor.*`, and the `lxc.cgroup2.memory.max` / `lxc.cgroup2.cpu.max`
+lines `kento set` manages).
+
 ### Storage and scrub behaviour
 
-Both flag lists are stored in the instance directory alongside the
-other metadata — `<instance_dir>/kento-qemu-args` and
-`<instance_dir>/kento-pve-args`, one entry per line. They're preserved
+The flag lists are stored in the instance directory alongside the other
+metadata — `<instance_dir>/kento-qemu-args`, `<instance_dir>/kento-pve-args`,
+and `<instance_dir>/kento-lxc-args`, one entry per line. They're preserved
 by `kento scrub` (scrub only rebuilds layers and the hook script; the
-pass-through files are left untouched) and surfaced in `kento info
---verbose`:
+pass-through files are left untouched) and editable later with `kento set`.
+`--qemu-arg` and `--pve-arg` are surfaced in `kento info --verbose`:
 
 ```
 $ sudo kento info my-vm --verbose
