@@ -5,7 +5,7 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - unreleased
+## [1.3.0] - 2026-06-07
 
 ### Added
 
@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now writes a `10-dhcp.network` (`Name=eth0`, `DHCP=yes`) for LXC and
   PVE-LXC bridge-with-DHCP instances; `--network none` is unaffected.
 
-## [1.2.1] - unreleased
+## [1.2.1] - 2026-06-07
 
 ### Changed
 
