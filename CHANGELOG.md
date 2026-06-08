@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- pve-vm `--network usermode` now injects slirp networking (a QEMU
+  user-mode netdev + host-port forwarding) into the qm `args:` line,
+  mirroring plain `vm`. Previously usermode was silently dropped on a PVE
+  host (only `net_type == "bridge"` emitted a `net0:` line), producing a
+  NIC-less VM with no network that still reported running.
+
 ### Documentation
 
 - Document that the default plain-LXC `lxc.apparmor.profile = generated`

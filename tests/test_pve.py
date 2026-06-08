@@ -391,6 +391,17 @@ class TestGenerateQmConfig:
                                   hookscript_ref="ref", cores=4)
         assert "cores: 4" in cfg
 
+    def test_usermode_injects_slirp_no_net0(self, tmp_path):
+        """net_type=usermode: slirp goes into the args: line, not a net0:
+        config field (usermode must not emit net0)."""
+        (tmp_path / "kento-port").write_text("10022:22\n")
+        cfg = generate_qm_config("test", 100, tmp_path,
+                                  hookscript_ref="ref",
+                                  net_type="usermode",
+                                  mac="52:54:00:de:ad:be")
+        assert "-netdev user,id=net0,hostfwd=tcp:127.0.0.1:10022-:22" in cfg
+        assert "net0:" not in cfg
+
 
 class TestWriteQmConfig:
     def test_writes_to_node_path(self, tmp_path):
@@ -690,6 +701,50 @@ class TestGenerateQmArgs:
         (tmp_path / "kento-qemu-args").write_text("-cpu=host,vmx=on\n")
         args = generate_qm_args(tmp_path, memory=512, kvm=True)
         assert args.index("-cpu host") < args.index("-cpu=host,vmx=on")
+
+    # --- Usermode networking (slirp) injection --------------------------
+
+    def test_usermode_injects_netdev_and_device(self, tmp_path):
+        """kento-port present → slirp netdev + virtio-net device injected."""
+        (tmp_path / "kento-port").write_text("10022:22\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "-netdev user,id=net0,hostfwd=tcp:127.0.0.1:10022-:22" in args
+        assert "-device virtio-net-pci,netdev=net0" in args
+
+    def test_usermode_with_mac(self, tmp_path):
+        """kento-mac present and non-empty → mac suffix on the device."""
+        (tmp_path / "kento-port").write_text("10022:22\n")
+        (tmp_path / "kento-mac").write_text("52:54:00:de:ad:be\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "-device virtio-net-pci,netdev=net0,mac=52:54:00:de:ad:be" in args
+
+    def test_usermode_without_mac(self, tmp_path):
+        """No kento-mac → device has no trailing ,mac= suffix."""
+        (tmp_path / "kento-port").write_text("10022:22\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        # Device is exactly the bare net device with no ,mac= suffix.
+        assert "-device virtio-net-pci,netdev=net0" in args
+        assert ",mac=" not in args
+
+    def test_no_usermode_without_port(self, tmp_path):
+        """No kento-port (bridge/host/none modes) → no slirp args injected."""
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "-netdev user" not in args
+        assert "virtio-net-pci" not in args
+
+    def test_usermode_before_passthrough(self, tmp_path):
+        """Usermode netdev precedes user pass-through so a --qemu-arg
+        override wins (qm honours the last occurrence)."""
+        (tmp_path / "kento-port").write_text("10022:22\n")
+        (tmp_path / "kento-qemu-args").write_text("-device=virtio-rng-pci\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert args.index("-netdev user") < args.index("-device=virtio-rng-pci")
+
+    def test_usermode_custom_port_mapping(self, tmp_path):
+        """Custom HOST:GUEST port mapping is reflected in hostfwd."""
+        (tmp_path / "kento-port").write_text("10025:2222\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert "hostfwd=tcp:127.0.0.1:10025-:2222" in args
 
 
 class TestGeneratePveConfigPassthrough:

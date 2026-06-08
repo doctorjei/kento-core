@@ -155,7 +155,10 @@ the VM appears in the Proxmox web UI.
 
 - **Start command:** `qm start <VMID>`
 - **Access:** `qm terminal <VMID>` or SSH
-- **Network:** bridge (`vmbr0` by default) with `net0:` in qm config
+- **Network:** bridge (`vmbr0` by default) with `net0:` in qm config.
+  `--network usermode` is also supported: kento injects a slirp netdev +
+  host-port forwarding into the qm `args:` line (no `net0:` field), giving
+  the same usermode networking as plain `vm`.
 - **Memory:** 512 MB default (override with `--memory`)
 - **Instance directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** QEMU, virtiofsd, kernel + initramfs in image, PVE host

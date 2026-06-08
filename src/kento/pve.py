@@ -260,6 +260,15 @@ def generate_qm_args(container_dir: Path, *,
     whitespace splitting (NOT shlex), a pass-through line that itself
     contains whitespace is a foot-gun: the user must split it across
     multiple --qemu-arg flags. Enforced with sys.exit at consumption time.
+
+    Usermode networking: if ``container_dir/kento-port`` exists (format
+    ``HOST:GUEST``), a slirp netdev + virtio-net device are injected so a
+    pve-vm with ``--network usermode`` gets the same slirp networking +
+    host-port forwarding as a plain vm (see vm.py). The device MAC is read
+    from ``container_dir/kento-mac`` when present and non-empty. Injected
+    before the pass-through loop so a user ``--qemu-arg`` still wins
+    (qm honours the last occurrence). For bridge/host/none modes the file
+    is absent and nothing is emitted (net0 is handled in generate_qm_config).
     """
     rootfs = container_dir / "rootfs"
     socket_path = container_dir / "virtiofsd.sock"
@@ -290,6 +299,28 @@ def generate_qm_args(container_dir: Path, *,
         f"-object memory-backend-memfd,id=mem,size={memory}M,share=on",
         "-numa node,memdev=mem",
     ]
+
+    # Usermode networking (slirp). Mirrors the plain-vm path in vm.py: when
+    # kento-port (HOST:GUEST) is present, emit a slirp netdev with hostfwd plus
+    # a virtio-net device. PVE appends this args: line verbatim to the qemu
+    # cmdline, so this gives pve-vm --network usermode the same NIC + port
+    # forwarding as plain vm. Emitted before the pass-through loop so a user
+    # --qemu-arg still wins (qm honours the last occurrence). Each args_parts
+    # element is a single "-flag value" pair whose value has no whitespace,
+    # satisfying qm's whitespace tokenization.
+    port_file = container_dir / "kento-port"
+    if port_file.is_file():
+        host_port, guest_port = port_file.read_text().strip().split(":")
+        device = "virtio-net-pci,netdev=net0"
+        mac_file = container_dir / "kento-mac"
+        if mac_file.is_file():
+            mac = mac_file.read_text().strip()
+            if mac:
+                device = f"virtio-net-pci,netdev=net0,mac={mac}"
+        args_parts += [
+            f"-netdev user,id=net0,hostfwd=tcp:127.0.0.1:{host_port}-:{guest_port}",
+            f"-device {device}",
+        ]
 
     passthrough_file = container_dir / "kento-qemu-args"
     if passthrough_file.is_file():
