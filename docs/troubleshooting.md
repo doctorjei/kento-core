@@ -274,6 +274,28 @@ sudo kento start <name>
 (`pve-vm` uses `qm suspend` / `qm resume`, which follow PVE's own
 suspend semantics.)
 
+### `lxc-start` fails: "Cannot use generated profile: apparmor_parser not available"
+
+Plain-LXC instances start with `lxc.apparmor.profile = generated` by
+default. On a host whose kernel has AppArmor as an active LSM, that
+profile is compiled by `apparmor_parser` — if the parser is absent the
+container aborts at LSM init and never boots. This bites minimal hosts
+that have `lxc` installed but not the `apparmor` package: `lxc` only
+*recommends* `apparmor`, so an image built with recommends disabled (or
+`apt-get install --no-install-recommends lxc`) ends up with the runtime
+but no parser. Fix either way:
+
+```
+# provide the parser (generated then enforces):
+sudo apt install apparmor
+# or run without an AppArmor profile:
+sudo KENTO_APPARMOR_PROFILE=unconfined kento lxc create ...
+```
+
+On a kernel where AppArmor is *not* the active LSM, `generated` silently
+no-ops and no parser is needed. See [modes.md](modes.md) "AppArmor
+profile" for the full rationale.
+
 ## VM boot issues
 
 If the VM starts (QEMU launches) but you can't reach it via SSH:
