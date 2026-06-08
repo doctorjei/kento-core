@@ -5,6 +5,19 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Document that the default plain-LXC `lxc.apparmor.profile = generated`
+  requires `apparmor_parser` on a host whose kernel has AppArmor as an
+  active LSM. If the parser is absent the container hard-fails at start
+  (`Cannot use generated profile: apparmor_parser not available`) rather
+  than degrading — install the `apparmor` package, or set
+  `KENTO_APPARMOR_PROFILE=unconfined`. Covered in `docs/modes.md`
+  ("AppArmor profile") and `docs/troubleshooting.md`; the
+  `KENTO_APPARMOR_PROFILE` escape hatch is now documented.
+
 ## [1.4.0] - 2026-06-07
 
 ### Added
