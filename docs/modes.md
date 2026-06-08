@@ -71,6 +71,20 @@ break plain-LXC on recent OCI images:
 `generated` fixes both without dropping host-boundary confinement.
 No flag is required.
 
+**Host requirement.** `generated` is compiled by `apparmor_parser`, so on a
+host whose kernel has AppArmor as an active LSM the `apparmor` package must be
+installed. LXC only *recommends* `apparmor`, so an image built with recommends
+disabled can carry `lxc` but no parser — `generated` then hard-fails at start
+with `Cannot use generated profile: apparmor_parser not available` and the
+container never boots. Resolve it either way:
+
+- install the `apparmor` package (gives the parser; `generated` then enforces), or
+- set `KENTO_APPARMOR_PROFILE=unconfined` to deliberately run without a profile
+  (kento's escape hatch; the default is `generated`).
+
+On a kernel where AppArmor is *not* the active LSM, `generated` silently no-ops
+and no parser is needed.
+
 ### Nested networking
 
 When `--allow-nesting` is set (any mode), kento drops a
