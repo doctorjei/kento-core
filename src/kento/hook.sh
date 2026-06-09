@@ -8,6 +8,29 @@ LAYERS="@@LAYERS@@"
 HOOK_TYPE="${LXC_HOOK_TYPE:-$3}"
 
 # ---------------------------------------------------------------------------
+# NAT backend resolution.
+#
+# Port forwarding installs DNAT/masquerade rules; the host may ship either
+# nftables (`nft`) or legacy iptables (`iptables`). Prefer nft when present
+# (kento's historical backend, isolated `ip kento` table), else fall back to
+# iptables. If NEITHER is available we cannot install rules — warn and skip
+# WITHOUT aborting the start-host hook (which runs under `set -eu`; an
+# unguarded missing-binary call would exit 127 and fail instance start).
+#
+# Echoes `nft`, `iptables`, or `` (empty = none). Probes are guarded so a
+# missing binary never trips `set -e`.
+# ---------------------------------------------------------------------------
+kento_nat_backend() {
+    if command -v nft >/dev/null 2>&1; then
+        echo nft
+    elif command -v iptables >/dev/null 2>&1; then
+        echo iptables
+    else
+        echo ""
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Port forwarding setup — idempotent.
 #
 # Called from `start-host` for both plain LXC and pve-lxc. For pve-lxc,
@@ -78,20 +101,46 @@ setup_port_forwarding() {
     # the DNAT and masquerade rules are correct. Debian/PVE defaults to 0.
     echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
 
-    # Ensure kento nftables table and base chains exist (idempotent)
-    nft add table ip kento 2>/dev/null || true
-    nft 'add chain ip kento prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-    nft 'add chain ip kento output { type nat hook output priority dstnat; policy accept; }' 2>/dev/null || true
-    nft 'add chain ip kento postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    # Resolve the NAT backend once. If neither nft nor iptables is present we
+    # cannot install rules; record an error marker and bail WITHOUT aborting
+    # start (the unguarded rule installs below would otherwise hit exit 127
+    # under `set -eu` and fail the whole start-host hook).
+    BACKEND=$(kento_nat_backend)
+    if [ -z "$BACKEND" ]; then
+        echo "kento: neither nft nor iptables found; port forwarding for $NAME not active" \
+            > "$CONTAINER_DIR/kento-portfwd-error" 2>&1
+        echo "kento-hook: neither nft nor iptables available -- skipping port forwarding for $NAME" >&2
+        return 0
+    fi
+
+    if [ "$BACKEND" = nft ]; then
+        # Ensure kento nftables table and base chains exist (idempotent)
+        nft add table ip kento 2>/dev/null || true
+        nft 'add chain ip kento prerouting { type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+        nft 'add chain ip kento output { type nat hook output priority dstnat; policy accept; }' 2>/dev/null || true
+        nft 'add chain ip kento postrouting { type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    fi
 
     if [ -n "$CONTAINER_IP" ]; then
-        nft add rule ip kento prerouting tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
-        nft add rule ip kento output tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
-        nft add rule ip kento postrouting ip saddr 127.0.0.0/8 ip daddr "${CONTAINER_IP}" tcp dport "$GUEST_PORT" masquerade comment "\"kento:${NAME}\""
+        if [ "$BACKEND" = nft ]; then
+            nft add rule ip kento prerouting tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
+            nft add rule ip kento output tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
+            nft add rule ip kento postrouting ip saddr 127.0.0.0/8 ip daddr "${CONTAINER_IP}" tcp dport "$GUEST_PORT" masquerade comment "\"kento:${NAME}\""
+        else
+            # iptables fallback: append to the standard nat-table chains.
+            # Rules are comment-tagged "kento:NAME" so post-stop can find and
+            # delete exactly the rules this instance installed.
+            iptables -t nat -A PREROUTING -p tcp --dport "$HOST_PORT" -j DNAT --to-destination "${CONTAINER_IP}:${GUEST_PORT}" -m comment --comment "kento:${NAME}"
+            iptables -t nat -A OUTPUT -p tcp --dport "$HOST_PORT" -j DNAT --to-destination "${CONTAINER_IP}:${GUEST_PORT}" -m comment --comment "kento:${NAME}"
+            iptables -t nat -A POSTROUTING -s 127.0.0.0/8 -d "${CONTAINER_IP}" -p tcp --dport "$GUEST_PORT" -j MASQUERADE -m comment --comment "kento:${NAME}"
+        fi
         echo "${HOST_PORT}:${GUEST_PORT}:${CONTAINER_IP}" > "$CONTAINER_DIR/kento-portfwd-active"
+        echo "$BACKEND" > "$CONTAINER_DIR/kento-portfwd-backend"
     else
         # DHCP path — detach a worker that polls lxc-info and installs
-        # the rules once the guest has an address.
+        # the rules once the guest has an address. The resolved backend is
+        # baked into the worker (host NAT state is stable within a boot, so
+        # the worker need not re-detect).
         CONTAINER_ID="${LXC_NAME:-$CONTAINER_ID_ARG}"
         WORKER="$CONTAINER_DIR/kento-portfwd-worker.sh"
         cat > "$WORKER" <<WORKER_EOF
@@ -101,12 +150,13 @@ NAME="$NAME"
 HOST_PORT="$HOST_PORT"
 GUEST_PORT="$GUEST_PORT"
 CONTAINER_DIR="$CONTAINER_DIR"
+BACKEND="$BACKEND"
 # Bail out if rules already installed (e.g. another hook raced ahead).
 [ -f "\$CONTAINER_DIR/kento-portfwd-active" ] && exit 0
 IP=""
 TRIES=0
 # Retry for up to ~30s; DHCP can take a while on slow guests.
-# IPv4-only: our nftables rules live in the ip family, so we must ignore
+# IPv4-only: our NAT rules live in the ip family, so we must ignore
 # IPv6 addresses (which lxc-info prints interleaved with IPv4 ones).
 while [ "\$TRIES" -lt 30 ]; do
     IP=\$(lxc-info -n "\$CID" -iH 2>/dev/null \\
@@ -122,14 +172,27 @@ if [ -z "\$IP" ]; then
 fi
 # Re-check in case start-host raced ahead while we polled.
 [ -f "\$CONTAINER_DIR/kento-portfwd-active" ] && exit 0
-nft add rule ip kento prerouting tcp dport "\$HOST_PORT" \\
-    dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
-nft add rule ip kento output tcp dport "\$HOST_PORT" \\
-    dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
-nft add rule ip kento postrouting ip saddr 127.0.0.0/8 \\
-    ip daddr "\$IP" tcp dport "\$GUEST_PORT" \\
-    masquerade comment "\"kento:\$NAME\""
+if [ "\$BACKEND" = nft ]; then
+    nft add rule ip kento prerouting tcp dport "\$HOST_PORT" \\
+        dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
+    nft add rule ip kento output tcp dport "\$HOST_PORT" \\
+        dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
+    nft add rule ip kento postrouting ip saddr 127.0.0.0/8 \\
+        ip daddr "\$IP" tcp dport "\$GUEST_PORT" \\
+        masquerade comment "\"kento:\$NAME\""
+else
+    iptables -t nat -A PREROUTING -p tcp --dport "\$HOST_PORT" \\
+        -j DNAT --to-destination "\$IP:\$GUEST_PORT" \\
+        -m comment --comment "kento:\$NAME"
+    iptables -t nat -A OUTPUT -p tcp --dport "\$HOST_PORT" \\
+        -j DNAT --to-destination "\$IP:\$GUEST_PORT" \\
+        -m comment --comment "kento:\$NAME"
+    iptables -t nat -A POSTROUTING -s 127.0.0.0/8 -d "\$IP" \\
+        -p tcp --dport "\$GUEST_PORT" -j MASQUERADE \\
+        -m comment --comment "kento:\$NAME"
+fi
 echo "\$HOST_PORT:\$GUEST_PORT:\$IP" > "\$CONTAINER_DIR/kento-portfwd-active"
+echo "\$BACKEND" > "\$CONTAINER_DIR/kento-portfwd-backend"
 WORKER_EOF
         chmod +x "$WORKER"
         # setsid + redirection detaches fully from the monitor process
@@ -204,15 +267,35 @@ case "$HOOK_TYPE" in
         setup_port_forwarding "$CONTAINER_ID"
         ;;
     post-stop)
-        # Tear down nftables port forwarding rules by comment tag
+        # Tear down port forwarding rules by comment tag, using whichever
+        # backend installed them. The backend was recorded at install time in
+        # kento-portfwd-backend; default to nft if the marker is absent
+        # (pre-1.5.0 containers only ever used nft).
         if [ -f "$CONTAINER_DIR/kento-portfwd-active" ]; then
-            for chain in prerouting output postrouting; do
-                nft -a list chain ip kento "$chain" 2>/dev/null | grep "kento:${NAME}" | \
-                    awk '{print $NF}' | while read -r handle; do
-                        nft delete rule ip kento "$chain" handle "$handle" 2>/dev/null || true
+            BACKEND=nft
+            if [ -f "$CONTAINER_DIR/kento-portfwd-backend" ]; then
+                BACKEND=$(cat "$CONTAINER_DIR/kento-portfwd-backend" | tr -d '[:space:]')
+            fi
+            if [ "$BACKEND" = iptables ]; then
+                # iptables: line numbers shift on every delete, so re-list and
+                # delete the first matching rule until none remain.
+                for chain in PREROUTING OUTPUT POSTROUTING; do
+                    while :; do
+                        n=$(iptables -t nat -L "$chain" --line-numbers -n 2>/dev/null \
+                            | grep -F "kento:${NAME}" | head -1 | awk '{print $1}')
+                        [ -n "$n" ] || break
+                        iptables -t nat -D "$chain" "$n" 2>/dev/null || break
                     done
-            done
-            rm -f "$CONTAINER_DIR/kento-portfwd-active"
+                done
+            else
+                for chain in prerouting output postrouting; do
+                    nft -a list chain ip kento "$chain" 2>/dev/null | grep "kento:${NAME}" | \
+                        awk '{print $NF}' | while read -r handle; do
+                            nft delete rule ip kento "$chain" handle "$handle" 2>/dev/null || true
+                        done
+                done
+            fi
+            rm -f "$CONTAINER_DIR/kento-portfwd-active" "$CONTAINER_DIR/kento-portfwd-backend"
         fi
         # Unmount overlayfs
         mountpoint -q "$CONTAINER_DIR/rootfs" 2>/dev/null && umount "$CONTAINER_DIR/rootfs" || true

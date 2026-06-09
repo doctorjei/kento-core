@@ -85,6 +85,25 @@ container never boots. Resolve it either way:
 On a kernel where AppArmor is *not* the active LSM, `generated` silently no-ops
 and no parser is needed.
 
+### Port forwarding
+
+`--port HOST:GUEST` (lxc and pve-lxc) installs host DNAT/masquerade rules at
+start so `localhost:HOST` reaches `GUEST` inside the container. Kento picks a
+NAT backend automatically:
+
+- **`nft` (preferred):** rules live in a dedicated `ip kento` nftables table,
+  tagged with a `kento:<name>` comment.
+- **`iptables` (fallback):** if `nft` is not installed, kento uses the standard
+  `iptables` `nat` table (PREROUTING/OUTPUT DNAT + POSTROUTING MASQUERADE),
+  with the same `kento:<name>` comment tag.
+- **Neither present:** kento skips port forwarding rather than failing the
+  start — it writes a `kento-portfwd-error` marker in the container state dir,
+  warns on stderr, and the instance still boots (just without forwarding).
+  Install `nftables` or `iptables` to enable it.
+
+The chosen backend is recorded in a `kento-portfwd-backend` marker so teardown
+at stop removes the rules with the matching tool.
+
 ### Nested networking
 
 When `--allow-nesting` is set (any mode), kento drops a

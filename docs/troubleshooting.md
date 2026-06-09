@@ -397,3 +397,24 @@ kento images            # see in-use vs orphaned kento-managed images
 kento prune             # dry-run: show what would be reclaimed
 sudo kento prune --yes  # actually reclaim orphaned holds + freed images
 ```
+
+## Networking / port forwarding
+
+### `--port` forwarding does not work / `localhost:<port>` refuses
+
+For lxc and pve-lxc, `--port HOST:GUEST` installs host NAT rules at start.
+Kento uses `nft` if present, otherwise falls back to `iptables`. If **neither**
+is installed, kento cannot install the rules: it skips forwarding (the instance
+still boots), warns on stderr, and writes a `kento-portfwd-error` marker in the
+container state dir (e.g. `/var/lib/lxc/<name>/kento-portfwd-error`). Install
+`nftables` or `iptables` on the host and restart the instance.
+
+Other things to check:
+
+- The guest must have an IPv4 address. With DHCP networking kento detaches a
+  worker that polls for the address for ~30s; if none appears it writes the
+  same `kento-portfwd-error` marker. Confirm the guest's network came up.
+- `kento-portfwd-active` (shape `HOST:GUEST:IP`) is written once rules are in
+  place; its absence after start means forwarding never activated.
+- The active backend is recorded in `kento-portfwd-backend` (`nft` or
+  `iptables`); teardown at stop uses the same tool to remove the rules.

@@ -114,6 +114,54 @@ def test_generate_hook_start_host_uses_nftables():
     assert "dnat to" in script
 
 
+def test_generate_hook_has_iptables_fallback():
+    """start-host resolves a NAT backend and falls back to iptables.
+
+    When nft is absent the hook must install DNAT/masquerade via iptables in
+    the standard nat table, comment-tagged kento:NAME.
+    """
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento_nat_backend" in script
+    assert "command -v nft" in script
+    assert "command -v iptables" in script
+    assert "iptables -t nat -A PREROUTING" in script
+    assert "iptables -t nat -A OUTPUT" in script
+    assert "iptables -t nat -A POSTROUTING" in script
+    assert "MASQUERADE" in script
+
+
+def test_generate_hook_neither_backend_does_not_abort():
+    """No nft and no iptables -> warn + error marker + return 0 (no abort)."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    fn_start = script.index("setup_port_forwarding()")
+    fn_body = script[fn_start:]
+    assert "kento-portfwd-error" in fn_body
+    # The empty-backend guard must return without reaching the rule installs.
+    assert "neither nft nor iptables" in fn_body
+
+
+def test_generate_hook_records_backend_marker():
+    """Chosen backend is persisted to kento-portfwd-backend for teardown."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert "kento-portfwd-backend" in script
+    # Worker heredoc bakes the resolved backend in so it doesn't re-detect.
+    assert "BACKEND=" in script
+
+
+def test_generate_hook_post_stop_branches_on_backend():
+    """post-stop teardown branches on the backend marker (iptables vs nft)."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    post_start = script.index("post-stop)")
+    post_body = script[post_start:]
+    assert "kento-portfwd-backend" in post_body
+    # iptables teardown deletes by line number; nft by handle.
+    assert "iptables -t nat -D" in post_body
+    assert "--line-numbers" in post_body
+    assert "nft delete rule ip kento" in post_body
+    # Both markers are removed on teardown.
+    assert "kento-portfwd-active" in post_body
+
+
 def test_generate_hook_start_host_has_ip_discovery():
     """start-host case tries kento-net then lxc-info for IP discovery."""
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")

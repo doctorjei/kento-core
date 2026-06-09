@@ -5,6 +5,24 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Port forwarding now falls back to `iptables` when `nft` is not installed.
+  Previously the `start-host` hook installed DNAT/masquerade rules
+  exclusively via `nft`; on an iptables-only host the rule installs ran
+  unguarded under `set -eu`, so a missing `nft` exited 127 and **aborted
+  the entire start-host hook** (the instance failed to come up cleanly),
+  while the DHCP worker failed silently. The hook now resolves a NAT
+  backend once (`nft` preferred, else `iptables`); if neither binary is
+  present it writes a `kento-portfwd-error` marker, warns, and returns
+  cleanly instead of aborting the start. The chosen backend is recorded in
+  a `kento-portfwd-backend` marker so post-stop teardown deletes the rules
+  with the matching tool (nft handle delete vs iptables line-number delete);
+  the marker defaults to `nft` when absent for back-compat with pre-1.5.0
+  containers.
+
 ## [1.4.1] - 2026-06-08
 
 ### Fixed
