@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from kento import locking
+from kento import create, locking
 
 
 @pytest.fixture(scope="session")
@@ -34,3 +34,17 @@ def _kento_lock_in_tmp(_kento_lock_dir, monkeypatch):
         "_FALLBACK_LOCK",
         Path(_kento_lock_dir) / "kento.lock.fallback",
     )
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_apparmor_detection(monkeypatch):
+    """Make the apparmor `generated` pre-flight deterministic for every test.
+
+    create.generate_config() fail-closes when the host kernel has AppArmor
+    active AND apparmor_parser is absent. The unit suite must not depend on
+    the test host's real LSM state, so by default we report apparmor as
+    inactive (the pre-flight is then a no-op). Tests exercising the guard
+    re-patch these helpers explicitly; the later monkeypatch.setattr wins.
+    """
+    monkeypatch.setattr(create, "_apparmor_active", lambda: False)
+    monkeypatch.setattr(create, "_apparmor_parser_present", lambda: True)

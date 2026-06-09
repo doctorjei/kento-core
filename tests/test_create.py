@@ -108,6 +108,55 @@ class TestGenerateConfig:
             generate_config("test", tmp_path, mode="lxc")
         assert "must be 'generated' or 'unconfined'" in capsys.readouterr().err
 
+    def test_generated_preflight_fails_closed_when_parser_absent(
+            self, tmp_path, monkeypatch, capsys):
+        # AppArmor active in kernel + apparmor_parser absent + default
+        # `generated` profile → fail-closed pre-flight error (would otherwise
+        # hard-fail at lxc-start). Patch the detection helpers for determinism.
+        monkeypatch.setattr("kento.create._apparmor_active", lambda: True)
+        monkeypatch.setattr("kento.create._apparmor_parser_present", lambda: False)
+        with pytest.raises(SystemExit):
+            generate_config("test", tmp_path, mode="lxc")
+        err = capsys.readouterr().err
+        assert "apparmor_parser" in err
+        assert "KENTO_APPARMOR_PROFILE=unconfined" in err
+
+    def test_generated_preflight_ok_when_parser_present(
+            self, tmp_path, monkeypatch):
+        # AppArmor active + parser present → config written normally.
+        monkeypatch.setattr("kento.create._apparmor_active", lambda: True)
+        monkeypatch.setattr("kento.create._apparmor_parser_present", lambda: True)
+        cfg = generate_config("test", tmp_path, mode="lxc")
+        assert "lxc.apparmor.profile = generated" in cfg
+
+    def test_generated_preflight_ok_when_kernel_inactive(
+            self, tmp_path, monkeypatch):
+        # AppArmor not active in kernel → `generated` is a harmless no-op,
+        # so no error even with the parser absent.
+        monkeypatch.setattr("kento.create._apparmor_active", lambda: False)
+        monkeypatch.setattr("kento.create._apparmor_parser_present", lambda: False)
+        cfg = generate_config("test", tmp_path, mode="lxc")
+        assert "lxc.apparmor.profile = generated" in cfg
+
+    def test_unconfined_preflight_ok_when_parser_absent(
+            self, tmp_path, monkeypatch):
+        # Explicit `unconfined` needs no parser → no error even on an
+        # apparmor-active kernel with the parser absent.
+        monkeypatch.setenv("KENTO_APPARMOR_PROFILE", "unconfined")
+        monkeypatch.setattr("kento.create._apparmor_active", lambda: True)
+        monkeypatch.setattr("kento.create._apparmor_parser_present", lambda: False)
+        cfg = generate_config("test", tmp_path, mode="lxc")
+        assert "lxc.apparmor.profile = unconfined" in cfg
+
+    def test_preflight_not_consulted_for_non_lxc_mode(
+            self, tmp_path, monkeypatch):
+        # The guard lives inside the mode == "lxc" block; PVE/VM modes never
+        # consult it (PVE handles apparmor via pct; VM has no lxc config).
+        monkeypatch.setattr("kento.create._apparmor_active", lambda: True)
+        monkeypatch.setattr("kento.create._apparmor_parser_present", lambda: False)
+        cfg = generate_config("test", tmp_path, mode="pve")
+        assert "lxc.apparmor.profile" not in cfg
+
 
 class TestCreate:
     @patch("kento.create.subprocess.run")

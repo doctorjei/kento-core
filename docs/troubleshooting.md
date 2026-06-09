@@ -276,6 +276,12 @@ suspend semantics.)
 
 ### `lxc-start` fails: "Cannot use generated profile: apparmor_parser not available"
 
+As of v1.5.0 kento catches this case at create time: when the host kernel
+has AppArmor active but `apparmor_parser` is missing, `kento lxc create`
+(and `create --start` / `run`) fail-close with an actionable error before
+writing the config — so you no longer hit the confusing `lxc-start` failure
+below. The remediation is the same; the fix just surfaces earlier.
+
 Plain-LXC instances start with `lxc.apparmor.profile = generated` by
 default. On a host whose kernel has AppArmor as an active LSM, that
 profile is compiled by `apparmor_parser` — if the parser is absent the

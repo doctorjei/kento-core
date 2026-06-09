@@ -85,6 +85,12 @@ container never boots. Resolve it either way:
 On a kernel where AppArmor is *not* the active LSM, `generated` silently no-ops
 and no parser is needed.
 
+**Create-time pre-flight.** kento checks for this at `create` time: if the host
+kernel has AppArmor active but `apparmor_parser` is absent, `kento lxc create`
+fails immediately with the same two-way remediation (install `apparmor`, or set
+`KENTO_APPARMOR_PROFILE=unconfined`) rather than letting the instance hard-fail
+later at start. Explicit `unconfined` needs no parser and is never blocked.
+
 ### Port forwarding
 
 `--port HOST:GUEST` (lxc and pve-lxc) installs host DNAT/masquerade rules at

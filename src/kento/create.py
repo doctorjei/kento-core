@@ -18,6 +18,25 @@ from kento.layers import resolve_layers
 from kento.locking import kento_lock
 
 
+def _apparmor_active() -> bool:
+    """True if the kernel has AppArmor enabled as an active LSM.
+
+    Reads the canonical sysfs flag. Kept tiny so tests can monkeypatch it
+    rather than depending on the test host's real LSM state. A missing
+    module/file (OSError) means AppArmor is not in play → `generated` is a
+    harmless no-op, so we report False.
+    """
+    try:
+        return Path("/sys/module/apparmor/parameters/enabled").read_text().strip() == "Y"
+    except OSError:
+        return False
+
+
+def _apparmor_parser_present() -> bool:
+    """True if `apparmor_parser` is on PATH (needed to load `generated`)."""
+    return shutil.which("apparmor_parser") is not None
+
+
 def _run_start_or_rollback(cmd: list[str], *, name: str, scope: str) -> None:
     """Run a start command inside create()'s try block.
 
@@ -197,6 +216,25 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         if profile not in ("generated", "unconfined"):
             print(f"Error: KENTO_APPARMOR_PROFILE must be 'generated' or "
                   f"'unconfined', got {profile!r}", file=sys.stderr)
+            sys.exit(1)
+        # Fail-closed pre-flight: `generated` is loaded by apparmor_parser at
+        # lxc-start time on a host whose kernel has AppArmor active as an LSM.
+        # If the parser is absent the container HARD-FAILS at start ("Cannot
+        # use generated profile: apparmor_parser not available") — it does not
+        # degrade. Catch it here (config-gen time) with an actionable message
+        # rather than writing a doomed config that fails confusingly later.
+        # Only `generated` needs the parser; explicit `unconfined` is fine.
+        if (profile == "generated" and _apparmor_active()
+                and not _apparmor_parser_present()):
+            print(
+                "Error: AppArmor is active in this kernel but 'apparmor_parser' is not\n"
+                "installed, so LXC's default 'generated' profile cannot be loaded and the\n"
+                "instance would fail to start. Fix one of:\n"
+                "  - install the 'apparmor' package (provides apparmor_parser), or\n"
+                "  - set KENTO_APPARMOR_PROFILE=unconfined (namespaces/cgroups still\n"
+                "    enforce the host/container boundary; in-kernel MAC confinement off).",
+                file=sys.stderr,
+            )
             sys.exit(1)
         lines.append(f"lxc.apparmor.profile = {profile}")
         lines.append("lxc.apparmor.allow_nesting = 1")

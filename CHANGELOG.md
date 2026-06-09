@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Plain-LXC create now pre-flights the default `generated` AppArmor profile.
+  When the host kernel has AppArmor active as an LSM but `apparmor_parser`
+  is not installed, `generated` cannot be loaded and the container would
+  hard-fail at `lxc-start` (`Cannot use generated profile: apparmor_parser
+  not available`). kento now detects this at create/config-generation time
+  and exits with an actionable error — install the `apparmor` package, or
+  set `KENTO_APPARMOR_PROFILE=unconfined` — instead of writing a doomed
+  config that fails confusingly later at start. Only the effective
+  `generated` profile is gated (explicit `unconfined` needs no parser), and
+  only for plain `lxc` mode (PVE handles AppArmor via `pct`; VM modes have
+  no LXC config). On a kernel without AppArmor active, `generated` is a
+  harmless no-op and the check does nothing.
+
 ### Fixed
 
 - Port forwarding now falls back to `iptables` when `nft` is not installed.
