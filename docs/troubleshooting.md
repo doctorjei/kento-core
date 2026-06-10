@@ -302,6 +302,25 @@ On a kernel where AppArmor is *not* the active LSM, `generated` silently
 no-ops and no parser is needed. See [modes.md](modes.md) "AppArmor
 profile" for the full rationale.
 
+### `kento list` shows an instance as `orphan` / `kento stop` fails with "unable to find configuration file for VM \<id\>"
+
+The instance's PVE config (`/etc/pve/nodes/<node>/qemu-server/<vmid>.conf` for
+pve-vm, `.../lxc/<vmid>.conf` for pve-lxc) was removed out-of-band — e.g. someone
+ran `qm destroy` / `pct destroy` directly, the VM/CT was migrated away, or a
+create half-failed — leaving kento's state directory behind with nothing to
+manage. `kento list` marks such an instance **`orphan`** (rather than `running`
+or `stopped`). `kento stop` on an orphan no-ops; an orphan cannot be started.
+
+Clear the orphaned state with a forced destroy:
+
+```
+kento destroy -f <name>
+```
+
+This tolerates the missing PVE config (the stop step is skipped) and removes
+kento's leftover state directory and image hold. It does **not** touch any other
+instance.
+
 ## VM boot issues
 
 If the VM starts (QEMU launches) but you can't reach it via SSH:
