@@ -114,13 +114,17 @@ at stop removes the rules with the matching tool.
 
 When `--allow-nesting` is set (any mode), kento drops a
 `/etc/systemd/network/10-kento-nested-veth.network` unit into the guest
-(`[Match] Kind=veth` + `Name=!eth0` → `[Link] Unmanaged=yes`). This keeps
-the guest's own systemd-networkd from reconciling the host-side veths that
-nested LXC/docker/podman attach to an in-guest bridge — otherwise networkd
-strips them off the bridge moments after start and nested containers lose
-their network. The guest's own `eth0` is excluded, so its uplink is
-unaffected. The file lands in the writable overlay layer (cleared by
-`scrub`) and is inert on guests that do not run systemd-networkd.
+(`[Match] Name=veth*` → `[Link] Unmanaged=yes`). This keeps the guest's own
+systemd-networkd from reconciling the host-side veths that nested
+LXC/docker/podman attach to an in-guest bridge — otherwise networkd strips
+them off the bridge moments after start and nested containers lose their
+network. The match is by interface *name* (`veth*`), which is set at link
+creation, so it is race-free — unlike a `Kind=veth` match, whose `kind`
+attribute can lag link-appearance and leave a window for a broad
+`Type=ether` DHCP unit to claim the veth first. `veth*` also naturally
+excludes the guest's own `eth0` uplink, so it is unaffected. The file lands
+in the writable overlay layer (cleared by `scrub`) and is inert on guests
+that do not run systemd-networkd.
 
 ## pve-lxc mode
 
