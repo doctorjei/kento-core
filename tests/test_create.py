@@ -576,9 +576,9 @@ class TestStaticIp:
         assert "gateway=192.168.0.1" in net
         assert "dns=8.8.8.8" in net
 
-        # 10-static.network in upper layer
+        # 05-kento-static.network in upper layer
         unit = (lxc_dir / "upper" / "etc" / "systemd" / "network" /
-                "10-static.network").read_text()
+                "05-kento-static.network").read_text()
         assert "Address=192.168.0.160/22" in unit
         assert "Gateway=192.168.0.1" in unit
         assert "DNS=8.8.8.8" in unit
@@ -597,7 +597,7 @@ class TestStaticIp:
                    net_type="bridge", bridge="lxcbr0", ip="10.0.0.5/24")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
-                "10-static.network").read_text()
+                "05-kento-static.network").read_text()
         assert "Address=10.0.0.5/24" in unit
         assert "Gateway" not in unit
         assert "DNS" not in unit
@@ -720,7 +720,7 @@ class TestGuestConfig:
                    ip="10.0.0.5/24", searchdomain="example.com")
 
         unit = (tmp_path / "test" / "upper" / "etc" / "systemd" / "network" /
-                "10-static.network").read_text()
+                "05-kento-static.network").read_text()
         assert "Domains=example.com" in unit
         net = (tmp_path / "test" / "kento-net").read_text()
         assert "searchdomain=example.com" in net
@@ -850,6 +850,70 @@ class TestGuestConfig:
         content = (tmp_path / "test" / "kento-ssh-user").read_text().strip()
         assert content == "droste"
 
+    @patch("kento.create.detect_cloudinit", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_cloudinit_root_ssh_warns(self, mock_root, mock_layers, mock_run,
+                                      mock_ci, tmp_path, capsys):
+        """Injecting root keys on a cloud-init image emits a non-fatal advisory."""
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-rsa AAAA user@host\n")
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
+
+        err = capsys.readouterr().err
+        assert "injecting SSH keys for 'root' on a cloud-init image" in err
+        assert "--ssh-key-user" in err
+        assert "debian" in err
+        # Advisory only: create still proceeds (keys written).
+        assert (tmp_path / "test" / "kento-authorized-keys").is_file()
+
+    @patch("kento.create.detect_cloudinit", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_cloudinit_non_root_user_no_warn(self, mock_root, mock_layers,
+                                             mock_run, mock_ci, tmp_path, capsys):
+        """A non-root --ssh-key-user on a cloud-init image does not warn."""
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-rsa AAAA user@host\n")
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc",
+                   ssh_keys=[str(key)], ssh_key_user="debian")
+
+        assert "cloud-init image" not in capsys.readouterr().err
+
+    @patch("kento.create.detect_cloudinit", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_cloudinit_no_keys_no_warn(self, mock_root, mock_layers, mock_run,
+                                       mock_ci, tmp_path, capsys):
+        """No injected keys → no advisory even on a cloud-init image."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+
+        assert "cloud-init image" not in capsys.readouterr().err
+
+    @patch("kento.create.detect_cloudinit", return_value=False)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_non_cloudinit_root_no_warn(self, mock_root, mock_layers, mock_run,
+                                        mock_ci, tmp_path, capsys):
+        """A non-cloud image gets no advisory even for root key injection."""
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-rsa AAAA user@host\n")
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
+
+        assert "cloud-init image" not in capsys.readouterr().err
+
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
@@ -861,9 +925,9 @@ class TestGuestConfig:
 
         net = (tmp_path / "test" / "kento-net").read_text()
         assert "searchdomain=example.com" in net
-        # No 10-static.network (no IP)
+        # No 05-kento-static.network (no IP)
         assert not (tmp_path / "test" / "upper" / "etc" / "systemd" /
-                    "network" / "10-static.network").exists()
+                    "network" / "05-kento-static.network").exists()
 
 
 class TestSSHHostKeys:

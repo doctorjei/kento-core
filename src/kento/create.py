@@ -263,7 +263,13 @@ def _inject_network_config(state_dir: Path, ip: str,
                            dns: str | None = None,
                            searchdomain: str | None = None,
                            mode: str = "lxc") -> None:
-    """Write 10-static.network into the overlayfs upper layer."""
+    """Write 05-kento-static.network into the overlayfs upper layer.
+
+    The 05- prefix sorts before any image-baked drop-in (e.g. a generic
+    Kind=veth Unmanaged=yes unit). In pve-lxc the guest eth0 presents
+    Kind=veth, so such a unit would otherwise match and win; the 05- prefix
+    makes kento's per-instance config authoritative.
+    """
     # VM modes use predictable naming (e.g. enp0s2), so match by type.
     # LXC/PVE modes always have eth0 (configured by LXC veth).
     match_line = "Type=ether" if mode in ("vm", "pve-vm") else "Name=eth0"
@@ -284,7 +290,7 @@ def _inject_network_config(state_dir: Path, ip: str,
 
     net_dir = state_dir / "upper" / "etc" / "systemd" / "network"
     net_dir.mkdir(parents=True, exist_ok=True)
-    (net_dir / "10-static.network").write_text("\n".join(lines))
+    (net_dir / "05-kento-static.network").write_text("\n".join(lines))
 
 
 def _inject_hostname(state_dir: Path, hostname: str) -> None:
@@ -593,6 +599,20 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
               "--config-mode injection.", file=sys.stderr)
         shutil.rmtree(container_dir, ignore_errors=True)
         sys.exit(1)
+
+    # Advisory (non-fatal): cloud images (Debian/Ubuntu cloud) lock root SSH
+    # login and expect a distro login user (e.g. ``debian``). Injecting keys
+    # for root on such an image is a footgun, so warn — but do NOT change
+    # behavior or exit. Applies regardless of config_mode: the root-login
+    # restriction affects both injection and cloudinit seeding.
+    if (ssh_key_contents is not None and ssh_key_user == "root"
+            and detect_cloudinit(layers)):
+        print("Warning: injecting SSH keys for 'root' on a cloud-init image. "
+              "Cloud images", file=sys.stderr)
+        print("  usually disable root SSH login; if you can't connect, "
+              "recreate with", file=sys.stderr)
+        print("  --ssh-key-user <user> (e.g. 'debian' for Debian cloud "
+              "images).", file=sys.stderr)
 
     # Accumulator of rollback actions for every side-effecting step past
     # this point. On exception, each undo runs in LIFO order — see F4 in

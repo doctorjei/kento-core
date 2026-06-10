@@ -404,6 +404,31 @@ kento prune             # dry-run: show what would be reclaimed
 sudo kento prune --yes  # actually reclaim orphaned holds + freed images
 ```
 
+## SSH access
+
+### Can't SSH into a cloud-init guest as root
+
+Cloud images (Debian Cloud, Ubuntu Cloud) ship with root SSH login
+**disabled** by default and expect you to log in as a distro user instead —
+typically `debian` on Debian cloud images and `ubuntu` on Ubuntu cloud
+images. kento's `--ssh-key-user` defaults to `root`, so injecting keys for
+root on such an image is a footgun: the keys land in `/root/.ssh/`, but
+`sshd` refuses the root login and you can't connect.
+
+kento prints a non-fatal advisory at create time when it detects this
+combination (cloud-init image + root key injection). To fix, recreate the
+instance with the image's login user:
+
+```
+sudo kento lxc create <image> --ssh-key ~/.ssh/id_ed25519.pub \
+    --ssh-key-user debian
+```
+
+(Use `ubuntu` for Ubuntu cloud images, or whatever default user the image
+documents.) The advisory is informational only — create still proceeds, so
+an instance made with the root default will exist; just destroy and recreate
+it with the correct `--ssh-key-user`.
+
 ## Networking / port forwarding
 
 ### `--port` forwarding does not work / `localhost:<port>` refuses

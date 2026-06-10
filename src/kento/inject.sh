@@ -158,7 +158,11 @@ if [ -n "$STATIC_IP" ]; then
         [ -n "${STATIC_GW:-}" ] && echo "Gateway=$STATIC_GW"
         [ -n "${STATIC_DNS:-}" ] && echo "DNS=$STATIC_DNS"
         [ -n "${STATIC_SEARCH:-}" ] && echo "Domains=$STATIC_SEARCH"
-    } > "$NET_DIR/10-static.network"
+    # The 05- prefix sorts before any image-baked drop-in (e.g. a generic
+    # Kind=veth Unmanaged=yes unit like 10-lxc-veth-unmanaged.network). In
+    # pve-lxc the guest eth0 presents Kind=veth, so such a unit would match and
+    # win; naming kento's per-instance config 05- makes it authoritative.
+    } > "$NET_DIR/05-kento-static.network"
 elif [ "${WANT_DHCP:-0}" = 1 ]; then
     # LXC/pve-lxc bridge + DHCP: the image may only match Name=en* (VM-oriented
     # networkd config), but the LXC veth is eth0, so add a matching DHCP unit.
@@ -172,7 +176,9 @@ elif [ "${WANT_DHCP:-0}" = 1 ]; then
         echo "DHCP=yes"
         [ -n "${STATIC_DNS:-}" ] && echo "DNS=$STATIC_DNS"
         [ -n "${STATIC_SEARCH:-}" ] && echo "Domains=$STATIC_SEARCH"
-    } > "$NET_DIR/10-dhcp.network"
+    # 05- prefix: sort before image drop-ins (e.g. a Kind=veth Unmanaged unit
+    # that would otherwise claim the pve-lxc eth0 veth) so kento's config wins.
+    } > "$NET_DIR/05-kento-dhcp.network"
 elif [ -n "${STATIC_DNS:-}" ] || [ -n "${STATIC_SEARCH:-}" ]; then
     # No static IP but DNS/search set — use resolved drop-in
     RESOLVED_DIR="$ROOTFS/etc/systemd/resolved.conf.d"

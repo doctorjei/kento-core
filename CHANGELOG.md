@@ -5,6 +5,33 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-06-10
+
+### Added
+
+- Create-time advisory when `--ssh-key-user` is left at the default `root`
+  on a cloud-init image. Cloud images (Debian/Ubuntu cloud) typically
+  disable root SSH login, so keys injected for `root` often can't be used to
+  connect. kento now prints a non-fatal warning suggesting
+  `--ssh-key-user <user>` (e.g. `debian`). Create still proceeds unchanged.
+
+### Fixed
+
+- PVE-LXC guests from images that bake an over-broad `Kind=veth` unmanaged
+  systemd-networkd drop-in (e.g. `10-lxc-veth-unmanaged.network` with
+  `[Match] Kind=veth` + `[Link] Unmanaged=yes`) came up with **no network**.
+  systemd-networkd assigns each link to the first matching `.network` by
+  lexical filename order, and under PVE the guest `eth0` presents
+  `Kind=veth`, so the image's `10-`-prefixed unit sorted before kento's
+  `10-static.network` and claimed `eth0` as unmanaged before kento's
+  addressing config could apply. kento now names its injected addressing
+  units `05-kento-static.network` / `05-kento-dhcp.network` so they sort
+  first and win in **both** plain-LXC and PVE-LXC modes. Plain-LXC was
+  unaffected (its `eth0` does not present `Kind=veth`); this fixes the
+  plain-vs-PVE mode divergence. The `--allow-nesting` drop-in
+  (`10-kento-nested-veth.network`) is unchanged — it targets `Name=!eth0`
+  and governs nested veths, not `eth0`.
+
 ## [1.5.0] - 2026-06-10
 
 ### Changed

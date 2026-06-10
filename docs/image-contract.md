@@ -101,12 +101,20 @@ that may not appear:
   (often `enp0s2` or similar, depending on QEMU machine type).
 
 - DHCP as default (image-level) is supported. Kento overrides via
-  injection of a `10-static.network` file (lexically first, wins over
-  any `50-`/`80-`/etc. image defaults).
+  injection of a `05-kento-static.network` (or `05-kento-dhcp.network`)
+  file. The `05-` prefix is deliberate: systemd-networkd assigns each link
+  to the *first* matching `.network` by lexical filename order, and an image
+  may bake a `10-`-prefixed over-broad drop-in — e.g.
+  `10-lxc-veth-unmanaged.network` with `[Match] Kind=veth` +
+  `[Link] Unmanaged=yes`. In PVE-LXC the guest `eth0` presents `Kind=veth`,
+  so such a unit would otherwise sort before a `10-static.network` and claim
+  `eth0`, leaving it unmanaged so kento's address never applies. Kento does
+  not patch the image's drop-in at runtime; it makes its own injected config
+  authoritative by sorting first.
 
-- If the image ships a DHCP `.network` file, its numeric prefix must
-  be greater than `10-` (so kento's static config wins when injected).
-  A prefix of `80-dhcp.network` is safe; `05-dhcp.network` is not.
+- If the image ships its own `.network` files, their numeric prefix must
+  be greater than `05-` (so kento's injected config wins). A prefix of
+  `10-`/`80-` is safe; `00-`/`05-` is not.
 
 ### Hostname
 

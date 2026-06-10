@@ -56,7 +56,7 @@ def test_inject_no_bashisms():
 def test_inject_reads_lxc_config_for_ip():
     script = generate_inject()
     assert "ipv4" in script
-    assert "10-static.network" in script
+    assert "05-kento-static.network" in script
 
 
 def test_inject_reads_pve_config_for_ip():
@@ -109,8 +109,33 @@ def test_inject_resolved_dropin_for_dns_without_ip():
 def test_inject_lxc_dhcp_network_for_bridge_without_ip():
     """LXC/pve-lxc bridge + DHCP injects an eth0 DHCP .network."""
     script = generate_inject()
-    assert "10-dhcp.network" in script
+    assert "05-kento-dhcp.network" in script
     assert "DHCP=yes" in script
+
+
+def test_inject_addressing_units_sort_before_image_veth_dropin():
+    """Regression (H-A): kento's addressing units must out-sort an image
+    Kind=veth Unmanaged drop-in.
+
+    systemd-networkd assigns each link to the FIRST matching .network by
+    lexical filename order. Some images bake
+    10-lxc-veth-unmanaged.network ([Match] Kind=veth + [Link] Unmanaged=yes).
+    In pve-lxc the guest eth0 presents Kind=veth, so that unit would match eth0
+    and win, leaving eth0 unmanaged → kento's IP never applies → no network.
+    The 05- prefix makes kento's explicit per-instance config authoritative in
+    BOTH plain-LXC and PVE-LXC modes.
+    """
+    veth_unmanaged = "10-lxc-veth-unmanaged.network"
+    # Both kento units must sort strictly before the image drop-in (and before
+    # the old 10-prefixed names that caused the bug).
+    assert "05-kento-static.network" < veth_unmanaged
+    assert "05-kento-static.network" < "10-static.network"
+    assert "05-kento-dhcp.network" < veth_unmanaged
+    assert "05-kento-dhcp.network" < "10-dhcp.network"
+    # And the inject script actually emits these names.
+    script = generate_inject()
+    assert "05-kento-static.network" in script
+    assert "05-kento-dhcp.network" in script
 
 
 def test_inject_injects_timezone():
@@ -371,7 +396,7 @@ class TestInjectDHCPNetworkExecution:
         )
 
     def test_bridge_dhcp_writes_dhcp_network(self, tmp_path):
-        """lxc.net.0.link present, no ipv4.address → 10-dhcp.network (eth0)."""
+        """lxc.net.0.link present, no ipv4.address → 05-kento-dhcp.network (eth0)."""
         rootfs, container = self._setup(tmp_path)
         (container / "config").write_text(
             "lxc.uts.name = box\n"
@@ -380,16 +405,16 @@ class TestInjectDHCPNetworkExecution:
         )
         self._run(rootfs, container)
         net_dir = rootfs / "etc" / "systemd" / "network"
-        dhcp = net_dir / "10-dhcp.network"
+        dhcp = net_dir / "05-kento-dhcp.network"
         assert dhcp.is_file()
         content = dhcp.read_text()
         assert "Name=eth0" in content
         assert "DHCP=yes" in content
         # The static unit must NOT be written in DHCP mode.
-        assert not (net_dir / "10-static.network").exists()
+        assert not (net_dir / "05-kento-static.network").exists()
 
     def test_static_ip_keeps_static_no_dhcp(self, tmp_path):
-        """lxc.net.0.ipv4.address set → 10-static.network, never 10-dhcp."""
+        """lxc.net.0.ipv4.address set → 05-kento-static.network, never 10-dhcp."""
         rootfs, container = self._setup(tmp_path)
         (container / "config").write_text(
             "lxc.net.0.link = lxcbr0\n"
@@ -398,10 +423,10 @@ class TestInjectDHCPNetworkExecution:
         )
         self._run(rootfs, container)
         net_dir = rootfs / "etc" / "systemd" / "network"
-        static = net_dir / "10-static.network"
+        static = net_dir / "05-kento-static.network"
         assert static.is_file()
         assert "Address=10.0.0.5/24" in static.read_text()
-        assert not (net_dir / "10-dhcp.network").exists()
+        assert not (net_dir / "05-kento-dhcp.network").exists()
 
     def test_network_none_writes_neither(self, tmp_path):
         """No lxc.net.0.link (--network none) → no .network file at all."""
@@ -411,8 +436,8 @@ class TestInjectDHCPNetworkExecution:
         )
         self._run(rootfs, container)
         net_dir = rootfs / "etc" / "systemd" / "network"
-        assert not (net_dir / "10-dhcp.network").exists()
-        assert not (net_dir / "10-static.network").exists()
+        assert not (net_dir / "05-kento-dhcp.network").exists()
+        assert not (net_dir / "05-kento-static.network").exists()
 
     def test_dhcp_carries_dns_and_search(self, tmp_path):
         """DNS/search from kento-net flow into the DHCP unit."""
@@ -424,7 +449,7 @@ class TestInjectDHCPNetworkExecution:
             "dns=1.1.1.1\nsearchdomain=example.org\n"
         )
         self._run(rootfs, container)
-        dhcp = rootfs / "etc" / "systemd" / "network" / "10-dhcp.network"
+        dhcp = rootfs / "etc" / "systemd" / "network" / "05-kento-dhcp.network"
         assert dhcp.is_file()
         content = dhcp.read_text()
         assert "DHCP=yes" in content
@@ -553,7 +578,7 @@ class TestInjectNestedVethExecution:
             )
             (container / "kento-nesting").write_text(nesting + "\n")
             self._run(rootfs, container)
-            return (rootfs / "etc" / "systemd" / "network" / "10-static.network").read_text()
+            return (rootfs / "etc" / "systemd" / "network" / "05-kento-static.network").read_text()
         (tmp_path / "0").mkdir()
         (tmp_path / "1").mkdir()
         assert build("0") == build("1")
@@ -568,7 +593,7 @@ class TestInjectNestedVethExecution:
             )
             (container / "kento-nesting").write_text(nesting + "\n")
             self._run(rootfs, container)
-            return (rootfs / "etc" / "systemd" / "network" / "10-dhcp.network").read_text()
+            return (rootfs / "etc" / "systemd" / "network" / "05-kento-dhcp.network").read_text()
         (tmp_path / "0").mkdir()
         (tmp_path / "1").mkdir()
         assert build("0") == build("1")
