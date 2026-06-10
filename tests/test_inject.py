@@ -466,8 +466,10 @@ def test_inject_has_nested_veth_block():
     script = generate_inject()
     assert "kento-nesting" in script
     assert "10-kento-nested-veth.network" in script
-    assert "Kind=veth" in script
-    assert "Name=!eth0" in script
+    # Match by Name=veth* (race-free; name set at creation; veth* excludes
+    # eth0). The exact emitted drop-in content is locked by the execution test
+    # TestInjectNestedVethExecution.EXPECTED (no Kind=veth / Name=!eth0).
+    assert "Name=veth*" in script
     assert "Unmanaged=yes" in script
 
 
@@ -482,16 +484,16 @@ def test_inject_nested_veth_before_cloudinit_exit():
 class TestInjectNestedVethExecution:
     """Execute inject.sh to verify the --allow-nesting nested-veth drop-in.
 
-    The drop-in leaves nested host-side veths unmanaged (Kind=veth) while
-    protecting the guest's own uplink (Name=!eth0). Gated solely on
-    kento-nesting == 1; covers both injection and cloudinit config modes and
-    all modes.
+    The drop-in leaves nested host-side veths unmanaged, matched by Name=veth*
+    (race-free; the name is set at creation, unlike Kind=veth whose attribute
+    can lag). veth* naturally excludes the guest's own uplink eth0. Gated
+    solely on kento-nesting == 1; covers both injection and cloudinit config
+    modes and all modes.
     """
 
     EXPECTED = (
         "[Match]\n"
-        "Kind=veth\n"
-        "Name=!eth0\n"
+        "Name=veth*\n"
         "\n"
         "[Link]\n"
         "Unmanaged=yes\n"

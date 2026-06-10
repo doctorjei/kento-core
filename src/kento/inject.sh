@@ -21,9 +21,13 @@ fi
 
 # --allow-nesting: inject a networkd drop-in so the guest leaves nested
 # host-side veths unmanaged (fixes nested LXC/docker/podman bridging on
-# networkd images). Excludes eth0 (Name=!eth0) so the guest's own uplink —
-# itself a veth-kind device inside an LXC — is untouched. Runs BEFORE the
-# cloudinit early-exit so both injection and cloudinit guests get it.
+# networkd images). Matches by Name=veth* — the interface NAME, which is set
+# at creation, so the match is race-free. (Kind=veth would also work but the
+# kind attribute can lag link-appearance, leaving a window where an image's
+# Type=ether DHCP unit claims the veth and strips its bridge master before the
+# unmanaged match applies.) veth* naturally excludes the guest's own uplink
+# eth0, so no separate exclusion is needed. Runs BEFORE the cloudinit
+# early-exit so both injection and cloudinit guests get it.
 NESTING="0"
 NESTING_FILE="$CONTAINER_DIR/kento-nesting"
 if [ -f "$NESTING_FILE" ]; then
@@ -34,8 +38,7 @@ if [ "$NESTING" = "1" ]; then
     mkdir -p "$NEST_NET_DIR"
     {
         echo "[Match]"
-        echo "Kind=veth"
-        echo "Name=!eth0"
+        echo "Name=veth*"
         echo ""
         echo "[Link]"
         echo "Unmanaged=yes"

@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connect. kento now prints a non-fatal warning suggesting
   `--ssh-key-user <user>` (e.g. `debian`). Create still proceeds unchanged.
 
+### Changed
+
+- The `--allow-nesting` networkd drop-in kento injects to keep a guest from
+  managing its nested host-side veths (`10-kento-nested-veth.network`) now
+  matches by `[Match] Name=veth*` instead of `[Match] Kind=veth` + `Name=!eth0`.
+  The interface *name* is set at link creation, so the match is race-free; the
+  `kind` attribute can lag link-appearance, leaving a window where an image's
+  broad `Type=ether` DHCP unit could claim a nested veth and strip its bridge
+  master before the unmanaged match applies. `veth*` also naturally excludes
+  the guest's own `eth0` uplink, so the separate `Name=!eth0` exclusion is no
+  longer needed. Defense-in-depth hardening — not tied to a reproduced failure.
+
 ### Fixed
 
 - PVE-LXC guests from images that bake an over-broad `Kind=veth` unmanaged
