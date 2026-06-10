@@ -10,7 +10,7 @@ from kento import (
     require_root, upper_base, LXC_BASE, VM_BASE,
     sanitize_image_name, next_instance_name, resolve_container,
     resolve_in_namespace, resolve_any, check_name_conflict,
-    detect_bridge, resolve_network, is_running,
+    detect_bridge, resolve_network, is_running, pve_config_exists,
 )
 
 
@@ -570,8 +570,9 @@ class TestResolveNetwork:
 
 
 class TestIsRunningPveVm:
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_running(self, mock_run, tmp_path):
+    def test_running(self, mock_run, mock_cfg, tmp_path):
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-vmid").write_text("100\n")
@@ -583,8 +584,9 @@ class TestIsRunningPveVm:
             capture_output=True, text=True, timeout=5,
         )
 
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_stopped(self, mock_run, tmp_path):
+    def test_stopped(self, mock_run, mock_cfg, tmp_path):
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-vmid").write_text("100\n")
@@ -596,6 +598,18 @@ class TestIsRunningPveVm:
         d = tmp_path / "test"
         d.mkdir()
         assert is_running(d, "pve-vm") is False
+
+    @patch("kento.pve_config_exists", return_value=False)
+    @patch("subprocess.run")
+    def test_missing_config_returns_false(self, mock_run, mock_cfg, tmp_path):
+        """PVE config gone (destroyed out-of-band) => not running, and we
+        never invoke `qm status` (no spurious assume-running warning)."""
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-vmid").write_text("100\n")
+        assert is_running(d, "pve-vm") is False
+        mock_run.assert_not_called()
+        mock_cfg.assert_called_once_with("100", "pve-vm")
 
 
 # --- is_running timeout / non-zero rc defensive paths ---
@@ -610,8 +624,9 @@ class TestIsRunningPveTimeouts:
     would leak state.
     """
 
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_vm_qm_timeout(self, mock_run, tmp_path, capsys):
+    def test_is_running_pve_vm_qm_timeout(self, mock_run, mock_cfg, tmp_path, capsys):
         import subprocess as _sp
         d = tmp_path / "test"
         d.mkdir()
@@ -622,8 +637,9 @@ class TestIsRunningPveTimeouts:
         assert "qm status timed out" in captured.err
         assert "assuming instance may be running" in captured.err
 
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_lxc_pct_timeout(self, mock_run, tmp_path, capsys):
+    def test_is_running_pve_lxc_pct_timeout(self, mock_run, mock_cfg, tmp_path, capsys):
         import subprocess as _sp
         d = tmp_path / "100"
         d.mkdir()
@@ -633,8 +649,10 @@ class TestIsRunningPveTimeouts:
         assert "pct status timed out" in captured.err
         assert "assuming instance may be running" in captured.err
 
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_vm_qm_nonzero_rc(self, mock_run, tmp_path, capsys):
+    def test_is_running_pve_vm_qm_nonzero_rc(self, mock_run, mock_cfg, tmp_path, capsys):
+        """Config PRESENT but status failed => transient, assume running."""
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-vmid").write_text("100\n")
@@ -644,8 +662,10 @@ class TestIsRunningPveTimeouts:
         captured = capsys.readouterr()
         assert "qm status returned non-zero" in captured.err
 
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_lxc_pct_nonzero_rc(self, mock_run, tmp_path, capsys):
+    def test_is_running_pve_lxc_pct_nonzero_rc(self, mock_run, mock_cfg, tmp_path, capsys):
+        """Config PRESENT but status failed => transient, assume running."""
         d = tmp_path / "100"
         d.mkdir()
         mock_run.return_value.returncode = 1
@@ -654,8 +674,21 @@ class TestIsRunningPveTimeouts:
         captured = capsys.readouterr()
         assert "pct status returned non-zero" in captured.err
 
+    @patch("kento.pve_config_exists", return_value=False)
     @patch("subprocess.run")
-    def test_is_running_pve_vm_passes_timeout_kwarg(self, mock_run, tmp_path):
+    def test_is_running_pve_lxc_missing_config_returns_false(
+        self, mock_run, mock_cfg, tmp_path
+    ):
+        """PVE config gone => not running; `pct status` never invoked."""
+        d = tmp_path / "100"
+        d.mkdir()
+        assert is_running(d, "pve") is False
+        mock_run.assert_not_called()
+        mock_cfg.assert_called_once_with("100", "pve")
+
+    @patch("kento.pve_config_exists", return_value=True)
+    @patch("subprocess.run")
+    def test_is_running_pve_vm_passes_timeout_kwarg(self, mock_run, mock_cfg, tmp_path):
         """The qm status call must include timeout=5."""
         d = tmp_path / "test"
         d.mkdir()
@@ -666,8 +699,9 @@ class TestIsRunningPveTimeouts:
         _, kwargs = mock_run.call_args
         assert kwargs.get("timeout") == 5
 
+    @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_lxc_passes_timeout_kwarg(self, mock_run, tmp_path):
+    def test_is_running_pve_lxc_passes_timeout_kwarg(self, mock_run, mock_cfg, tmp_path):
         """The pct status call must include timeout=5."""
         d = tmp_path / "100"
         d.mkdir()
@@ -676,3 +710,42 @@ class TestIsRunningPveTimeouts:
         is_running(d, "pve")
         _, kwargs = mock_run.call_args
         assert kwargs.get("timeout") == 5
+
+
+# --- pve_config_exists helper ---
+
+
+class TestPveConfigExists:
+    @patch("kento.pve._pve_node_name", return_value="pve")
+    def test_pve_vm_present(self, mock_node, tmp_path):
+        with patch("kento.pve.PVE_DIR", tmp_path):
+            conf = tmp_path / "nodes" / "pve" / "qemu-server"
+            conf.mkdir(parents=True)
+            (conf / "100.conf").write_text("name: x\n")
+            assert pve_config_exists("100", "pve-vm") is True
+
+    @patch("kento.pve._pve_node_name", return_value="pve")
+    def test_pve_vm_missing(self, mock_node, tmp_path):
+        with patch("kento.pve.PVE_DIR", tmp_path):
+            (tmp_path / "nodes" / "pve" / "qemu-server").mkdir(parents=True)
+            assert pve_config_exists("100", "pve-vm") is False
+
+    @patch("kento.pve._pve_node_name", return_value="pve")
+    def test_pve_lxc_present(self, mock_node, tmp_path):
+        with patch("kento.pve.PVE_DIR", tmp_path):
+            conf = tmp_path / "nodes" / "pve" / "lxc"
+            conf.mkdir(parents=True)
+            (conf / "100.conf").write_text("hostname: x\n")
+            assert pve_config_exists("100", "pve") is True
+
+    @patch("kento.pve._pve_node_name", return_value="pve")
+    def test_pve_lxc_missing(self, mock_node, tmp_path):
+        with patch("kento.pve.PVE_DIR", tmp_path):
+            assert pve_config_exists("100", "pve") is False
+
+    @patch("kento.pve._pve_node_name", side_effect=OSError("boom"))
+    def test_node_resolution_failure_falls_back_true(self, mock_node, tmp_path):
+        """If the node name can't be resolved, fall back to True (preserve
+        existing behavior rather than crash or wrongly declare gone)."""
+        with patch("kento.pve.PVE_DIR", tmp_path):
+            assert pve_config_exists("100", "pve") is True

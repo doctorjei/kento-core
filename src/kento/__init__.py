@@ -206,6 +206,31 @@ def next_instance_name(base_name: str, scan_dir: Path,
         n += 1
 
 
+def pve_config_exists(vmid: str, mode: str) -> bool:
+    """Return whether the PVE config file for vmid/mode exists on this node.
+
+    A missing config means the instance is GONE (destroyed/lost out-of-band),
+    leaving kento's state dir orphaned. Callers use this to distinguish that
+    case from a transient status-query failure.
+
+    Path construction mirrors delete_qm_config / delete_pve_config in pve.py:
+      - pve-vm: PVE_DIR/nodes/<node>/qemu-server/<vmid>.conf
+      - pve:    PVE_DIR/nodes/<node>/lxc/<vmid>.conf
+
+    Defensive: if the node name can't be resolved (no /etc/pve/local and no
+    hostname), fall back to True so callers keep their existing behavior
+    rather than crashing or wrongly declaring an instance gone.
+    """
+    from kento.pve import PVE_DIR, _pve_node_name
+    try:
+        node = _pve_node_name()
+    except Exception:
+        return True
+    subdir = "qemu-server" if mode == "pve-vm" else "lxc"
+    conf_path = PVE_DIR / "nodes" / node / subdir / f"{vmid}.conf"
+    return conf_path.is_file()
+
+
 def is_running(container_dir: Path, mode: str) -> bool:
     """Check if a container is running, using the mode-appropriate method.
 
@@ -225,6 +250,12 @@ def is_running(container_dir: Path, mode: str) -> bool:
         if not vmid_file.is_file():
             return False
         vmid = vmid_file.read_text().strip()
+        # A missing PVE config means the instance is GONE (destroyed
+        # out-of-band), leaving our state dir orphaned. Treat as not-running
+        # so `stop` no-ops and `destroy -f` skips the stop. Only the
+        # config-PRESENT, status-failed case is a transient "assume running".
+        if not pve_config_exists(vmid, "pve-vm"):
+            return False
         try:
             result = subprocess.run(
                 ["qm", "status", vmid],
@@ -246,6 +277,9 @@ def is_running(container_dir: Path, mode: str) -> bool:
             return True
         return "running" in result.stdout
     elif mode == "pve":
+        # Missing PVE config => instance gone (see pve-vm branch above).
+        if not pve_config_exists(container_dir.name, "pve"):
+            return False
         try:
             result = subprocess.run(
                 ["pct", "status", container_dir.name],

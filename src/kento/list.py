@@ -3,7 +3,7 @@
 import subprocess
 from pathlib import Path
 
-from kento import LXC_BASE, VM_BASE, is_running, read_mode
+from kento import LXC_BASE, VM_BASE, is_running, pve_config_exists, read_mode
 
 
 def list_containers(scope: str | None = None, show_size: bool = False) -> None:
@@ -28,7 +28,21 @@ def list_containers(scope: str | None = None, show_size: bool = False) -> None:
         mode = read_mode(container_dir)
         ctype = "pve-lxc" if mode == "pve" else mode
 
-        status = "running" if is_running(container_dir, mode) else "stopped"
+        # For PVE modes, surface an orphaned instance (PVE config gone,
+        # destroyed out-of-band) as "orphan" so the user can see it and
+        # clean it up with `destroy -f`.
+        if mode in ("pve", "pve-vm"):
+            if mode == "pve-vm":
+                vmid_file = container_dir / "kento-vmid"
+                vmid = vmid_file.read_text().strip() if vmid_file.is_file() else None
+            else:
+                vmid = container_dir.name
+            if vmid is None or not pve_config_exists(vmid, mode):
+                status = "orphan"
+            else:
+                status = "running" if is_running(container_dir, mode) else "stopped"
+        else:
+            status = "running" if is_running(container_dir, mode) else "stopped"
 
         if show_size:
             state_file = container_dir / "kento-state"

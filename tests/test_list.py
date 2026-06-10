@@ -87,8 +87,10 @@ def _mock_mixed_run(args, **kwargs):
     return result
 
 
+@patch("kento.pve_config_exists", return_value=True)
+@patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_list_pve_container(mock_run, tmp_path, capsys):
+def test_list_pve_container(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
     lxc_dir = tmp_path / "100"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
@@ -108,8 +110,36 @@ def test_list_pve_container(mock_run, tmp_path, capsys):
     assert "running" in output
 
 
+@patch("kento.list.pve_config_exists", return_value=False)
+@patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
+def test_list_pve_orphan(mock_run, mock_cfg, tmp_path, capsys):
+    """A pve instance whose PVE config is gone shows as 'orphan'."""
+    lxc_dir = tmp_path / "100"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-name").write_text("webbox\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers()
+
+    output = capsys.readouterr().out
+    assert "webbox" in output
+    assert "orphan" in output
+    # We must NOT have shelled out to pct status for an orphan.
+    for call in mock_run.call_args_list:
+        argv = call.args[0] if call.args else call.kwargs.get("args", [])
+        assert "pct" not in argv
+
+
+@patch("kento.pve_config_exists", return_value=True)
+@patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_run)
-def test_list_mixed_lxc_and_pve(mock_run, tmp_path, capsys):
+def test_list_mixed_lxc_and_pve(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
     # LXC container
     lxc = tmp_path / "mybox"
     lxc.mkdir()
@@ -288,8 +318,10 @@ def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
     assert "lxc" in data_line
 
 
+@patch("kento.pve_config_exists", return_value=True)
+@patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_pve_mode_shows_type_pve_lxc(mock_run, tmp_path, capsys):
+def test_pve_mode_shows_type_pve_lxc(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
     """Containers with mode 'pve' should display TYPE 'pve-lxc'."""
     lxc_dir = tmp_path / "100"
     lxc_dir.mkdir()
@@ -460,6 +492,33 @@ class TestListPveVm:
 
         output = capsys.readouterr().out
         assert "test" in output
+
+    @patch("kento.list.pve_config_exists", return_value=False)
+    @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
+    def test_pve_vm_orphan(self, mock_run, mock_cfg, tmp_path, capsys):
+        """A pve-vm whose PVE config is gone shows as 'orphan' (vmid read
+        from kento-vmid; qm status never invoked)."""
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        vm_dir = vm / "test"
+        vm_dir.mkdir()
+        (vm_dir / "kento-image").write_text("myimage\n")
+        (vm_dir / "kento-mode").write_text("pve-vm\n")
+        (vm_dir / "kento-name").write_text("test\n")
+        (vm_dir / "kento-vmid").write_text("100\n")
+        (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+        (vm_dir / "upper").mkdir()
+
+        with patch("kento.list.LXC_BASE", lxc), \
+             patch("kento.list.VM_BASE", vm):
+            list_containers()
+
+        output = capsys.readouterr().out
+        assert "test" in output
+        assert "orphan" in output
+        mock_cfg.assert_called_once_with("100", "pve-vm")
 
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
     def test_pve_vm_excluded_from_lxc_scope(self, mock_run, tmp_path, capsys):

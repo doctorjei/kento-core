@@ -203,8 +203,15 @@ def test_reset_pve_refuses_running(mock_root, mock_run, tmp_path):
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
     (lxc_dir / "kento-mode").write_text("pve\n")
+    # is_running treats a missing PVE config as gone; for the container to
+    # count as "running" (and reset to refuse) its config must exist.
+    conf_dir = tmp_path / "pve" / "nodes" / "node1" / "lxc"
+    conf_dir.mkdir(parents=True)
+    (conf_dir / "100.conf").write_text("hostname: mybox\n")
 
-    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
+         patch("kento.pve._pve_node_name", return_value="node1"):
         with pytest.raises(SystemExit):
             reset("mybox")
 

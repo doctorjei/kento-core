@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plain-vs-PVE mode divergence. The `--allow-nesting` drop-in
   (`10-kento-nested-veth.network`) is unchanged — it targets `Name=!eth0`
   and governs nested veths, not `eth0`.
+- kento treated a pve/pve-vm instance whose PVE config is gone (destroyed
+  out-of-band) as "running" — any non-zero `qm`/`pct status` was
+  assumed-running — so it appeared `running` in `kento list` and `kento stop`
+  hard-errored. kento now recognizes a missing PVE config as not-running
+  (shown as `orphan` in `list`); `destroy -f` cleans up the orphaned state.
 
 ## [1.5.0] - 2026-06-10
 

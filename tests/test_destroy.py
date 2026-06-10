@@ -125,6 +125,11 @@ def test_destroy_pve_removes_directory(mock_root, mock_run, tmp_path):
 @patch("kento.destroy.require_root")
 def test_destroy_pve_stops_running_container(mock_root, mock_run, tmp_path):
     _make_container(tmp_path, name="100", mode="pve")
+    # is_running treats a missing PVE config as gone, so for the container to
+    # count as "running" (and thus trigger a stop) its config must exist.
+    conf_dir = tmp_path / "pve" / "nodes" / "node1" / "lxc"
+    conf_dir.mkdir(parents=True)
+    (conf_dir / "100.conf").write_text("hostname: mybox\n")
 
     with patch("kento.destroy.resolve_container", return_value=tmp_path / "100"), \
          patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
