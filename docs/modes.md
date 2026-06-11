@@ -43,6 +43,8 @@ non-PVE host.
 - **Config location:** `/var/lib/lxc/<name>/config`
 - **Memory/CPU:** no limit by default (override with `--memory` / `--cores`)
 - **Nesting:** disabled by default (`--allow-nesting` to permit nested containers)
+- **Privilege:** privileged by default -- container root maps to host root,
+  no UID/GID shift (see below)
 - **AppArmor:** per-container profile via `lxc.apparmor.profile = generated` (see below)
 - **Config pass-through:** `--lxc-arg "KEY = VALUE"` appends raw lines to
   the native `config` (plain-LXC only; on PVE use `--pve-arg`). Available
@@ -90,6 +92,34 @@ kernel has AppArmor active but `apparmor_parser` is absent, `kento lxc create`
 fails immediately with the same two-way remediation (install `apparmor`, or set
 `KENTO_APPARMOR_PROFILE=unconfined`) rather than letting the instance hard-fail
 later at start. Explicit `unconfined` needs no parser and is never blocked.
+
+### Privilege level
+
+Kento creates **privileged** containers by default in both LXC modes. This
+falls out of the config kento generates:
+
+- **plain lxc:** no `lxc.idmap` line is emitted, so there is no UID/GID
+  remapping -- container root (UID 0) is host root (UID 0).
+- **pve-lxc:** no `unprivileged: 1` key is written; `pct` treats the absent
+  key as privileged (`unprivileged: 0`).
+
+The reason is the OCI layer store. Kento reads podman's layers directly and
+stacks them read-only via overlayfs -- it does not copy or rewrite them. An
+unprivileged container needs a UID shift (idmap), which would mismatch the
+ownership baked into those shared layers; making it work would require
+idmapped mounts or a chown pass, neither of which fits kento's "don't
+duplicate or modify layers" principle. Privileged side-steps that.
+
+Privileged does **not** mean unconfined: in plain-lxc the `generated` AppArmor
+profile (above) still enforces the host/container boundary, and namespaces and
+cgroups apply in both modes. The trade-off is that container root is uid 0 on
+the host, so a kernel-level container escape lands as host root. Run untrusted
+or multi-tenant workloads in `vm`/`pve-vm` mode instead.
+
+> An explicit `--unprivileged` opt-in (idmap-based) is planned -- see the task
+> board. Today the only privilege control is the `--pve-arg`/`--lxc-arg`
+> pass-throughs (e.g. `--pve-arg 'unprivileged: 1'` on PVE), which kento does
+> not validate against the overlayfs ownership caveat above.
 
 ### Port forwarding
 
@@ -140,6 +170,9 @@ be managed with `pct`. Created with `kento lxc create` on a PVE host
 - **Memory:** 512 MB default (override with `--memory`, configurable via `/etc/kento/lxc.conf`)
 - **CPU:** 1 core default (override with `--cores`, configurable via `/etc/kento/lxc.conf`)
 - **Nesting:** enabled by default
+- **Privilege:** privileged by default -- kento writes no `unprivileged: 1`
+  key, and `pct` treats the absent key as privileged (see "Privilege level"
+  under lxc mode)
 - **VMID:** auto-assigned (lowest free >= 100), or specify with `--vmid`
 
 ### VMID allocation
