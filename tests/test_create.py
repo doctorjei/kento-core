@@ -382,6 +382,33 @@ class TestCreate:
                 create("myimage:latest", name="dup", mode="pve", vmid=101)
 
     @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", side_effect=SystemExit(1))
+    @patch("kento.create.require_root")
+    def test_missing_image_leaves_no_orphan_dir(self, mock_root, mock_layers,
+                                                mock_run, tmp_path):
+        """F2: a missing image must abort with no half-built instance dir.
+
+        resolve_layers sys.exits when the image isn't in the local store. That
+        must happen before any directory is created, so a failed create leaves
+        nothing behind under the namespace base (the orphan dir was previously
+        invisible to list/destroy/info and blocked recreate).
+        """
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir()
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            with pytest.raises(SystemExit):
+                create("missing:image", name="ghost", mode="vm")
+
+        # No instance dir for this name, and the vm namespace stays empty.
+        assert not (vm_base / "ghost").exists()
+        assert list(vm_base.iterdir()) == []
+
+    @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_refuses_duplicate_name_across_namespaces(self, mock_root,

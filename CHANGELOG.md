@@ -5,7 +5,7 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.1] - 2026-06-10
+## [1.5.1] - 2026-06-11
 
 ### Added
 
@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   master before the unmanaged match applies. `veth*` also naturally excludes
   the guest's own `eth0` uplink, so the separate `Name=!eth0` exclusion is no
   longer needed. Defense-in-depth hardening — not tied to a reproduced failure.
+- `kento create` now resolves and validates the OCI image *before* allocating
+  a name/VMID or creating any instance directory, so a missing image fails
+  with zero filesystem side effects.
+- The "image not found" error from `create` now names the local store and
+  hints the fix (`kento pull <image>`) instead of a bare message. `create`
+  remains network-free by design — it does not implicitly pull.
 
 ### Fixed
 
@@ -48,6 +54,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assumed-running — so it appeared `running` in `kento list` and `kento stop`
   hard-errored. kento now recognizes a missing PVE config as not-running
   (shown as `orphan` in `list`); `destroy -f` cleans up the orphaned state.
+- A failed `kento vm create` (e.g. image-not-found) left an orphan instance
+  directory behind: the dir + assigned VMID were created before image
+  resolution, but the abort happened before any metadata was written, so the
+  half-built dir was invisible to `list`/`destroy`/`info` yet blocked
+  recreate (`instance already exists`). Image resolution now happens before
+  any directory is created (see Changed), so a failed create leaves nothing
+  behind. Applies to all modes, not just `vm`.
+- `kento lxc create`/`run --help` no longer advertises VM-only flags
+  (`--qemu-arg`, `--mac`), and `kento vm create`/`run --help` no longer
+  advertises the plain-LXC-only `--lxc-arg`. These were always rejected at
+  the wrong scope with an explanatory error, but listing them in `--help`
+  implied they were accepted. `--pve-arg` stays visible in both scopes (it
+  applies to PVE-LXC and PVE-VM).
+
+### Documentation
+
+- Documented that kento creates **privileged** LXC containers by default in
+  both `lxc` and `pve-lxc` modes (no `lxc.idmap` / `unprivileged: 1`), the
+  reason (the read-only OCI overlay layer store vs. an unprivileged UID
+  shift), and that privileged is not unconfined (the `generated` AppArmor
+  profile plus namespaces/cgroups still apply). See `docs/modes.md`.
 
 ## [1.5.0] - 2026-06-10
 

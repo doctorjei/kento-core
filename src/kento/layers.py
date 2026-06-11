@@ -22,7 +22,8 @@ def resolve_layers(image: str) -> str:
         capture_output=True,
     )
     if result.returncode != 0:
-        print(f"Error: image not found: {image}", file=sys.stderr)
+        print(f"Error: image not found in local store: {image}", file=sys.stderr)
+        print(f"  Pull it first:  kento pull {image}", file=sys.stderr)
         sys.exit(1)
 
     upper = subprocess.run(

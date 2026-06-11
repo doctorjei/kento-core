@@ -510,6 +510,16 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             print(f"Error: --gateway requires bridge networking; got --network {network['type']}.",
                   file=sys.stderr)
             sys.exit(1)
+
+    # Resolve layers (validates image exists). Done BEFORE the lock and before
+    # any directory is created: image resolution depends only on ``image``, not
+    # on name/vmid/container_dir, so a missing image fails here with ZERO
+    # filesystem side effects (no orphan instance dir left behind — F2). Staying
+    # outside the lock also avoids serializing image pulls across concurrent
+    # creates. resolve_layers either returns a non-empty string or sys.exits on
+    # missing image, so no defensive empty-string check is needed here.
+    layers = resolve_layers(image)
+
     # F7 + F11: hold the cross-process kento lock across the entire
     # allocate-and-commit sequence. Two concurrent `kento create` processes
     # would otherwise race on next_instance_name / next_vmid / container_dir
@@ -581,12 +591,6 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         # outside the lock; the try/undos below registers the rmtree cleanup
         # as the very first undo so any later failure rolls back this mkdir.
         (container_dir / "rootfs").mkdir(parents=True)
-
-    # Resolve layers (validates image exists). Outside the lock to avoid
-    # serializing image pulls across concurrent creates. resolve_layers
-    # either returns a non-empty string or sys.exits on missing image, so
-    # no defensive empty-string check is needed here.
-    layers = resolve_layers(image)
 
     # F14: explicit --config-mode cloudinit without cloud-init in the image
     # is a user error — the seed we'd write would never be consumed and the

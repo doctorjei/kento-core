@@ -61,6 +61,17 @@ def test_resolve_layers_missing_image(mock_run):
         resolve_layers("nonexistent:latest")
 
 
+@patch("kento.layers.subprocess.run")
+def test_resolve_layers_missing_image_hints_pull(mock_run, capsys):
+    """F3: the missing-image error must point the user at `kento pull`."""
+    mock_run.side_effect = _mock_run_no_image
+    with pytest.raises(SystemExit):
+        resolve_layers("nonexistent:latest")
+    err = capsys.readouterr().err
+    assert "not found in local store" in err
+    assert "kento pull nonexistent:latest" in err
+
+
 class TestEnsureImageHold:
     """ensure_image_hold backfills the hold container only when missing."""
 
