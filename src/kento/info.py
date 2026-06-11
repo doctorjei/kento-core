@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from kento import is_running, read_mode, require_root
+from kento import is_running
 
 
 def _read_meta(container_dir: Path, filename: str) -> str | None:
@@ -176,12 +176,13 @@ def info(name: str, *, container_dir: Path, mode: str,
 
         if layer_paths:
             data["layers"] = layer_paths
-            # Individual layer sizes
+            # Individual layer sizes, positionally aligned with layers:
+            # absent layer dirs get a None placeholder so layer_sizes[i]
+            # always corresponds to layers[i].
             sizes = []
             for lp in layer_paths:
                 p = Path(lp)
-                if p.is_dir():
-                    sizes.append(_get_size(p))
+                sizes.append(_get_size(p) if p.is_dir() else None)
             data["layer_sizes"] = sizes
 
     # Output
@@ -244,8 +245,11 @@ def _print_human(data: dict, verbose: bool, *,
             print(f"Upper size: {data['upper_size']}")
         if "layers" in data:
             print("Layer paths:")
+            layer_sizes = data.get("layer_sizes", [])
             for i, lp in enumerate(data["layers"]):
-                size = data.get("layer_sizes", [])[i] if i < len(data.get("layer_sizes", [])) else "?"
+                size = layer_sizes[i] if i < len(layer_sizes) else None
+                if size is None:
+                    size = "missing"
                 print(f"  [{i}] {lp} ({size})")
 
         qemu_args = data.get("qemu_args", [])

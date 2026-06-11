@@ -194,6 +194,42 @@ def test_generate_hook_propagates_cores_to_ns_cgroup():
     assert "cpu.max" in script
 
 
+def test_generate_hook_validates_memory_and_cores_before_arithmetic():
+    """kento-memory / kento-cores feed ``$(( ))`` under ``set -eu``; a
+    corrupted non-numeric value would make arithmetic expansion fail and abort
+    the (post-start, on pve-lxc) hook. The hook must validate they are
+    non-empty positive integers and warn-and-skip the cgroup write instead of
+    aborting — mirroring the kento-port guard."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    # Numeric guards rejecting empty-or-non-digit, one per value.
+    assert "invalid kento-memory" in script
+    assert "invalid kento-cores" in script
+    # The guard uses the same ''|*[!0-9]* case pattern as the kento-port check.
+    assert "''|*[!0-9]*)" in script
+    # The arithmetic must live in the validated (else) branch — appear after
+    # the rejection message in source order for each value.
+    assert script.index("invalid kento-memory") < script.index(
+        "MEM_BYTES=$((MEM_MB"
+    )
+    assert script.index("invalid kento-cores") < script.index(
+        "QUOTA=$((CORES"
+    )
+
+
+def test_generate_hook_post_stop_anchors_comment_match():
+    """#1: the post-stop teardown must anchor the comment-tag match to the
+    full token so stopping ``web`` does not delete ``web2``'s rules from the
+    shared nft table / iptables nat chains (prefix collision)."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    post_body = script[script.index("post-stop)"):]
+    # nft: full quoted comment token + trailing boundary.
+    assert r'comment \"kento:${NAME}\"( |\$)' in post_body
+    assert 'grep "kento:${NAME}"' not in post_body
+    # iptables: trailing-boundary anchored grep -E, not a bare grep -F.
+    assert r'kento:${NAME}( |\$)' in post_body
+    assert 'grep -F "kento:${NAME}"' not in post_body
+
+
 def test_generate_hook_ns_cgroup_guarded_by_existence_check():
     """The ns/ cgroup is a PVE-specific convention. Guard the writes with a
     directory check so plain LXC (no ns nesting) and future PVE layout changes

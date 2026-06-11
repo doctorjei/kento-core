@@ -430,3 +430,137 @@ class TestShutdownIdempotent:
         mock_stop_vm.assert_not_called()
         captured = capsys.readouterr()
         assert "Already stopped: testvm" in captured.out
+
+
+# --- Fix 2: PVE status-query "assume running" race vs. an actually-stopped
+# instance must NOT hard-exit. is_running() returns True on a status timeout/
+# non-zero, so shutdown() proceeds to pct/qm shutdown, which then reports
+# "not running"; that must be reported as "Already stopped", not SystemExit(1).
+
+
+class TestShutdownPveAssumeRunningRace:
+    @patch("kento.stop.require_root")
+    def test_pve_lxc_shutdown_tolerates_already_stopped(self, mock_root,
+                                                         tmp_path, capsys):
+        d = tmp_path / "100"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve\n")
+
+        # is_running first ASSUMES RUNNING (the status query timed out), then
+        # the re-query inside _pve_shutdown_or_die reports actually-stopped.
+        running_calls = iter([True, False])
+
+        def _running(*a, **k):
+            return next(running_calls)
+
+        def _not_running(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 2, stdout="", stderr="Container 100 is not running\n")
+
+        with patch("kento.stop.is_running", side_effect=_running), \
+             patch("kento.subprocess_util.subprocess.run",
+                   side_effect=_not_running), \
+             patch("kento.stop.resolve_container", return_value=d):
+            shutdown("mybox")  # must NOT raise SystemExit
+
+        captured = capsys.readouterr()
+        assert "Already stopped: mybox" in captured.out
+        assert "Error: failed to" not in captured.err
+
+    @patch("kento.stop.require_root")
+    def test_pve_vm_shutdown_tolerates_already_stopped(self, mock_root,
+                                                       tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        running_calls = iter([True, False])
+
+        def _running(*a, **k):
+            return next(running_calls)
+
+        def _not_running(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 255, stdout="", stderr="VM 100 not running\n")
+
+        with patch("kento.stop.is_running", side_effect=_running), \
+             patch("kento.subprocess_util.subprocess.run",
+                   side_effect=_not_running), \
+             patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test")  # must NOT raise SystemExit
+
+        captured = capsys.readouterr()
+        assert "Already stopped: test" in captured.out
+        assert "Error: failed to" not in captured.err
+
+    @patch("kento.stop.require_root")
+    def test_pve_vm_force_tolerates_already_stopped(self, mock_root,
+                                                    tmp_path, capsys):
+        d = tmp_path / "test"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve-vm\n")
+        (d / "kento-vmid").write_text("100\n")
+
+        running_calls = iter([True, False])
+
+        def _running(*a, **k):
+            return next(running_calls)
+
+        def _not_running(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="VM 100 not running\n")
+
+        with patch("kento.stop.is_running", side_effect=_running), \
+             patch("kento.subprocess_util.subprocess.run",
+                   side_effect=_not_running), \
+             patch("kento.stop.resolve_container", return_value=d):
+            shutdown("test", force=True)  # must NOT raise SystemExit
+
+        captured = capsys.readouterr()
+        assert "Already stopped: test" in captured.out
+
+    @patch("kento.stop.require_root")
+    def test_pve_lxc_genuinely_running_still_stops(self, mock_root,
+                                                   tmp_path, capsys):
+        """A normally-running instance must still stop cleanly (single
+        shutdown call, no false 'Already stopped')."""
+        d = tmp_path / "100"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve\n")
+
+        with patch("kento.stop.is_running", return_value=True), \
+             patch("kento.subprocess_util.subprocess.run",
+                   side_effect=_ok) as mock_run, \
+             patch("kento.stop.resolve_container", return_value=d):
+            shutdown("mybox")
+
+        mock_run.assert_called_once()
+        assert list(mock_run.call_args[0][0]) == ["pct", "shutdown", "100"]
+        captured = capsys.readouterr()
+        assert "Shut down: mybox" in captured.out
+        assert "Already stopped" not in captured.out
+
+    @patch("kento.stop.require_root")
+    def test_pve_lxc_genuine_failure_still_hard_errors(self, mock_root,
+                                                       tmp_path, capsys):
+        """A real failure (instance still up, tool refuses) must still produce
+        a branded error + SystemExit(1), not be swallowed as already-stopped."""
+        d = tmp_path / "100"
+        d.mkdir()
+        (d / "kento-mode").write_text("pve\n")
+
+        def _fail(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="pct refused (lock busy)")
+
+        with patch("kento.stop.is_running", return_value=True), \
+             patch("kento.subprocess_util.subprocess.run", side_effect=_fail), \
+             patch("kento.stop.resolve_container", return_value=d):
+            with pytest.raises(SystemExit) as exc:
+                shutdown("mybox")
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: failed to shut down PVE container mybox" in captured.err
+        assert "pct refused" in captured.err
+        assert "Traceback" not in captured.err

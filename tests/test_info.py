@@ -377,6 +377,83 @@ def test_info_verbose_json_includes_layers(mock_run, mock_running, tmp_path, cap
     assert len(data["layer_sizes"]) == 3
 
 
+def _mock_du_per_path(args, **kwargs):
+    """du mock returning a distinct size derived from the target path,
+    so a misaligned size can be told apart from the right one."""
+    if "du" in args:
+        target = args[-1]
+        # Size encodes the trailing path component (a/b/c -> 1K/2K/3K).
+        last = Path(target).name
+        size = {"a": "1K", "b": "2K", "c": "3K"}.get(last, "9K")
+        return subprocess.CompletedProcess(args, 0, stdout=f"{size}\t{target}\n", stderr="")
+    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_du_per_path)
+def test_info_verbose_layer_sizes_aligned_when_middle_dir_missing(
+        mock_run, mock_running, tmp_path, capsys):
+    """A missing MIDDLE layer dir must not shift sizes onto the wrong layer.
+
+    Regression for the bug where layer_sizes skipped absent dirs, so a
+    non-last missing layer shifted later sizes left (the last layer fell
+    through to '?'). With the fix, sizes stay positionally aligned: present
+    layers keep their own size and the absent one shows a placeholder.
+    """
+    d = _make_container(tmp_path)
+    (d / "upper").mkdir()
+    # Create layers a and c but NOT b (the middle one).
+    (tmp_path / "layers" / "a").mkdir(parents=True)
+    (tmp_path / "layers" / "c").mkdir(parents=True)
+    (d / "kento-layers").write_text(
+        str(tmp_path / "layers/a") + ":"
+        + str(tmp_path / "layers/b") + ":"
+        + str(tmp_path / "layers/c")
+    )
+
+    info("mybox", container_dir=d, mode="lxc", verbose=True)
+
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    line0 = next(line for line in lines if "[0]" in line)
+    line1 = next(line for line in lines if "[1]" in line)
+    line2 = next(line for line in lines if "[2]" in line)
+    # layer a (index 0) -> its own size, NOT shifted from b/c.
+    assert "layers/a" in line0 and "(1K)" in line0
+    # layer b (index 1) is missing -> placeholder, not a byte size.
+    assert "layers/b" in line1 and "missing" in line1
+    assert "(2K)" not in line1 and "(3K)" not in line1
+    # layer c (index 2) keeps its own size (the bug made this '?').
+    assert "layers/c" in line2 and "(3K)" in line2
+    assert "(?)" not in line2
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.info.subprocess.run", side_effect=_mock_du_per_path)
+def test_info_verbose_json_layer_sizes_index_aligned(
+        mock_run, mock_running, tmp_path, capsys):
+    """JSON layer_sizes stays index-aligned with layers; the absent middle
+    layer is a null placeholder rather than a dropped element."""
+    d = _make_container(tmp_path)
+    (d / "upper").mkdir()
+    (tmp_path / "layers" / "a").mkdir(parents=True)
+    (tmp_path / "layers" / "c").mkdir(parents=True)
+    (d / "kento-layers").write_text(
+        str(tmp_path / "layers/a") + ":"
+        + str(tmp_path / "layers/b") + ":"
+        + str(tmp_path / "layers/c")
+    )
+
+    info("mybox", container_dir=d, mode="lxc", as_json=True, verbose=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert len(data["layers"]) == 3
+    assert len(data["layer_sizes"]) == 3
+    assert data["layer_sizes"][0] == "1K"
+    assert data["layer_sizes"][1] is None
+    assert data["layer_sizes"][2] == "3K"
+
+
 @patch("kento.info.is_running", return_value=False)
 def test_info_verbose_no_layers(mock_running, tmp_path, capsys):
     """Verbose mode without kento-layers should not crash."""

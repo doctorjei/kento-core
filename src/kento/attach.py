@@ -25,6 +25,19 @@ from kento import read_mode, require_root, resolve_any
 ESCAPE_BYTE = 0x1d
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write all of ``data`` to ``fd``, looping past short os.write() returns.
+
+    os.write() may write fewer bytes than requested (stdout can be a pipe or
+    file, e.g. `kento attach <vm> | tee log`); a single write would silently
+    drop the remainder. The fd is blocking, so we just loop until drained.
+    """
+    mv = memoryview(data)
+    while mv:
+        n = os.write(fd, mv)
+        mv = mv[n:]
+
+
 class EscapeDetector:
     """Pure state machine translating raw stdin bytes into relay actions.
 
@@ -129,7 +142,7 @@ def _relay_serial(name: str, container_dir: Path) -> int:
                 data = sock.recv(65536)
                 if not data:
                     break  # socket EOF: VM/console closed
-                os.write(sys.stdout.fileno(), data)
+                _write_all(sys.stdout.fileno(), data)
             if stdin_fd in rlist:
                 data = os.read(stdin_fd, 65536)
                 if not data:
@@ -156,11 +169,11 @@ def _relay_serial(name: str, container_dir: Path) -> int:
     return 0
 
 
-def attach(name: str) -> int:
+def attach(name: str, namespace: str | None = None) -> int:
     """Attach to instance ``name``'s console. Returns an exit code."""
     require_root()
 
-    container_dir, mode = resolve_any(name)
+    container_dir, mode = resolve_any(name, namespace)
     if mode is None:
         mode = read_mode(container_dir)
 

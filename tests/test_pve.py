@@ -1005,3 +1005,59 @@ class TestSyncQmArgsToMemory:
         args_line = [l for l in conf.read_text().splitlines()
                      if l.startswith("args:")][0]
         assert "-cpu host,vmx=off,svm=off" in args_line
+
+    def test_snapshot_args_preserved_when_rewriting_global(self, tmp_path):
+        """A `[snap1]` section carries its OWN frozen `args:` line. Rewriting
+        the global args: must NOT touch (rewrite or drop) the snapshot's
+        args: — only the pre-first-section global field is kento's."""
+        qm = (
+            "memory: 2048\n"
+            "cores: 1\n"
+            "args: -object memory-backend-memfd,id=mem,size=512M,share=on\n"
+            "[snap1]\n"
+            "memory: 512\n"
+            "args: -object memory-backend-memfd,id=mem,size=999M,share=on\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        new = conf.read_text()
+        # Global args: rewritten to match the global memory (2048).
+        assert "size=2048M" in new
+        # Snapshot args: left frozen — neither rewritten to 2048M nor dropped.
+        assert "size=999M" in new
+        assert "[snap1]" in new
+        # The snapshot still has exactly one args: line under its header.
+        lines = new.splitlines()
+        snap_idx = lines.index("[snap1]")
+        snap_args = [l for l in lines[snap_idx:] if l.startswith("args:")]
+        assert snap_args == [
+            "args: -object memory-backend-memfd,id=mem,size=999M,share=on"]
+
+    def test_absent_global_args_inserts_before_first_section(self, tmp_path):
+        """When the global section has NO args: line but a snapshot section
+        follows, the new global args: is inserted BEFORE the first section
+        header (not at EOF, which would land inside/after the snapshot)."""
+        qm = (
+            "memory: 1024\n"
+            "cores: 1\n"
+            "[snap1]\n"
+            "memory: 512\n"
+            "args: -object memory-backend-memfd,id=mem,size=999M,share=on\n"
+        )
+        pve, conf, container = self._setup(tmp_path, qm)
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve._pve_node_name", return_value="mynode"):
+            sync_qm_args_to_memory(100, container)
+        lines = conf.read_text().splitlines()
+        snap_idx = lines.index("[snap1]")
+        # The new global args: appears BEFORE the section header.
+        global_args = [i for i, l in enumerate(lines) if l.startswith("args:")
+                       and i < snap_idx]
+        assert len(global_args) == 1
+        assert "size=1024M" in lines[global_args[0]]
+        # The snapshot's frozen args: is untouched and still after the header.
+        snap_args = [l for l in lines[snap_idx:] if l.startswith("args:")]
+        assert snap_args == [
+            "args: -object memory-backend-memfd,id=mem,size=999M,share=on"]

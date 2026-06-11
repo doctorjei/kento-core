@@ -16,11 +16,12 @@ from pathlib import Path
 from kento import read_mode, require_root, resolve_any
 
 
-def logs(name: str, args: list[str]) -> int:
+def logs(name: str, args: list[str],
+         namespace: str | None = None) -> int:
     """Show ``journalctl`` output for instance ``name``. Returns an exit code."""
     require_root()
 
-    container_dir, mode = resolve_any(name)
+    container_dir, mode = resolve_any(name, namespace)
     if mode is None:
         mode = read_mode(container_dir)
 

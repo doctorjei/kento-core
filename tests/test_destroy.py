@@ -476,3 +476,54 @@ def test_destroy_pve_vm_no_force_lazy_fallback_raises(tmp_path):
 
     # Container dir survives — destroy bailed before rmtree.
     assert d.exists()
+
+
+# --- Best-effort platform-config cleanup (Fix 4) ---
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pve_run_stopped)
+@patch("kento.destroy.require_root")
+def test_destroy_force_pve_config_delete_raises_still_removes_dir(
+        mock_root, mock_run, tmp_path, capsys):
+    """Under -f, a pmxcfs I/O error in delete_pve_config must not skip the
+    final rmtree — warn and continue so the orphan dir is still cleaned up."""
+    lxc_dir = _make_container(tmp_path, name="100", mode="pve")
+
+    with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+         patch("kento.pve.delete_pve_config",
+               side_effect=OSError("pmxcfs I/O error")), \
+         patch("kento.lxc_hook.delete_lxc_snippets_wrapper"), \
+         patch("kento.layers.remove_image_hold"):
+        destroy("mybox", force=True)
+
+    assert not lxc_dir.exists()
+    captured = capsys.readouterr()
+    assert "platform config cleanup failed" in captured.err
+
+
+@patch("kento.destroy.subprocess.run", side_effect=_mock_pvevm_run_not_mounted)
+@patch("kento.destroy.is_running", return_value=False)
+@patch("kento.destroy.require_root")
+def test_destroy_corrupt_vmid_still_cleans_up(
+        mock_root, mock_running, mock_run, tmp_path, capsys):
+    """A corrupt kento-vmid (int() ValueError) must not abort cleanup: warn,
+    skip qm config deletion, and still rmtree the container dir."""
+    d = tmp_path / "test"
+    d.mkdir()
+    (d / "rootfs").mkdir()
+    (d / "kento-image").write_text("myimage\n")
+    (d / "kento-mode").write_text("pve-vm\n")
+    (d / "kento-name").write_text("test\n")
+    (d / "kento-state").write_text(str(d) + "\n")
+    (d / "kento-vmid").write_text("not-a-number\n")
+
+    with patch("kento.destroy.resolve_container", return_value=d), \
+         patch("kento.pve.delete_qm_config") as mock_delete_qm, \
+         patch("kento.vm_hook.delete_snippets_wrapper"), \
+         patch("kento.layers.remove_image_hold"):
+        destroy("test", force=True)
+
+    mock_delete_qm.assert_not_called()
+    assert not d.exists()
+    captured = capsys.readouterr()
+    assert "corrupt kento-vmid" in captured.err

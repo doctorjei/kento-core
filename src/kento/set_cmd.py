@@ -29,8 +29,9 @@ import re
 import sys
 from pathlib import Path
 
-from kento import is_running, read_mode, require_root, resolve_any
-from kento.defaults import LXC_ARG_DENYLIST
+from kento import is_running, require_root, resolve_any
+from kento.defaults import (LXC_ARG_DENYLIST, PVE_ARG_DENYLIST,
+                            QEMU_ARG_DENYLIST)
 
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
@@ -153,13 +154,12 @@ def _drop_passthrough_block(content: str, known_lines: list[str]) -> str:
 
 
 def set_cmd(name, *, memory=None, cores=None, mac=None,
-            qemu_args=None, pve_args=None, lxc_args=None) -> int:
+            qemu_args=None, pve_args=None, lxc_args=None,
+            namespace=None) -> int:
     """Mutate scalar settings on a stopped instance. Returns an exit code."""
     require_root()
 
-    container_dir, mode = resolve_any(name)
-    if mode is None:
-        mode = read_mode(container_dir)
+    container_dir, mode = resolve_any(name, namespace)
 
     # No fields at all -> usage error.
     if (memory is None and cores is None and mac is None
@@ -218,6 +218,35 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
                           f"--lxc-arg {arg!r} would collide with kento's own "
                           "plain-LXC config. Drop the flag or file an issue "
                           "if you need it overridable.", file=sys.stderr)
+                    return 1
+
+    # Same denylist enforcement create.py applies for --qemu-arg / --pve-arg
+    # (create/set parity): without these, `kento set` would re-emit a
+    # denylisted token into the boot config, clobbering kento-owned keys or
+    # duplicating -kernel/memfd etc. Empty-string entries are the CLEAR
+    # sentinel and are skipped (mirrors the lxc loop, where '' never matches).
+    if qemu_args is not None:
+        for arg in qemu_args:
+            if arg == "":
+                continue
+            for needle in QEMU_ARG_DENYLIST:
+                if needle in arg:
+                    print(f"Error: kento manages {needle!r} directly — "
+                          f"--qemu-arg {arg!r} would collide with kento's own "
+                          "QEMU argv. Drop the flag or file an issue if you "
+                          "need it overridable.", file=sys.stderr)
+                    return 1
+
+    if pve_args is not None:
+        for arg in pve_args:
+            if arg == "":
+                continue
+            for needle in PVE_ARG_DENYLIST:
+                if needle in arg:
+                    print(f"Error: kento manages {needle!r} directly — "
+                          f"--pve-arg {arg!r} would collide with kento's own "
+                          "PVE config. Drop the flag or file an issue if you "
+                          "need it overridable.", file=sys.stderr)
                     return 1
 
     if mac is not None and not _MAC_RE.match(mac):
@@ -416,14 +445,25 @@ def _apply_pve_vm(container_dir, memory, cores, mac, qemu_args,
             # preserving the bridge (and any other) parts.
             parts = net0.split(",")
             new_parts = []
+            matched = False
             for part in parts:
                 if part.startswith("virtio="):
                     new_parts.append(f"virtio={mac}")
+                    matched = True
                 elif part == "virtio":
                     new_parts.append(f"virtio={mac}")
+                    matched = True
                 else:
                     new_parts.append(part)
             content = _replace_conf_field(content, "net0", ",".join(new_parts))
+            if not matched:
+                # net0 exists but has no virtio token (e.g. a user-edited
+                # non-virtio model). The MAC couldn't be applied to the conf;
+                # warn so "Updated" isn't misleading (metadata still written).
+                print(f"Warning: net0 has no 'virtio' token; the MAC {mac!r} "
+                      "could not be applied to the existing net0 form. "
+                      "kento-mac metadata was updated but the qm config NIC "
+                      "was left unchanged.", file=sys.stderr)
         # If net0 absent, best-effort: metadata written, skip conf edit.
 
     # pve_args: drop old block, re-emit new at end (before persisting we read

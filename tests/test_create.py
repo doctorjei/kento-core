@@ -2399,3 +2399,89 @@ class TestCreateRollback:
             with pytest.raises(RuntimeError, match="original failure"):
                 create("myimage:latest", name="test", mode="lxc",
                        )
+
+
+class TestEnvValidation:
+    """--env entries are written verbatim into the cloud-init YAML block
+    scalar, /etc/environment, and lxc.environment lines. A malformed entry
+    (embedded newline/control char, missing '=', bad key) must be rejected
+    up front — before any seed/state is written — with a branded error.
+    """
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_valid_env_succeeds(self, mock_root, mock_layers, mock_run,
+                                tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc",
+                   env=["FOO=bar", "BAZ=qux quux"])
+
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-env").read_text() == "FOO=bar\nBAZ=qux quux\n"
+        env_file = (lxc_dir / "upper" / "etc" / "environment").read_text()
+        assert "FOO=bar" in env_file
+        assert "BAZ=qux quux" in env_file
+        cfg = (lxc_dir / "config").read_text()
+        assert "lxc.environment = FOO=bar" in cfg
+
+    @pytest.mark.parametrize("bad", [
+        "A=1\nmalformed",      # embedded newline (the YAML-block-scalar break)
+        "A=1\tB=2",            # embedded tab
+        "A=1\r",               # embedded carriage return
+        "NOEQUALS",            # missing '='
+        "1BAD=value",          # key starts with a digit
+        "BAD-KEY=value",       # key has a hyphen
+        "=value",              # empty key
+    ])
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_malformed_env_rejected(self, mock_root, mock_layers, mock_run,
+                                    bad, tmp_path, capsys):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit) as exc:
+                create("myimage:latest", name="test", mode="lxc", env=[bad])
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("Error:") or "\nError:" in err
+        # Validation runs before any seed/state write, so nothing is left behind.
+        assert not (tmp_path / "test").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_newline_env_rejected_before_state(self, mock_root, mock_layers,
+                                               mock_run, tmp_path, capsys):
+        # The headline case: a newline-laden entry would terminate the
+        # cloud-init `content: |` block early and silently drop ssh keys etc.
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(SystemExit):
+                create("myimage:latest", name="test", mode="lxc",
+                       env=["A=1\nmalformed"])
+        err = capsys.readouterr().err
+        assert "Error:" in err and "control character" in err
+        # No instance directory and no seed should exist.
+        assert not (tmp_path / "test").exists()
+
+
+class TestDetectCloudinitOnce:
+    """detect_cloudinit() does filesystem I/O; create() must probe it exactly
+    once (the boolean is reused at the three decision sites)."""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_detect_cloudinit_called_once(self, mock_root, mock_layers,
+                                          mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento.create.detect_cloudinit",
+                   return_value=False) as mock_detect:
+            create("myimage:latest", name="test", mode="lxc")
+
+        assert mock_detect.call_count == 1

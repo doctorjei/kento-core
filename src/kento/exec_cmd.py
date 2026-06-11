@@ -16,7 +16,8 @@ from pathlib import Path
 from kento import read_mode, require_root, resolve_any
 
 
-def exec_cmd(name: str, command: list[str]) -> int:
+def exec_cmd(name: str, command: list[str],
+             namespace: str | None = None) -> int:
     """Run ``command`` inside instance ``name``. Returns an exit code."""
     require_root()
 
@@ -28,7 +29,7 @@ def exec_cmd(name: str, command: list[str]) -> int:
         )
         return 2
 
-    container_dir, mode = resolve_any(name)
+    container_dir, mode = resolve_any(name, namespace)
     if mode is None:
         mode = read_mode(container_dir)
 

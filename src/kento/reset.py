@@ -43,6 +43,14 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
               file=sys.stderr)
         sys.exit(1)
 
+    # Re-resolve layers from image BEFORE touching the writable layer. If the
+    # backing image is gone from the store, resolve_layers() sys.exit(1)s
+    # "image not found" — we want that to abort with zero side effects, not
+    # after _safe_clear_dir() has already wiped upper/work, leaving a
+    # half-scrubbed instance with stale kento-layers/hook.
+    image = (container_dir / "kento-image").read_text().strip()
+    layers = resolve_layers(image)
+
     # Read state dir
     state_file = container_dir / "kento-state"
     state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else container_dir
@@ -140,9 +148,7 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
             ssh_host_key_dir=ci_host_key_dir if ci_host_key_dir.is_dir() else None,
         )
 
-    # Re-resolve layers from image
-    image = (container_dir / "kento-image").read_text().strip()
-    layers = resolve_layers(image)
+    # Persist the layers resolved up-front (before the writable layer was cleared).
     (container_dir / "kento-layers").write_text(layers + "\n")
 
     # Backfill the image-hold container if it's missing (self-heals guests

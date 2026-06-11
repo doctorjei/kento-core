@@ -14,6 +14,18 @@ from kento.vm import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_find_qemu():
+    """Stub the qemu binary lookup so start_vm tests run on hosts without QEMU.
+
+    start_vm resolves qemu-system-x86_64 up-front (sys.exit on miss); the test
+    host has no QEMU installed. Tests that need to drive the binary-absent path
+    patch _find_qemu themselves, overriding this default.
+    """
+    with patch("kento.vm._find_qemu", return_value="/usr/bin/qemu-system-x86_64"):
+        yield
+
+
 # --- allocate_port ---
 
 
@@ -282,6 +294,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -322,6 +335,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -358,6 +372,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 100
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 200
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -409,6 +424,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -451,6 +467,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -550,6 +567,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -592,6 +610,7 @@ class TestStartVm:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -682,6 +701,7 @@ class TestStartVm:
             order.append("popen")
             m = MagicMock()
             m.pid = len(order)
+            m.poll.return_value = None  # virtiofsd alive → no abort
             return m
         mock_popen.side_effect = popen_side_effect
 
@@ -954,6 +974,7 @@ class TestStartVmMac:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -990,6 +1011,7 @@ class TestStartVmMac:
 
         mock_vfs = MagicMock()
         mock_vfs.pid = 1001
+        mock_vfs.poll.return_value = None
         mock_qemu = MagicMock()
         mock_qemu.pid = 1002
         mock_popen.side_effect = [mock_vfs, mock_qemu]
@@ -1044,7 +1066,7 @@ class TestStartVmQemuArgsPassthrough:
             self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         """Baseline: no kento-qemu-args file -> argv does not grow past kento's own flags."""
         lxc_dir = self._setup(tmp_path)
-        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
         mock_qemu = MagicMock(); mock_qemu.pid = 2
         mock_popen.side_effect = [mock_vfs, mock_qemu]
 
@@ -1065,7 +1087,7 @@ class TestStartVmQemuArgsPassthrough:
             self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         lxc_dir = self._setup(tmp_path)
         (lxc_dir / "kento-qemu-args").write_text("-device=virtio-rng-pci\n")
-        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
         mock_qemu = MagicMock(); mock_qemu.pid = 2
         mock_popen.side_effect = [mock_vfs, mock_qemu]
 
@@ -1089,7 +1111,7 @@ class TestStartVmQemuArgsPassthrough:
         (lxc_dir / "kento-qemu-args").write_text(
             "-device\nvirtio-rng-pci\n-m\n2048\n"
         )
-        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
         mock_qemu = MagicMock(); mock_qemu.pid = 2
         mock_popen.side_effect = [mock_vfs, mock_qemu]
 
@@ -1118,7 +1140,7 @@ class TestStartVmQemuArgsPassthrough:
         user --qemu-arg can still override them (QEMU last-occurrence wins)."""
         lxc_dir = self._setup(tmp_path)
         (lxc_dir / "kento-qemu-args").write_text("-device=virtio-rng-pci\n")
-        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
         mock_qemu = MagicMock(); mock_qemu.pid = 2
         mock_popen.side_effect = [mock_vfs, mock_qemu]
 
@@ -1141,7 +1163,7 @@ class TestStartVmQemuArgsPassthrough:
         """Blank lines in kento-qemu-args should not become empty argv elements."""
         lxc_dir = self._setup(tmp_path)
         (lxc_dir / "kento-qemu-args").write_text("\n-device=virtio-rng-pci\n\n")
-        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
         mock_qemu = MagicMock(); mock_qemu.pid = 2
         mock_popen.side_effect = [mock_vfs, mock_qemu]
 
@@ -1150,3 +1172,141 @@ class TestStartVmQemuArgsPassthrough:
         qemu_args = mock_popen.call_args_list[1][0][0]
         assert "" not in qemu_args
         assert qemu_args[-1] == "-device=virtio-rng-pci"
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_whitespace_only_lines_ignored(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        """A whitespace-only kento-qemu-args line must NOT become a lone argv
+        token: that would be an empty/positional arg QEMU rejects at boot.
+
+        ``if line:`` is truthy for "   ", so the loop must strip first."""
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "kento-qemu-args").write_text(
+            "   \n-device=virtio-rng-pci\n\t\n  -m\n"
+        )
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        # No empty or whitespace-only tokens reached QEMU.
+        assert "" not in qemu_args
+        assert not any(tok.strip() == "" for tok in qemu_args)
+        # Only the two real (stripped) flags were appended, in order.
+        assert qemu_args[-2:] == ["-device=virtio-rng-pci", "-m"]
+
+
+class TestStartVmCleanupOnFailure:
+    """F: start_vm must be self-cleaning on its own failure paths (start.py
+    calls it with NO surrounding rollback), tearing down the virtiofsd process
+    + the leaked overlay mount + the pid files."""
+
+    def _setup(self, tmp_path):
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        return lxc_dir
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm._is_mountpoint", return_value=True)
+    @patch("kento.vm._umount_with_retry", return_value=True)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_socket_never_appears_cleans_up(
+            self, mock_mount, mock_popen, mock_umount, mock_mp, mock_running,
+            mock_find, mock_run, tmp_path):
+        """virtiofsd starts but its socket never appears -> terminate virtiofsd,
+        unmount, drop pid files, sys.exit(1). QEMU must NOT launch."""
+        lxc_dir = self._setup(tmp_path)
+        # Do NOT create virtiofsd.sock -> wait loop times out.
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
+        mock_popen.return_value = mock_vfs
+
+        with patch("kento.vm.time.sleep"):  # don't actually wait 5s
+            with pytest.raises(SystemExit):
+                start_vm(lxc_dir, "testvm")
+
+        # Only virtiofsd was spawned; QEMU never launched.
+        assert mock_popen.call_count == 1
+        # virtiofsd terminated, mount torn down. (The socket-abort path runs
+        # cleanup once before sys.exit and the SystemExit handler is idempotent,
+        # so terminate may be invoked more than once — only that it ran matters.)
+        assert mock_vfs.terminate.called
+        assert mock_umount.called
+        # Pid files cleaned up.
+        assert not (lxc_dir / "kento-virtiofsd-pid").exists()
+        assert not (lxc_dir / "kento-qemu-pid").exists()
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm._is_mountpoint", return_value=True)
+    @patch("kento.vm._umount_with_retry", return_value=True)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_virtiofsd_dies_cleans_up(
+            self, mock_mount, mock_popen, mock_umount, mock_mp, mock_running,
+            mock_find, mock_run, tmp_path):
+        """virtiofsd dies during the wait (poll() returns non-None) -> abort,
+        terminate, unmount, sys.exit(1) even though the socket exists."""
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "virtiofsd.sock").write_text("")  # socket present...
+        mock_vfs = MagicMock(); mock_vfs.pid = 1
+        mock_vfs.poll.return_value = 1  # ...but virtiofsd has exited.
+        mock_popen.return_value = mock_vfs
+
+        with patch("kento.vm.time.sleep"):
+            with pytest.raises(SystemExit):
+                start_vm(lxc_dir, "testvm")
+
+        assert mock_popen.call_count == 1  # QEMU never launched
+        assert mock_vfs.terminate.called
+        assert mock_umount.called
+        assert not (lxc_dir / "kento-virtiofsd-pid").exists()
+
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm._is_mountpoint", return_value=True)
+    @patch("kento.vm._umount_with_retry", return_value=True)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_qemu_launch_failure_cleans_up(
+            self, mock_mount, mock_popen, mock_umount, mock_mp, mock_running,
+            mock_find, mock_run, tmp_path):
+        """QEMU Popen raises (e.g. FileNotFoundError) -> virtiofsd + mount +
+        pid files torn down and the original error re-raised."""
+        lxc_dir = self._setup(tmp_path)
+        (lxc_dir / "virtiofsd.sock").write_text("")  # socket appears
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
+        # First Popen = virtiofsd (ok); second = QEMU (raises).
+        mock_popen.side_effect = [mock_vfs, FileNotFoundError("qemu-system-x86_64")]
+
+        with patch("kento.vm.time.sleep"):
+            with pytest.raises(FileNotFoundError):
+                start_vm(lxc_dir, "testvm")
+
+        mock_vfs.terminate.assert_called_once()
+        mock_umount.assert_called_once()
+        assert not (lxc_dir / "kento-virtiofsd-pid").exists()
+        assert not (lxc_dir / "kento-qemu-pid").exists()

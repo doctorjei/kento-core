@@ -103,6 +103,37 @@ def test_exec_propagates_returncode(mock_root, mock_run, tmp_path):
     assert rc == 7
 
 
+# -- Namespace scope is forwarded to resolve_any (FIX 1) --
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_forwards_namespace_to_resolve_any(mock_root, mock_run, tmp_path):
+    """exec_cmd must pass its namespace through so a duplicate name created via
+    `create --force` resolves in the requested namespace instead of aborting."""
+    d = tmp_path / "dup"
+    d.mkdir()
+
+    with patch("kento.exec_cmd.resolve_any",
+               return_value=(d, "lxc")) as mock_resolve:
+        exec_cmd("dup", ["ls"], namespace="lxc")
+
+    mock_resolve.assert_called_once_with("dup", "lxc")
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_default_namespace_is_none(mock_root, mock_run, tmp_path):
+    d = tmp_path / "mybox"
+    d.mkdir()
+
+    with patch("kento.exec_cmd.resolve_any",
+               return_value=(d, "lxc")) as mock_resolve:
+        exec_cmd("mybox", ["ls"])
+
+    mock_resolve.assert_called_once_with("mybox", None)
+
+
 # -- CLI routing --
 
 
@@ -113,7 +144,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["exec", "foo", "--", "ls", "-la"])
         assert exc.value.code == 0
-        mock_exec.assert_called_once_with("foo", ["ls", "-la"])
+        mock_exec.assert_called_once_with("foo", ["ls", "-la"], namespace=None)
 
     @patch("kento.exec_cmd.exec_cmd", return_value=0)
     def test_bare_exec_routes_without_dashdash(self, mock_exec):
@@ -121,7 +152,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["exec", "foo", "ls", "-la"])
         assert exc.value.code == 0
-        mock_exec.assert_called_once_with("foo", ["ls", "-la"])
+        mock_exec.assert_called_once_with("foo", ["ls", "-la"], namespace=None)
 
     @patch("kento.exec_cmd.exec_cmd", return_value=0)
     def test_lxc_exec_routes(self, mock_exec):
@@ -129,7 +160,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "exec", "foo", "--", "ls"])
         assert exc.value.code == 0
-        mock_exec.assert_called_once_with("foo", ["ls"])
+        mock_exec.assert_called_once_with("foo", ["ls"], namespace="lxc")
 
     @patch("kento.exec_cmd.exec_cmd", return_value=0)
     def test_vm_exec_routes(self, mock_exec):
@@ -137,7 +168,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["vm", "exec", "foo", "--", "ls"])
         assert exc.value.code == 0
-        mock_exec.assert_called_once_with("foo", ["ls"])
+        mock_exec.assert_called_once_with("foo", ["ls"], namespace="vm")
 
     @patch("kento.exec_cmd.exec_cmd", return_value=0)
     def test_exec_remainder_captures_flags(self, mock_exec):
@@ -146,7 +177,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit):
             main(["exec", "foo", "--", "journalctl", "-f", "-n", "50"])
         mock_exec.assert_called_once_with(
-            "foo", ["journalctl", "-f", "-n", "50"])
+            "foo", ["journalctl", "-f", "-n", "50"], namespace=None)
 
     @patch("kento.exec_cmd.exec_cmd", return_value=3)
     def test_cli_propagates_nonzero_exit(self, mock_exec):

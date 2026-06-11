@@ -84,22 +84,45 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
         vmid_file = container_dir / "kento-vmid"
         vmid_str = vmid_file.read_text().strip() if vmid_file.is_file() else None
 
-    # Clean up platform-specific config BEFORE removing container_dir
-    if mode == "pve":
-        from kento.pve import delete_pve_config
-        from kento.lxc_hook import delete_lxc_snippets_wrapper
-        delete_pve_config(int(container_id))
-        delete_lxc_snippets_wrapper(int(container_id))
-    elif mode == "pve-vm" and vmid_str:
-        from kento.pve import delete_qm_config
-        from kento.vm_hook import delete_snippets_wrapper
-        delete_qm_config(int(vmid_str))
-        delete_snippets_wrapper(int(vmid_str))
+    # Clean up platform-specific config BEFORE removing container_dir. Mirror
+    # the best-effort stop handler above: under -f a pmxcfs I/O error, a corrupt
+    # kento-vmid (int() ValueError), or any deletion failure must NOT skip the
+    # final rmtree and leave an orphan dir. Warn and continue so cleanup still
+    # reaches the rmtree below.
+    try:
+        if mode == "pve":
+            from kento.pve import delete_pve_config
+            from kento.lxc_hook import delete_lxc_snippets_wrapper
+            delete_pve_config(int(container_id))
+            delete_lxc_snippets_wrapper(int(container_id))
+        elif mode == "pve-vm" and vmid_str:
+            from kento.pve import delete_qm_config
+            from kento.vm_hook import delete_snippets_wrapper
+            try:
+                vmid = int(vmid_str)
+            except ValueError:
+                vmid = None
+                print(f"Warning: corrupt kento-vmid ({vmid_str!r}); skipping qm config "
+                      f"cleanup, proceeding with removal.", file=sys.stderr)
+            if vmid is not None:
+                delete_qm_config(vmid)
+                delete_snippets_wrapper(vmid)
+    except Exception as e:
+        if not force:
+            raise
+        print(f"Warning: platform config cleanup failed ({e}); proceeding with removal.",
+              file=sys.stderr)
 
-    from kento.layers import remove_image_hold
-    name_file = container_dir / "kento-name"
-    hold_name = name_file.read_text().strip() if name_file.is_file() else name
-    remove_image_hold(hold_name)
+    try:
+        from kento.layers import remove_image_hold
+        name_file = container_dir / "kento-name"
+        hold_name = name_file.read_text().strip() if name_file.is_file() else name
+        remove_image_hold(hold_name)
+    except Exception as e:
+        if not force:
+            raise
+        print(f"Warning: image-hold removal failed ({e}); proceeding with removal.",
+              file=sys.stderr)
 
     # Remove state dir if separate from container_dir
     if state_dir != container_dir and state_dir.is_dir():

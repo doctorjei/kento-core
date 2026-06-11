@@ -167,11 +167,11 @@ def _pve_vm_qm(name: str, container_dir: Path, verb: str, label: str) -> int:
 
 
 def _dispatch(name: str, *, vm_qmp_command: str, qm_verb: str,
-              label: str) -> int:
+              label: str, namespace: str | None = None) -> int:
     """Shared body for suspend/resume. Returns an exit code."""
     require_root()
 
-    container_dir, mode = resolve_any(name)
+    container_dir, mode = resolve_any(name, namespace)
     if mode is None:
         mode = read_mode(container_dir)
 
@@ -195,13 +195,13 @@ def _dispatch(name: str, *, vm_qmp_command: str, qm_verb: str,
     return 1
 
 
-def suspend(name: str) -> int:
+def suspend(name: str, namespace: str | None = None) -> int:
     """Pause a running VM's vCPUs (QMP stop / qm suspend). Exit code."""
     return _dispatch(name, vm_qmp_command="stop", qm_verb="suspend",
-                     label="Suspended")
+                     label="Suspended", namespace=namespace)
 
 
-def resume(name: str) -> int:
+def resume(name: str, namespace: str | None = None) -> int:
     """Resume a suspended VM's vCPUs (QMP cont / qm resume). Exit code."""
     return _dispatch(name, vm_qmp_command="cont", qm_verb="resume",
-                     label="Resumed")
+                     label="Resumed", namespace=namespace)

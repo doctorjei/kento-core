@@ -159,7 +159,12 @@ def upper_base(name: str, base: Path | None = None) -> Path:
         return Path(override) / name
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
-        home = Path(pwd.getpwnam(sudo_user).pw_dir)
+        try:
+            home = Path(pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            print(f"Error: SUDO_USER={sudo_user!r} is not a known user; "
+                  f"set KENTO_STATE_DIR or run directly as root.", file=sys.stderr)
+            sys.exit(1)
         return home / ".local" / "share" / "kento" / name
     return (base or LXC_BASE) / name
 
@@ -236,10 +241,17 @@ def is_running(container_dir: Path, mode: str) -> bool:
 
     For PVE modes (pve, pve-vm) we wrap the status query with a 5-second
     timeout. An unreachable PVE node or hung pmxcfs would otherwise make
-    `kento stop` hang indefinitely. On timeout or non-zero rc we return
-    True (safe default — issuing a stop on an already-stopped instance is
-    a benign no-op via run_or_die's idempotency guards in the callers,
-    whereas skipping a stop on a still-running instance leaks state).
+    `kento stop` hang indefinitely. On timeout or non-zero rc we ASSUME
+    RUNNING (return True) — skipping a stop on a still-running instance
+    leaks state, so the conservative choice is to attempt the stop.
+
+    The cost of that conservatism is that a stop may then be issued on an
+    instance that is in fact already stopped (the status query merely
+    failed). stop.py's PVE/pve-vm shutdown path tolerates this: it issues
+    the pct/qm shutdown non-fatally and treats a "not running" result as
+    "Already stopped" rather than hard-exiting. (A missing PVE config is
+    handled separately above as not-running, since that means the instance
+    is gone, not merely unreachable.)
     """
     import subprocess
     if mode == "vm":
@@ -379,13 +391,41 @@ def resolve_in_namespace(name: str, namespace: str) -> Path:
     sys.exit(1)
 
 
-def resolve_any(name: str) -> tuple[Path, str]:
-    """Resolve a name across both namespaces.
+def resolve_any(name: str, namespace: str | None = None) -> tuple[Path, str]:
+    """Resolve a name, optionally constrained to a single namespace.
 
     Returns (container_dir, mode) where mode is read from the kento-mode file.
-    Exits with error if ambiguous (found in both) or not found.
+
+    When ``namespace`` is 'lxc'/'container' or 'vm', the search is confined to
+    that namespace's base directory (mirroring resolve_in_namespace): there is
+    no cross-namespace ambiguity check, and a miss exits with a branded
+    "instance not found" error. This is how callers honor an explicit
+    ``kento lxc <cmd>`` / ``kento vm <cmd>`` scope so duplicate names created
+    via ``create --force`` can be disambiguated.
+
+    When ``namespace`` is None (the default — unchanged from prior behavior),
+    both namespaces are searched and an ambiguous name (present in both) exits
+    with an error directing the user to pick a scope.
     """
     validate_name(name)
+
+    if namespace in ("container", "lxc"):
+        hit = _scan_namespace(name, LXC_BASE)
+        if hit is not None:
+            return hit, read_mode(hit)
+        print(f"Error: no lxc named '{name}'. "
+              f"Run 'kento lxc list' to see available instances.",
+              file=sys.stderr)
+        sys.exit(1)
+    if namespace == "vm":
+        hit = _scan_namespace(name, VM_BASE)
+        if hit is not None:
+            return hit, read_mode(hit, "vm")
+        print(f"Error: no vm named '{name}'. "
+              f"Run 'kento vm list' to see available instances.",
+              file=sys.stderr)
+        sys.exit(1)
+
     lxc_hit = _scan_namespace(name, LXC_BASE)
     vm_hit = _scan_namespace(name, VM_BASE)
 

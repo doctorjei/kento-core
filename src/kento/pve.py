@@ -454,18 +454,35 @@ def sync_qm_args_to_memory(vmid: int, container_dir: Path, *,
 
     new_args_line = f"args: {generate_qm_args(container_dir, memory=memory, kvm=kvm)}"
 
+    # Only the GLOBAL (pre-first-section) `args:` field is kento's to rewrite.
+    # PVE stores each snapshot's full config — including its own `args:` line —
+    # under a `[<snapname>]` section. Mirror _parse_qm_conf_field's boundary:
+    # once we hit the first section header, append the remainder verbatim and
+    # stop touching args: (rewriting/dropping snapshot args: corrupts them).
     out_lines: list[str] = []
     replaced = False
+    in_global = True
+    insert_idx: int | None = None  # where to insert if args: never appeared
     for raw in content.splitlines():
-        if raw.startswith("args:"):
+        stripped = raw.strip()
+        if in_global and stripped.startswith("[") and stripped.endswith("]"):
+            # First snapshot header: leave the global region. Remember this
+            # spot so an absent global args: lands BEFORE the section, not at
+            # EOF (which would fall inside/after a snapshot section).
+            in_global = False
+            insert_idx = len(out_lines)
+        if in_global and raw.startswith("args:"):
             if not replaced:
                 out_lines.append(new_args_line)
                 replaced = True
-            # Drop duplicate args lines (shouldn't occur, but be explicit).
+            # Drop duplicate global args lines (shouldn't occur, be explicit).
             continue
         out_lines.append(raw)
     if not replaced:
-        out_lines.append(new_args_line)
+        if insert_idx is not None:
+            out_lines.insert(insert_idx, new_args_line)
+        else:
+            out_lines.append(new_args_line)
 
     # Preserve trailing newline behaviour.
     new_content = "\n".join(out_lines)

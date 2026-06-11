@@ -46,6 +46,38 @@ def _pve_patch(pve_dir):
 
 
 # ---------------------------------------------------------------------------
+# FIX 1: namespace scope forwarded to resolve_any
+# ---------------------------------------------------------------------------
+
+def test_set_forwards_namespace_to_resolve_any(tmp_path):
+    """`kento vm set dup ...` must scope resolution to the vm namespace so a
+    duplicate name (created via --force) resolves the VM instance."""
+    d = tmp_path / "dup"
+    d.mkdir()
+    with patch("kento.set_cmd.require_root"), \
+         patch("kento.set_cmd.is_running", return_value=False), \
+         patch("kento.set_cmd.resolve_any",
+               return_value=(d, "vm")) as mock_resolve, \
+         patch("kento.set_cmd._apply_vm"):
+        rc = set_cmd("dup", memory=512, namespace="vm")
+    assert rc == 0
+    mock_resolve.assert_called_once_with("dup", "vm")
+
+
+def test_set_default_namespace_is_none(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    with patch("kento.set_cmd.require_root"), \
+         patch("kento.set_cmd.is_running", return_value=False), \
+         patch("kento.set_cmd.resolve_any",
+               return_value=(d, "vm")) as mock_resolve, \
+         patch("kento.set_cmd._apply_vm"):
+        rc = set_cmd("box", memory=512)
+    assert rc == 0
+    mock_resolve.assert_called_once_with("box", None)
+
+
+# ---------------------------------------------------------------------------
 # Guard rails: empty set, running, mac format
 # ---------------------------------------------------------------------------
 
@@ -399,6 +431,105 @@ def test_pve_vm_pve_arg_replace(tmp_path):
     text = conf.read_text()
     assert "oldkey: 1" not in text
     assert "balloon: 0" in text
+
+
+def test_pve_vm_mac_non_virtio_net0_warns(tmp_path):
+    """F: a net0 that exists but has no 'virtio' token (e.g. a user-edited
+    non-virtio model) can't take the MAC. set_cmd must surface a stderr
+    WARNING so "Updated" isn't misleading, while STILL writing kento-mac
+    metadata and returning success."""
+    qm = _QM_CONF.replace(
+        "net0: virtio=DE:AD:BE:EF:00:01,bridge=vmbr0\n",
+        "net0: e1000=DE:AD:BE:EF:00:01,bridge=vmbr0\n")
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", qm)
+    with _env(d, "pve-vm"), _pve_patch(pve_dir):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            rc = set_cmd("box", mac="00:11:22:33:44:55")
+    assert rc == 0
+    err = buf.getvalue()
+    assert "virtio" in err.lower()
+    assert "could not be applied" in err.lower()
+    # Metadata IS written even though the conf NIC was left alone.
+    assert (d / "kento-mac").read_text() == "00:11:22:33:44:55\n"
+    # The non-virtio net0 line is preserved unchanged (no MAC swapped in).
+    assert "net0: e1000=DE:AD:BE:EF:00:01,bridge=vmbr0" in conf.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Denylist parity with create.py: --qemu-arg / --pve-arg denylisted tokens
+# are rejected (exit 1, no metadata written), even in their valid mode.
+# ---------------------------------------------------------------------------
+
+def test_vm_qemu_arg_denylisted_token_rejected(tmp_path):
+    """A denylisted --qemu-arg token (-kernel) in vm mode is rejected with
+    exit 1 and no metadata file is written (create/set parity)."""
+    d = tmp_path / "box"
+    d.mkdir()
+    with _env(d, "vm"):
+        assert set_cmd("box", qemu_args=["-kernel", "/x"]) == 1
+    assert not (d / "kento-qemu-args").exists()
+
+
+def test_vm_qemu_arg_denylisted_memfd_rejected(tmp_path):
+    """A memfd-size token in a --qemu-arg is denylisted (would collide with
+    kento's memory-backend-memfd size=)."""
+    d = tmp_path / "box"
+    d.mkdir()
+    with _env(d, "vm"):
+        assert set_cmd("box", qemu_args=["memfd-size=2048"]) == 1
+    assert not (d / "kento-qemu-args").exists()
+
+
+def test_vm_qemu_arg_benign_succeeds(tmp_path):
+    """Counter-test: a benign --qemu-arg in vm mode still succeeds."""
+    d = tmp_path / "box"
+    d.mkdir()
+    with _env(d, "vm"):
+        assert set_cmd("box", qemu_args=["-device", "virtio-rng-pci"]) == 0
+    assert (d / "kento-qemu-args").read_text() == "-device\nvirtio-rng-pci\n"
+
+
+def test_pve_vm_qemu_arg_denylisted_rejected(tmp_path):
+    """Denylist also fires in pve-vm mode for --qemu-arg, leaving no
+    metadata behind."""
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", _QM_CONF)
+    with _env(d, "pve-vm"), _pve_patch(pve_dir):
+        assert set_cmd("box", qemu_args=["-kernel", "/x"]) == 1
+    assert not (d / "kento-qemu-args").exists()
+
+
+def test_pve_lxc_pve_arg_denylisted_rootfs_rejected(tmp_path):
+    """A denylisted --pve-arg token (rootfs:) in pve (pve-lxc) mode is
+    rejected with exit 1 and no metadata file written."""
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
+    with _env(d, "pve"), _pve_patch(pve_dir):
+        assert set_cmd("box", pve_args=["rootfs: /evil"]) == 1
+    assert not (d / "kento-pve-args").exists()
+
+
+def test_pve_lxc_pve_arg_denylisted_arch_rejected(tmp_path):
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
+    with _env(d, "pve"), _pve_patch(pve_dir):
+        assert set_cmd("box", pve_args=["arch: x"]) == 1
+    assert not (d / "kento-pve-args").exists()
+
+
+def test_pve_vm_pve_arg_denylisted_hostname_rejected(tmp_path):
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", _QM_CONF)
+    with _env(d, "pve-vm"), _pve_patch(pve_dir):
+        assert set_cmd("box", pve_args=["hostname: y"]) == 1
+    assert not (d / "kento-pve-args").exists()
+
+
+def test_pve_lxc_pve_arg_benign_succeeds(tmp_path):
+    """Counter-test: a benign --pve-arg in pve mode still succeeds."""
+    pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
+    with _env(d, "pve"), _pve_patch(pve_dir):
+        assert set_cmd("box", pve_args=["tags: kento-test"]) == 0
+    assert (d / "kento-pve-args").read_text() == "tags: kento-test\n"
 
 
 # ---------------------------------------------------------------------------

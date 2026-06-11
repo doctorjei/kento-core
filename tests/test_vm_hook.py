@@ -45,6 +45,18 @@ class TestGenerateVmHook:
         assert "umount" in hook
         assert "virtiofsd.sock" in hook
 
+    def test_post_stop_guards_numeric_vfs_pid(self):
+        """An empty/garbage kento-virtiofsd-pid must not make '[ -d /proc/$VFS_PID ]'
+        test '/proc/' (always true) and stall the post-stop hook for 5s. The
+        generated script must blank a non-numeric VFS_PID and only enter the
+        kill/wait block when it is set."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        # Numeric guard: blanks VFS_PID unless it is all digits.
+        assert 'case "$VFS_PID" in' in hook
+        assert "''|*[!0-9]*) VFS_PID='' ;;" in hook
+        # Kill/wait block only entered for a non-empty (numeric) pid.
+        assert '[ -n "$VFS_PID" ] && [ -d "/proc/$VFS_PID" ]' in hook
+
     def test_contains_layer_validation(self):
         hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
         assert "layer path missing" in hook

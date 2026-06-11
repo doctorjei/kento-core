@@ -53,6 +53,22 @@ def _find_virtiofsd() -> str:
     sys.exit(1)
 
 
+def _find_qemu() -> str:
+    """Locate the qemu-system-x86_64 binary.
+
+    Mirrors _find_virtiofsd so we fail cleanly (before spawning virtiofsd or
+    mounting anything) when QEMU is absent, rather than leaking a virtiofsd
+    process and mount on a Popen FileNotFoundError.
+    """
+    import shutil
+    path = shutil.which("qemu-system-x86_64")
+    if path:
+        return path
+    print("Error: qemu-system-x86_64 not found. Install QEMU or check PATH.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
 _PORT_MIN = 10022
 _PORT_MAX = 10999
 
@@ -245,28 +261,109 @@ def start_vm(container_dir: Path, name: str) -> None:
         port_text = port_file.read_text().strip()
         host_port, guest_port = port_text.split(":")
 
-    # Start virtiofsd
+    # Resolve binaries up-front so an absent QEMU fails cleanly (before we
+    # spawn virtiofsd or leak the mount). _find_virtiofsd / _find_qemu both
+    # sys.exit(1) on miss; at this point only the mount is held, and the
+    # caller-agnostic rollback below has not yet been armed (nothing to undo
+    # beyond the mount, which the missing-kernel/initramfs guards above also
+    # leave to their own unmount — keep that behaviour for the binary checks).
     virtiofsd_bin = _find_virtiofsd()
+    _find_qemu()
     socket_path = container_dir / "virtiofsd.sock"
-    virtiofsd = subprocess.Popen(
-        [virtiofsd_bin,
-         f"--socket-path={socket_path}",
-         f"--shared-dir={rootfs}",
-         "--cache=auto"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    (container_dir / "kento-virtiofsd-pid").write_text(str(virtiofsd.pid) + "\n")
 
-    # Wait for socket to appear
-    for _ in range(50):
-        if socket_path.exists():
-            break
-        time.sleep(0.1)
+    # From here on virtiofsd is running and the rootfs is mounted, so any
+    # failure must roll both back. start_vm is called directly by start.py
+    # (`kento start` / `kento vm start`) with NO surrounding undo, so it has
+    # to be self-cleaning regardless of caller. (create(--start) registers its
+    # own vm-stop undo; stop_vm is idempotent, so a double cleanup is safe.)
+    virtiofsd = None
+    try:
+        # Start virtiofsd
+        virtiofsd = subprocess.Popen(
+            [virtiofsd_bin,
+             f"--socket-path={socket_path}",
+             f"--shared-dir={rootfs}",
+             "--cache=auto"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        (container_dir / "kento-virtiofsd-pid").write_text(str(virtiofsd.pid) + "\n")
 
-    # Start QEMU
+        # Wait for socket to appear
+        for _ in range(50):
+            if socket_path.exists():
+                break
+            time.sleep(0.1)
+
+        # Abort if the socket never appeared or virtiofsd died: launching QEMU
+        # against a dead vhost-user chardev produces a broken VM and leaks the
+        # mount + the virtiofsd process. Mirror the abort-and-unmount logic in
+        # vm_hook.py's pre-start phase. The single except below does the cleanup.
+        if not socket_path.exists() or virtiofsd.poll() is not None:
+            print(f"Error: virtiofsd socket did not appear at {socket_path}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        qemu = _launch_qemu(container_dir, name, rootfs, socket_path)
+    except BaseException:
+        # Any failure in this block (the socket-abort sys.exit, qemu Popen
+        # FileNotFoundError, OSError reading kento-memory/kento-cores, ...) must
+        # roll back virtiofsd + mount + pid files exactly once, then re-raise so
+        # the caller sees the original error. Cleanup is idempotent.
+        _cleanup_failed_start(container_dir, virtiofsd)
+        raise
+
+    (container_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
+
+    print(f"Started: {name}")
+    port_file = container_dir / "kento-port"
+    if port_file.is_file():
+        host_port = port_file.read_text().strip().split(":")[0]
+        print(f"  SSH: ssh -p {host_port} root@localhost")
+
+
+def _cleanup_failed_start(container_dir: Path, virtiofsd) -> None:
+    """Roll back a partially-started VM: kill virtiofsd, unmount, drop pid files.
+
+    Idempotent and tolerant of a half-built state (virtiofsd may be None, the
+    mount may be absent). Used by start_vm's failure paths so it is self-cleaning
+    for callers without their own rollback (start.py).
+    """
+    if virtiofsd is not None:
+        try:
+            virtiofsd.terminate()
+            virtiofsd.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                virtiofsd.kill()
+                virtiofsd.wait(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        except (OSError, ValueError):
+            pass
+    (container_dir / "kento-virtiofsd-pid").unlink(missing_ok=True)
+    (container_dir / "kento-qemu-pid").unlink(missing_ok=True)
+    rootfs = container_dir / "rootfs"
+    if _is_mountpoint(rootfs):
+        _umount_with_retry(rootfs, force=True)
+    (container_dir / "virtiofsd.sock").unlink(missing_ok=True)
+
+
+def _launch_qemu(container_dir: Path, name: str, rootfs: Path,
+                 socket_path: Path):
+    """Build the QEMU argv and launch it detached. Returns the Popen object."""
+    kernel = rootfs / "boot" / "vmlinuz"
+    initramfs = rootfs / "boot" / "initramfs.img"
+
+    # Read port mapping (usermode networking)
+    port_file = container_dir / "kento-port"
+    host_port = guest_port = None
+    if port_file.is_file():
+        port_text = port_file.read_text().strip()
+        host_port, guest_port = port_text.split(":")
+
     memory_file = container_dir / "kento-memory"
     if memory_file.is_file():
         memory = memory_file.read_text().strip()
@@ -342,24 +439,26 @@ def start_vm(container_dir: Path, name: str) -> None:
     # overrides the -m <memory> emitted above). One line = one argv element —
     # no shell splitting. For a flag with a separate value, users pass two
     # --qemu-arg flags (or use the -flag=value form). Tolerate missing file.
+    # Skip blank AND whitespace-only lines: a lone whitespace token would
+    # otherwise become an empty/positional argv element that QEMU rejects.
+    # Matches the stricter PVE path (pve.py rejects whitespace-only args).
     passthrough_file = container_dir / "kento-qemu-args"
     if passthrough_file.is_file():
-        for line in passthrough_file.read_text().splitlines():
+        for raw in passthrough_file.read_text().splitlines():
+            line = raw.strip()
             if line:
                 qemu_cmd.append(line)
 
-    qemu = subprocess.Popen(
+    # Return the Popen; start_vm owns the kento-qemu-pid write and the
+    # "Started:"/SSH output so the pid file is written exactly once and the
+    # cleanup-on-failure path in start_vm stays the sole owner of that state.
+    return subprocess.Popen(
         qemu_cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    (container_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
-
-    print(f"Started: {name}")
-    if port_file.is_file():
-        print(f"  SSH: ssh -p {host_port} root@localhost")
 
 
 def _kill_and_wait(pid_file: Path, timeout: float = 5.0, *, force: bool = False) -> None:

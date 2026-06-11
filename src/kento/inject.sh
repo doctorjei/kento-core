@@ -255,7 +255,11 @@ if [ -f "$CONTAINER_DIR/kento-authorized-keys" ]; then
         SSH_UID=0
         SSH_GID=0
     else
-        SSH_PASSWD_LINE=$(grep "^${SSH_USER}:" "$ROOTFS/etc/passwd" || true)
+        # Match the first passwd field LITERALLY (exact string compare, no
+        # regex semantics). SSH_USER comes from --ssh-key-user (unvalidated);
+        # feeding it to grep as a BRE would let metacharacters (e.g. `ro.t`)
+        # match the WRONG account (`root:`) and chown keys for it.
+        SSH_PASSWD_LINE=$(awk -F: -v u="$SSH_USER" '$1==u {print; exit}' "$ROOTFS/etc/passwd" || true)
         if [ -z "$SSH_PASSWD_LINE" ]; then
             echo "kento-inject: warning: SSH key user '$SSH_USER' not found in rootfs /etc/passwd, skipping key injection" >&2
             SSH_HOME=""

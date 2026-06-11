@@ -39,6 +39,24 @@ def test_upper_base_sudo_user():
     assert result == Path("/home/alice/.local/share/kento/test")
 
 
+def test_upper_base_stale_sudo_user_branded_error(monkeypatch, capsys):
+    """A SUDO_USER absent from the passwd DB must exit cleanly, not traceback.
+
+    Stale/forged SUDO_USER (deleted user, exported in automation, NSS/LDAP
+    failure) makes pwd.getpwnam raise KeyError. kento's convention is a
+    branded 'Error:' + sys.exit(1), never an uncaught traceback.
+    """
+    monkeypatch.delenv("KENTO_STATE_DIR", raising=False)
+    monkeypatch.setenv("SUDO_USER", "ghost")
+    with patch("kento.pwd.getpwnam", side_effect=KeyError("ghost")):
+        with pytest.raises(SystemExit) as exc_info:
+            upper_base("test")
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Error: SUDO_USER='ghost' is not a known user" in captured.err
+    assert "KENTO_STATE_DIR" in captured.err
+
+
 # --- sanitize_image_name ---
 
 
@@ -366,6 +384,83 @@ def test_resolve_any_ambiguous(tmp_path):
     with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
         with pytest.raises(SystemExit):
             resolve_any("mybox")
+
+
+class TestResolveAnyNamespaceScoped:
+    """resolve_any(name, namespace=...) confines resolution to one namespace,
+    so a name that exists in BOTH (created via `create --force`) can be
+    disambiguated instead of hitting the ambiguous-name abort."""
+
+    def _both(self, tmp_path):
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        d_lxc = lxc / "dup"
+        d_lxc.mkdir()
+        (d_lxc / "kento-image").write_text("debian:12\n")
+        (d_lxc / "kento-mode").write_text("lxc\n")
+        d_vm = vm / "dup"
+        d_vm.mkdir()
+        (d_vm / "kento-image").write_text("debian:12\n")
+        (d_vm / "kento-mode").write_text("vm\n")
+        return lxc, vm, d_lxc, d_vm
+
+    def test_lxc_scope_picks_lxc_when_duplicate(self, tmp_path):
+        lxc, vm, d_lxc, d_vm = self._both(tmp_path)
+        with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+            path, mode = resolve_any("dup", namespace="lxc")
+        assert path == d_lxc
+        assert mode == "lxc"
+
+    def test_vm_scope_picks_vm_when_duplicate(self, tmp_path):
+        lxc, vm, d_lxc, d_vm = self._both(tmp_path)
+        with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+            path, mode = resolve_any("dup", namespace="vm")
+        assert path == d_vm
+        assert mode == "vm"
+
+    def test_none_namespace_still_aborts_on_duplicate(self, tmp_path):
+        lxc, vm, d_lxc, d_vm = self._both(tmp_path)
+        with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+            with pytest.raises(SystemExit):
+                resolve_any("dup", namespace=None)
+
+    def test_container_alias_treated_as_lxc(self, tmp_path):
+        lxc, vm, d_lxc, d_vm = self._both(tmp_path)
+        with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+            path, mode = resolve_any("dup", namespace="container")
+        assert path == d_lxc
+
+    def test_vm_scope_miss_on_lxc_only_name_exits(self, tmp_path):
+        """A name that exists ONLY as LXC must NOT silently resolve under the
+        vm scope (the old bug ran it in the LXC instance); it must error."""
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        d_lxc = lxc / "onlylxc"
+        d_lxc.mkdir()
+        (d_lxc / "kento-image").write_text("debian:12\n")
+        (d_lxc / "kento-mode").write_text("lxc\n")
+
+        with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+            with pytest.raises(SystemExit):
+                resolve_any("onlylxc", namespace="vm")
+
+    def test_lxc_scope_miss_on_vm_only_name_exits(self, tmp_path):
+        lxc = tmp_path / "lxc"
+        vm = tmp_path / "vm"
+        lxc.mkdir()
+        vm.mkdir()
+        d_vm = vm / "onlyvm"
+        d_vm.mkdir()
+        (d_vm / "kento-image").write_text("debian:12\n")
+        (d_vm / "kento-mode").write_text("vm\n")
+
+        with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
+            with pytest.raises(SystemExit):
+                resolve_any("onlyvm", namespace="lxc")
 
 
 class TestResolveAnyPveVm:

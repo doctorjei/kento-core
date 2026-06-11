@@ -153,12 +153,18 @@ CONTAINER_DIR="$CONTAINER_DIR"
 BACKEND="$BACKEND"
 # Bail out if rules already installed (e.g. another hook raced ahead).
 [ -f "\$CONTAINER_DIR/kento-portfwd-active" ] && exit 0
+# Bail out if the container was stopped while we were being launched —
+# post-stop drops a cancel sentinel at the very start of its teardown.
+[ -f "\$CONTAINER_DIR/kento-portfwd-cancel" ] && exit 0
 IP=""
 TRIES=0
 # Retry for up to ~30s; DHCP can take a while on slow guests.
 # IPv4-only: our NAT rules live in the ip family, so we must ignore
 # IPv6 addresses (which lxc-info prints interleaved with IPv4 ones).
 while [ "\$TRIES" -lt 30 ]; do
+    # If the container stopped mid-discovery, post-stop wrote a cancel
+    # sentinel; abandon the poll WITHOUT installing rules or a marker.
+    [ -f "\$CONTAINER_DIR/kento-portfwd-cancel" ] && exit 0
     IP=\$(lxc-info -n "\$CID" -iH 2>/dev/null \\
         | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$' | head -1)
     [ -n "\$IP" ] && break
@@ -172,6 +178,11 @@ if [ -z "\$IP" ]; then
 fi
 # Re-check in case start-host raced ahead while we polled.
 [ -f "\$CONTAINER_DIR/kento-portfwd-active" ] && exit 0
+# Final cancel check immediately BEFORE installing any rule: this closes
+# the race where the container is stopped after we obtained an IP but
+# before we commit rules. Without this, a late worker could install
+# orphan DNAT/masquerade rules into the shared table for a dead container.
+[ -f "\$CONTAINER_DIR/kento-portfwd-cancel" ] && exit 0
 if [ "\$BACKEND" = nft ]; then
     nft add rule ip kento prerouting tcp dport "\$HOST_PORT" \\
         dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
@@ -195,9 +206,16 @@ echo "\$HOST_PORT:\$GUEST_PORT:\$IP" > "\$CONTAINER_DIR/kento-portfwd-active"
 echo "\$BACKEND" > "\$CONTAINER_DIR/kento-portfwd-backend"
 WORKER_EOF
         chmod +x "$WORKER"
+        # A fresh launch supersedes any stale cancel sentinel from a prior
+        # boot, so the new worker isn't aborted on its first check.
+        rm -f "$CONTAINER_DIR/kento-portfwd-cancel" 2>/dev/null || true
         # setsid + redirection detaches fully from the monitor process
-        # group, so lxc-start can reap its children and return.
+        # group, so lxc-start can reap its children and return. setsid makes
+        # the worker its own process-group leader, so its PID is also the
+        # PGID — post-stop signals the whole group to reap a still-polling
+        # worker promptly.
         setsid sh "$WORKER" </dev/null >/dev/null 2>&1 &
+        echo "$!" > "$CONTAINER_DIR/kento-portfwd-pid" 2>/dev/null || true
     fi
 }
 
@@ -246,19 +264,36 @@ case "$HOOK_TYPE" in
         if [ -d "$NS_CGROUP" ]; then
             if [ -f "$CONTAINER_DIR/kento-memory" ]; then
                 MEM_MB=$(cat "$CONTAINER_DIR/kento-memory" | tr -d '[:space:]')
-                if [ -n "$MEM_MB" ]; then
-                    MEM_BYTES=$((MEM_MB * 1024 * 1024))
-                    echo "$MEM_BYTES" > "$NS_CGROUP/memory.max" 2>/dev/null \
-                        || echo "kento: warning: could not set memory.max on $NS_CGROUP" >&2
-                fi
+                # Validate before arithmetic: a non-numeric/empty value would
+                # make $(( )) fail and, under `set -e`, abort the hook (a
+                # start error on pve-lxc). Warn-and-skip instead, mirroring the
+                # kento-port guard above.
+                case "$MEM_MB" in
+                    ''|*[!0-9]*)
+                        echo "kento: warning: invalid kento-memory '$MEM_MB' (expected positive integer MB) -- skipping memory.max" >&2
+                        ;;
+                    *)
+                        MEM_BYTES=$((MEM_MB * 1024 * 1024))
+                        echo "$MEM_BYTES" > "$NS_CGROUP/memory.max" 2>/dev/null \
+                            || echo "kento: warning: could not set memory.max on $NS_CGROUP" >&2
+                        ;;
+                esac
             fi
             if [ -f "$CONTAINER_DIR/kento-cores" ]; then
                 CORES=$(cat "$CONTAINER_DIR/kento-cores" | tr -d '[:space:]')
-                if [ -n "$CORES" ]; then
-                    QUOTA=$((CORES * 100000))
-                    echo "$QUOTA 100000" > "$NS_CGROUP/cpu.max" 2>/dev/null \
-                        || echo "kento: warning: could not set cpu.max on $NS_CGROUP" >&2
-                fi
+                # Validate before arithmetic (see kento-memory above): a
+                # corrupted non-numeric value would otherwise abort the hook
+                # under `set -e`.
+                case "$CORES" in
+                    ''|*[!0-9]*)
+                        echo "kento: warning: invalid kento-cores '$CORES' (expected positive integer) -- skipping cpu.max" >&2
+                        ;;
+                    *)
+                        QUOTA=$((CORES * 100000))
+                        echo "$QUOTA 100000" > "$NS_CGROUP/cpu.max" 2>/dev/null \
+                            || echo "kento: warning: could not set cpu.max on $NS_CGROUP" >&2
+                        ;;
+                esac
             fi
         fi
 
@@ -267,36 +302,78 @@ case "$HOOK_TYPE" in
         setup_port_forwarding "$CONTAINER_ID"
         ;;
     post-stop)
+        # Drop a cancel sentinel FIRST, before anything else. A DHCP
+        # port-forward worker may still be polling (or about to install
+        # rules) for this now-dead container; the sentinel tells it to
+        # abort without installing rules or writing the active marker. This
+        # closes the race where a worker wakes up after stop and leaves
+        # orphan DNAT/masquerade rules in the shared table.
+        : > "$CONTAINER_DIR/kento-portfwd-cancel" 2>/dev/null || true
+
+        # Reap a still-polling worker promptly: it was launched under setsid
+        # so its recorded PID is also its process-group ID. TERM the whole
+        # group. Tolerate the worker already being gone (kill -> non-zero).
+        if [ -f "$CONTAINER_DIR/kento-portfwd-pid" ]; then
+            WORKER_PID=$(cat "$CONTAINER_DIR/kento-portfwd-pid" 2>/dev/null | tr -d '[:space:]')
+            case "$WORKER_PID" in
+                ''|*[!0-9]*) : ;;
+                *) kill -TERM -- "-$WORKER_PID" 2>/dev/null || true ;;
+            esac
+        fi
+
         # Tear down port forwarding rules by comment tag, using whichever
         # backend installed them. The backend was recorded at install time in
         # kento-portfwd-backend; default to nft if the marker is absent
         # (pre-1.5.0 containers only ever used nft).
-        if [ -f "$CONTAINER_DIR/kento-portfwd-active" ]; then
-            BACKEND=nft
-            if [ -f "$CONTAINER_DIR/kento-portfwd-backend" ]; then
-                BACKEND=$(cat "$CONTAINER_DIR/kento-portfwd-backend" | tr -d '[:space:]')
-            fi
-            if [ "$BACKEND" = iptables ]; then
-                # iptables: line numbers shift on every delete, so re-list and
-                # delete the first matching rule until none remain.
-                for chain in PREROUTING OUTPUT POSTROUTING; do
-                    while :; do
-                        n=$(iptables -t nat -L "$chain" --line-numbers -n 2>/dev/null \
-                            | grep -F "kento:${NAME}" | head -1 | awk '{print $1}')
-                        [ -n "$n" ] || break
-                        iptables -t nat -D "$chain" "$n" 2>/dev/null || break
-                    done
-                done
-            else
-                for chain in prerouting output postrouting; do
-                    nft -a list chain ip kento "$chain" 2>/dev/null | grep "kento:${NAME}" | \
-                        awk '{print $NF}' | while read -r handle; do
-                            nft delete rule ip kento "$chain" handle "$handle" 2>/dev/null || true
-                        done
-                done
-            fi
-            rm -f "$CONTAINER_DIR/kento-portfwd-active" "$CONTAINER_DIR/kento-portfwd-backend"
+        #
+        # Teardown runs UNCONDITIONALLY — NOT gated on kento-portfwd-active.
+        # A worker that won the race against the cancel sentinel may have
+        # installed rules without (or just before) writing the marker, so
+        # always attempt removal of this instance's tagged rules. The
+        # anchored greps below match only `kento:${NAME}` exactly, so a
+        # no-op teardown on an instance that never installed rules is quiet
+        # and harmless.
+        BACKEND=nft
+        if [ -f "$CONTAINER_DIR/kento-portfwd-backend" ]; then
+            BACKEND=$(cat "$CONTAINER_DIR/kento-portfwd-backend" | tr -d '[:space:]')
         fi
+        if [ "$BACKEND" = iptables ]; then
+            # iptables: line numbers shift on every delete, so re-list and
+            # delete the first matching rule until none remain.
+            for chain in PREROUTING OUTPUT POSTROUTING; do
+                while :; do
+                    # iptables renders the tag as `/* kento:NAME */`
+                    # (space-delimited). Anchor to a trailing boundary so
+                    # `kento:web` does NOT match `kento:web2`'s rule; NAME
+                    # is validated [A-Za-z0-9_.-] so no regex escaping is
+                    # needed beyond the `.` it may contain (acceptable as a
+                    # one-char wildcard here — collisions require an
+                    # otherwise-identical name).
+                    n=$(iptables -t nat -L "$chain" --line-numbers -n 2>/dev/null \
+                        | grep -E "kento:${NAME}( |\$)" | head -1 | awk '{print $1}')
+                    [ -n "$n" ] || break
+                    iptables -t nat -D "$chain" "$n" 2>/dev/null || break
+                done
+            done
+        else
+            for chain in prerouting output postrouting; do
+                # nft renders the tag as `comment "kento:NAME"`. Match the
+                # full quoted token so `kento:web` does NOT also delete
+                # `kento:web2`'s rule (prefix collision).
+                nft -a list chain ip kento "$chain" 2>/dev/null \
+                    | grep -E "comment \"kento:${NAME}\"( |\$)" | \
+                    awk '{print $NF}' | while read -r handle; do
+                        nft delete rule ip kento "$chain" handle "$handle" 2>/dev/null || true
+                    done
+            done
+        fi
+        # Remove the worker script and all kento-portfwd-* sentinels
+        # (active/backend/cancel/pid/worker.sh). Idempotent and quiet.
+        rm -f "$CONTAINER_DIR/kento-portfwd-active" \
+            "$CONTAINER_DIR/kento-portfwd-backend" \
+            "$CONTAINER_DIR/kento-portfwd-cancel" \
+            "$CONTAINER_DIR/kento-portfwd-pid" \
+            "$CONTAINER_DIR/kento-portfwd-worker.sh" 2>/dev/null || true
         # Unmount overlayfs
         mountpoint -q "$CONTAINER_DIR/rootfs" 2>/dev/null && umount "$CONTAINER_DIR/rootfs" || true
         ;;

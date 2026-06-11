@@ -28,7 +28,8 @@ def run_or_die(
     Returns the CompletedProcess on success. On failure prints
     Error: failed to {what}[ {name}] (exit {rc}): {stderr_snippet}
     [hint: {hint}]
-    and exits with status 1 (CalledProcessError) or 2 (FileNotFoundError).
+    and exits with status 1 (CalledProcessError) or 2 (FileNotFoundError /
+    PermissionError / other OSError).
     """
     try:
         result = subprocess.run(
@@ -41,6 +42,15 @@ def run_or_die(
     except FileNotFoundError:
         tool = cmd[0] if cmd else "(empty cmd)"
         print(f"Error: '{tool}' not found on PATH. Install it or check your PATH.",
+              file=sys.stderr)
+        if hint:
+            print(f"hint: {hint}", file=sys.stderr)
+        sys.exit(2)
+    except OSError as e:
+        # PermissionError (binary lacks +x, or is a directory) and other OSError
+        # (ENOEXEC / wrong-arch) — surface a branded message, not a traceback.
+        tool = cmd[0] if cmd else "(empty cmd)"
+        print(f"Error: cannot execute '{tool}': {e.strerror} (check permissions/arch)",
               file=sys.stderr)
         if hint:
             print(f"hint: {hint}", file=sys.stderr)

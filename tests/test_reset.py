@@ -152,6 +152,37 @@ def test_reset_nonexistent(mock_root, tmp_path):
             reset("nonexistent")
 
 
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", side_effect=SystemExit(1))
+@patch("kento.reset.require_root")
+def test_reset_missing_image_aborts_with_zero_side_effects(
+        mock_root, mock_layers, mock_run, tmp_path):
+    """If the backing image is gone, resolve_layers() sys.exit(1)s. That must
+    abort BEFORE the writable layer is cleared, so upper/work stay intact and
+    kento-layers is not rewritten (no half-scrubbed instance)."""
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("gone:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    upper = lxc_dir / "upper"
+    upper.mkdir()
+    (upper / "somefile").write_text("data")
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir):
+        with pytest.raises(SystemExit):
+            reset("test")
+
+    # Writable layer untouched and kento-layers unchanged.
+    assert (upper / "somefile").read_text() == "data"
+    assert (lxc_dir / "kento-layers").read_text() == "/old/path\n"
+    # The crash-safe clear never ran, so no .old sibling exists.
+    assert not (lxc_dir / "upper.old").exists()
+    assert not (lxc_dir / "work.old").exists()
+
+
 # --- PVE mode tests ---
 
 

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from kento.attach import ESCAPE_BYTE, EscapeDetector, attach
+from kento.attach import ESCAPE_BYTE, EscapeDetector, _write_all, attach
 
 
 def _ok(*args, **kwargs):
@@ -158,6 +158,49 @@ class TestEscapeDetector:
         assert det.feed(ord("b")) == ("forward", b"b")
 
 
+# -- _write_all: short-write looping (serial relay -> stdout pipe/file) --
+
+
+class TestWriteAll:
+    def test_loops_past_short_writes(self):
+        """os.write may return a short count when fd is a pipe/file; _write_all
+        must loop until every byte is flushed, in order, with no data dropped."""
+        data = b"abcdefghij" * 1000  # 10_000 bytes
+        written = bytearray()
+
+        def short_write(fd, buf):
+            # Accept at most 3 bytes per call to force many short writes.
+            chunk = bytes(buf[:3])
+            written.extend(chunk)
+            return len(chunk)
+
+        with patch("kento.attach.os.write", side_effect=short_write):
+            _write_all(7, data)
+
+        # Every byte eventually written, in original order.
+        assert bytes(written) == data
+
+    def test_single_full_write(self):
+        """When os.write accepts everything at once, _write_all writes once."""
+        data = b"hello world"
+        calls = []
+
+        def full_write(fd, buf):
+            calls.append(bytes(buf))
+            return len(buf)
+
+        with patch("kento.attach.os.write", side_effect=full_write):
+            _write_all(7, data)
+
+        assert calls == [data]
+
+    def test_empty_data_no_write(self):
+        """Empty payload performs no os.write calls."""
+        with patch("kento.attach.os.write") as mock_write:
+            _write_all(7, b"")
+        mock_write.assert_not_called()
+
+
 # -- CLI routing --
 
 
@@ -168,7 +211,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["attach", "foo"])
         assert exc.value.code == 0
-        mock_attach.assert_called_once_with("foo")
+        mock_attach.assert_called_once_with("foo", namespace=None)
 
     @patch("kento.attach.attach", return_value=0)
     def test_bare_enter_routes(self, mock_attach):
@@ -176,7 +219,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["enter", "foo"])
         assert exc.value.code == 0
-        mock_attach.assert_called_once_with("foo")
+        mock_attach.assert_called_once_with("foo", namespace=None)
 
     @patch("kento.attach.attach", return_value=0)
     def test_lxc_attach_routes(self, mock_attach):
@@ -184,7 +227,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "attach", "foo"])
         assert exc.value.code == 0
-        mock_attach.assert_called_once_with("foo")
+        mock_attach.assert_called_once_with("foo", namespace="lxc")
 
     @patch("kento.attach.attach", return_value=0)
     def test_vm_attach_routes(self, mock_attach):
@@ -192,7 +235,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["vm", "attach", "foo"])
         assert exc.value.code == 0
-        mock_attach.assert_called_once_with("foo")
+        mock_attach.assert_called_once_with("foo", namespace="vm")
 
     @patch("kento.attach.attach", return_value=0)
     def test_vm_enter_routes(self, mock_attach):
@@ -200,7 +243,7 @@ class TestCliRouting:
         with pytest.raises(SystemExit) as exc:
             main(["vm", "enter", "foo"])
         assert exc.value.code == 0
-        mock_attach.assert_called_once_with("foo")
+        mock_attach.assert_called_once_with("foo", namespace="vm")
 
     @patch("kento.attach.attach", return_value=3)
     def test_cli_propagates_nonzero_exit(self, mock_attach):

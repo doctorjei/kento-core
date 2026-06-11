@@ -120,7 +120,13 @@ case "$PHASE" in
         PID_FILE="$CONTAINER_DIR/kento-virtiofsd-pid"
         if [ -f "$PID_FILE" ]; then
             VFS_PID=$(cat "$PID_FILE")
-            if [ -d "/proc/$VFS_PID" ]; then
+            # Guard against an empty/garbage pid file: a non-numeric VFS_PID
+            # would make "[ -d /proc/$VFS_PID ]" test "/proc/" (always true)
+            # and stall the post-stop hook for 5s. Blank it unless numeric.
+            case "$VFS_PID" in
+                ''|*[!0-9]*) VFS_PID='' ;;
+            esac
+            if [ -n "$VFS_PID" ] && [ -d "/proc/$VFS_PID" ]; then
                 kill "$VFS_PID" 2>/dev/null || true
                 # Wait up to 5s for exit
                 TRIES=50

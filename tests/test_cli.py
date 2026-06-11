@@ -1227,6 +1227,25 @@ class TestMacFlag:
             main(["vm", "create", "--mac", "06:00:00:00:00:01", "debian:12"])
         mock_create.assert_called_once()
 
+    def test_set_mac_multicast_rejected_at_parse_time(self, capsys):
+        """`set --mac` shares create's _validate_mac, so a multicast MAC is
+        rejected at parse time (argparse exits 2) — never reaching set_cmd."""
+        with pytest.raises(SystemExit) as exc:
+            main(["set", "box", "--mac", "01:02:03:04:05:06"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "multicast" in err.lower() or "broadcast" in err.lower()
+
+    def test_set_mac_unicast_accepted_at_parse_time(self):
+        """Counter-test: a unicast MAC passes parse-time validation for set
+        (it then dispatches into set_cmd, which we stub)."""
+        with patch("kento.set_cmd.set_cmd", MagicMock(return_value=0)) as m, \
+             pytest.raises(SystemExit) as exc:
+            main(["set", "box", "--mac", "52:54:00:11:22:33"])
+        assert exc.value.code == 0
+        m.assert_called_once()
+        assert m.call_args[1]["mac"] == "52:54:00:11:22:33"
+
 
 class TestPortNetworkValidation:
     """Tests for --port + --network CLI-level validation (Phase 3)."""

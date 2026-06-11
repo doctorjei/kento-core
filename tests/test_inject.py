@@ -45,7 +45,13 @@ def test_inject_no_bashisms():
     """Script uses only POSIX shell constructs."""
     script = generate_inject()
     assert "[[" not in script
-    assert "==" not in script
+    # `==` is a bash test operator, but it's also awk's equality operator.
+    # The passwd lookup uses a POSIX awk program (``$1==u``) for an exact,
+    # regex-free field-1 compare — that occurrence is legitimate. Strip awk
+    # programs (single-quoted ``$1==...`` exprs) before checking for the
+    # shell-test bashism so the guard still catches ``[ x == y ]`` / ``[[ ]]``.
+    shell_only = script.replace("'$1==u {print; exit}'", "")
+    assert "==" not in shell_only
     assert "<(" not in script
 
 
@@ -369,6 +375,48 @@ class TestInjectSSHUserExecution:
         ak = rootfs / "root" / ".ssh" / "authorized_keys"
         assert ak.is_file()
         assert "ssh-rsa AAAA" in ak.read_text()
+
+    def test_regex_metachar_user_does_not_match_wrong_account(self, tmp_path):
+        """#3: an ssh-key-user with regex metacharacters must NOT match a
+        different passwd line.
+
+        The passwd lookup was ``grep "^${SSH_USER}:"`` which treats SSH_USER
+        (from --ssh-key-user, unvalidated) as a BRE — so ``ro.t`` would match
+        ``root:`` (the ``.`` wildcard) and kento would chown/write
+        authorized_keys for root. The fix uses an exact awk field-1 compare.
+
+        Here ``ro.t`` is not a real account, so the lookup must come up empty
+        and key injection must be SKIPPED — not silently redirected to root.
+        """
+        import subprocess
+        rootfs, container = self._setup(tmp_path)
+        (rootfs / "etc" / "passwd").write_text(
+            "root:x:0:0:root:/root:/bin/bash\n"
+        )
+        (container / "kento-authorized-keys").write_text(
+            "ssh-rsa AAAA attacker@host\n")
+        (container / "kento-ssh-user").write_text("ro.t\n")
+        script = write_inject(container)
+        result = subprocess.run(
+            ["sh", str(script), str(rootfs), str(container)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        # Must report not-found, NOT inject into root's home.
+        assert "not found" in result.stderr or "Warning" in result.stderr
+        assert not (rootfs / "root" / ".ssh" / "authorized_keys").exists(), (
+            "regex-metachar user 'ro.t' wrongly matched 'root' and injected "
+            "keys for the wrong account"
+        )
+
+    def test_inject_ssh_passwd_lookup_is_literal(self):
+        """Static guard: the passwd lookup matches field 1 exactly (awk), not
+        as a grep BRE, so usernames with regex metacharacters can't match the
+        wrong account."""
+        script = generate_inject()
+        assert 'awk -F: -v u="$SSH_USER" \'$1==u {print; exit}\'' in script
+        # The old unanchored/regex-prone grep form must be gone.
+        assert 'grep "^${SSH_USER}:"' not in script
 
 
 class TestInjectDHCPNetworkExecution:

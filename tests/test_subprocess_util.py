@@ -1,5 +1,7 @@
 """Tests for kento.subprocess_util.run_or_die."""
 
+from unittest.mock import patch
+
 import pytest
 
 from kento.subprocess_util import run_or_die
@@ -61,6 +63,36 @@ def test_missing_binary_includes_hint(capsys):
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     assert "hint: install the thing" in captured.err
+
+
+def test_permission_error_exits_cleanly(capsys):
+    """A non-executable binary (PermissionError) yields a branded message, exit 2.
+
+    PermissionError is an OSError subclass distinct from FileNotFoundError;
+    without the broadened except it would propagate as a traceback.
+    """
+    with patch("kento.subprocess_util.subprocess.run",
+               side_effect=PermissionError(13, "Permission denied")):
+        with pytest.raises(SystemExit) as exc_info:
+            run_or_die(["/some/tool"], "run tool")
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "Error: cannot execute '/some/tool'" in captured.err
+    assert "Permission denied" in captured.err
+    assert "check permissions/arch" in captured.err
+
+
+def test_oserror_exec_format_exits_cleanly(capsys):
+    """A wrong-arch / ENOEXEC binary (OSError) yields a branded message, exit 2."""
+    with patch("kento.subprocess_util.subprocess.run",
+               side_effect=OSError(8, "Exec format error")):
+        with pytest.raises(SystemExit) as exc_info:
+            run_or_die(["/some/tool"], "run tool", hint="rebuild for this arch")
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "Error: cannot execute '/some/tool'" in captured.err
+    assert "Exec format error" in captured.err
+    assert "hint: rebuild for this arch" in captured.err
 
 
 def test_stderr_truncated_when_longer_than_500_chars(capsys):

@@ -131,3 +131,18 @@ class TestDeleteLxcSnippetsWrapper:
         with patch("kento.vm_hook.find_snippets_dir",
                    side_effect=SystemExit(1)):
             delete_lxc_snippets_wrapper(100)  # should not raise
+
+    def test_no_snippets_storage_warns(self, capsys):
+        """find_snippets_dir() raising SystemExit must surface a stderr
+        WARNING (not a silent ``pass``), so a leaked wrapper that couldn't be
+        located is not reported as a clean destroy."""
+        with patch("kento.vm_hook.find_snippets_dir",
+                   side_effect=SystemExit(1)):
+            delete_lxc_snippets_wrapper(100)  # should not raise
+        captured = capsys.readouterr()
+        # Warning goes to stderr, mentions the wrapper and manual cleanup.
+        assert "warning" in captured.err.lower()
+        assert "kento-lxc-100.sh" in captured.err
+        assert "manual" in captured.err.lower()
+        # Nothing should leak onto stdout.
+        assert captured.out == ""

@@ -1,6 +1,7 @@
 """Tests for container listing."""
 
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 from kento.list import list_containers
@@ -62,6 +63,48 @@ def test_list_empty(mock_run, tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "no instances found" in output
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_skips_unreadable_entry(mock_run, tmp_path, capsys):
+    """One instance dir that raises OSError on read (e.g. a concurrent
+    `kento destroy` rmtree racing between glob and read) must be skipped,
+    not abort the whole listing and hide the healthy instances."""
+    # Healthy instance.
+    good = tmp_path / "goodbox"
+    good.mkdir()
+    (good / "kento-image").write_text("good-image:latest\n")
+    (good / "kento-state").write_text(str(good) + "\n")
+    (good / "upper").mkdir()
+
+    # Bad instance: kento-image present at glob time but read_text raises.
+    bad = tmp_path / "badbox"
+    bad.mkdir()
+    bad_image = bad / "kento-image"
+    bad_image.write_text("bad-image:latest\n")
+    (bad / "kento-state").write_text(str(bad) + "\n")
+    (bad / "upper").mkdir()
+
+    vm = tmp_path / "vm"
+
+    real_read_text = Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == bad_image:
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm), \
+         patch.object(Path, "read_text", flaky_read_text):
+        list_containers()
+
+    output = capsys.readouterr().out
+    # Healthy instance still listed.
+    assert "goodbox" in output
+    assert "good-image:latest" in output
+    # Bad instance skipped, not crashing the listing.
+    assert "badbox" not in output
 
 
 # --- PVE mode tests ---

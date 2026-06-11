@@ -115,6 +115,37 @@ def _validate_lxc_args(lxc_args: list[str]) -> None:
                 sys.exit(1)
 
 
+def _validate_env(env: list[str]) -> None:
+    """Reject --env entries that aren't clean KEY=VALUE pairs.
+
+    Each entry is written verbatim into three places: the cloud-init
+    user-data ``content: |`` block scalar (cloudinit.py), /etc/environment,
+    and ``lxc.environment = <e>``. An embedded newline (or other control
+    char) would terminate the YAML block scalar early and silently drop
+    later directives (ssh keys etc.), and corrupt the other targets too. The
+    help text promises KEY=VALUE, so enforce it before any state is written:
+    the key must be a valid shell-ish identifier, there must be an ``=``, and
+    no control characters (including newline/tab/CR) may appear anywhere.
+    """
+    import re
+    key_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    for e in env:
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in e):
+            print(f"Error: --env value contains a control character: {e!r}. "
+                  "Each --env must be a single-line KEY=VALUE pair.",
+                  file=sys.stderr)
+            sys.exit(1)
+        if "=" not in e:
+            print(f"Error: --env value is not KEY=VALUE (missing '='): {e!r}.",
+                  file=sys.stderr)
+            sys.exit(1)
+        key = e.split("=", 1)[0]
+        if not key_re.match(key):
+            print(f"Error: --env key {key!r} is invalid in {e!r}; keys must "
+                  "match [A-Za-z_][A-Za-z0-9_]*.", file=sys.stderr)
+            sys.exit(1)
+
+
 def _run_cleanup(undos: list[tuple[str, object]]) -> None:
     """Run cleanup callables in reverse order. Best-effort — log and continue on errors.
 
@@ -338,7 +369,6 @@ def _generate_ssh_host_keys(dest_dir: Path) -> None:
 
 def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
     """Copy ssh_host_* files from src_dir into dest_dir."""
-    import shutil
     dest_dir.mkdir(parents=True, exist_ok=True)
     for f in sorted(src_dir.iterdir()):
         if f.name.startswith("ssh_host_") and f.is_file():
@@ -377,6 +407,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         _validate_pve_args(pve_args)
     if lxc_args:
         _validate_lxc_args(lxc_args)
+    # Validate --env shape BEFORE any seed/config/env-file is written. A bad
+    # entry (embedded newline, missing '=', bad key) would otherwise corrupt
+    # the cloud-init YAML block scalar / /etc/environment / lxc.environment.
+    if env:
+        _validate_env(env)
 
     # Validate and read SSH key files early (before any filesystem changes)
     ssh_key_contents: str | None = None
@@ -520,6 +555,12 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # missing image, so no defensive empty-string check is needed here.
     layers = resolve_layers(image)
 
+    # detect_cloudinit() does filesystem I/O over every layer. ``layers`` is
+    # resolved once and never reassigned, so probe once and reuse the boolean
+    # at all three decision sites below (cloudinit-mode precondition, the
+    # root-ssh advisory, and the effective config-mode selection).
+    has_cloudinit = detect_cloudinit(layers)
+
     # F7 + F11: hold the cross-process kento lock across the entire
     # allocate-and-commit sequence. Two concurrent `kento create` processes
     # would otherwise race on next_instance_name / next_vmid / container_dir
@@ -596,7 +637,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # is a user error — the seed we'd write would never be consumed and the
     # guest would boot unconfigured. Reject up front rather than warning and
     # silently producing a broken instance. ``auto`` falls back to injection.
-    if config_mode == "cloudinit" and not detect_cloudinit(layers):
+    if config_mode == "cloudinit" and not has_cloudinit:
         print(f"Error: --config-mode cloudinit requires cloud-init in the "
               f"image, but none was detected in {image}.", file=sys.stderr)
         print("  Drop --config-mode to auto-detect, or use "
@@ -610,7 +651,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # behavior or exit. Applies regardless of config_mode: the root-login
     # restriction affects both injection and cloudinit seeding.
     if (ssh_key_contents is not None and ssh_key_user == "root"
-            and detect_cloudinit(layers)):
+            and has_cloudinit):
         print("Warning: injecting SSH keys for 'root' on a cloud-init image. "
               "Cloud images", file=sys.stderr)
         print("  usually disable root SSH login; if you can't connect, "
@@ -729,7 +770,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         # --config-mode=cloudinit without detected cloud-init case is
         # rejected earlier (F14); here we only choose between valid modes.
         if config_mode == "auto":
-            if detect_cloudinit(layers):
+            if has_cloudinit:
                 effective_config_mode = "cloudinit"
             else:
                 effective_config_mode = "injection"

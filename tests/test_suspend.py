@@ -128,6 +128,38 @@ def _env(container_dir, mode, *, running=True):
         yield
 
 
+# -- namespace scope forwarded to resolve_any (FIX 1) ----------------------
+
+def test_suspend_forwards_namespace_to_resolve_any(tmp_path):
+    """`kento vm suspend dup` must scope resolution to the vm namespace so a
+    duplicate name (created via --force) resolves the VM, not aborting."""
+    d = tmp_path / "dup"
+    d.mkdir()
+    (d / "qmp.sock").write_text("")
+    with patch("kento.suspend.require_root"), \
+         patch("kento.suspend.is_running", return_value=True), \
+         patch("kento.suspend.qmp_command", return_value=[{"return": {}}]), \
+         patch("kento.suspend.resolve_any",
+               return_value=(d, "vm")) as mock_resolve:
+        rc = suspend("dup", namespace="vm")
+    assert rc == 0
+    mock_resolve.assert_called_once_with("dup", "vm")
+
+
+def test_resume_default_namespace_is_none(tmp_path):
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "qmp.sock").write_text("")
+    with patch("kento.suspend.require_root"), \
+         patch("kento.suspend.is_running", return_value=True), \
+         patch("kento.suspend.qmp_command", return_value=[{"return": {}}]), \
+         patch("kento.suspend.resolve_any",
+               return_value=(d, "vm")) as mock_resolve:
+        rc = resume("box")
+    assert rc == 0
+    mock_resolve.assert_called_once_with("box", None)
+
+
 # -- plain vm --------------------------------------------------------------
 
 def test_suspend_vm_sends_stop(tmp_path):

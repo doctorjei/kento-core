@@ -18,47 +18,54 @@ def list_containers(scope: str | None = None, show_size: bool = False) -> None:
             image_files.extend(VM_BASE.glob("*/kento-image"))
 
     for image_file in sorted(image_files, key=lambda f: f.parent.name):
-        container_dir = image_file.parent
-        container_id = container_dir.name
-        image = image_file.read_text().strip()
+        # list is read-only introspection: a concurrent `kento destroy`
+        # (rmtree) can race between the glob above and the reads below,
+        # raising FileNotFoundError/OSError. Skip the bad entry rather than
+        # aborting the whole listing and hiding all healthy instances.
+        try:
+            container_dir = image_file.parent
+            container_id = container_dir.name
+            image = image_file.read_text().strip()
 
-        name_file = container_dir / "kento-name"
-        display_name = name_file.read_text().strip() if name_file.is_file() else container_id
+            name_file = container_dir / "kento-name"
+            display_name = name_file.read_text().strip() if name_file.is_file() else container_id
 
-        mode = read_mode(container_dir)
-        ctype = "pve-lxc" if mode == "pve" else mode
+            mode = read_mode(container_dir)
+            ctype = "pve-lxc" if mode == "pve" else mode
 
-        # For PVE modes, surface an orphaned instance (PVE config gone,
-        # destroyed out-of-band) as "orphan" so the user can see it and
-        # clean it up with `destroy -f`.
-        if mode in ("pve", "pve-vm"):
-            if mode == "pve-vm":
-                vmid_file = container_dir / "kento-vmid"
-                vmid = vmid_file.read_text().strip() if vmid_file.is_file() else None
-            else:
-                vmid = container_dir.name
-            if vmid is None or not pve_config_exists(vmid, mode):
-                status = "orphan"
+            # For PVE modes, surface an orphaned instance (PVE config gone,
+            # destroyed out-of-band) as "orphan" so the user can see it and
+            # clean it up with `destroy -f`.
+            if mode in ("pve", "pve-vm"):
+                if mode == "pve-vm":
+                    vmid_file = container_dir / "kento-vmid"
+                    vmid = vmid_file.read_text().strip() if vmid_file.is_file() else None
+                else:
+                    vmid = container_dir.name
+                if vmid is None or not pve_config_exists(vmid, mode):
+                    status = "orphan"
+                else:
+                    status = "running" if is_running(container_dir, mode) else "stopped"
             else:
                 status = "running" if is_running(container_dir, mode) else "stopped"
-        else:
-            status = "running" if is_running(container_dir, mode) else "stopped"
 
-        if show_size:
-            state_file = container_dir / "kento-state"
-            state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else container_dir
-            upper_dir = state_dir / "upper"
-            if upper_dir.is_dir():
-                du = subprocess.run(
-                    ["du", "-sh", str(upper_dir)],
-                    capture_output=True, text=True,
-                )
-                upper_size = du.stdout.split()[0] if du.returncode == 0 else "?"
+            if show_size:
+                state_file = container_dir / "kento-state"
+                state_dir = Path(state_file.read_text().strip()) if state_file.is_file() else container_dir
+                upper_dir = state_dir / "upper"
+                if upper_dir.is_dir():
+                    du = subprocess.run(
+                        ["du", "-sh", str(upper_dir)],
+                        capture_output=True, text=True,
+                    )
+                    upper_size = du.stdout.split()[0] if du.returncode == 0 else "?"
+                else:
+                    upper_size = "0"
+                rows.append((display_name, ctype, image, status, upper_size))
             else:
-                upper_size = "0"
-            rows.append((display_name, ctype, image, status, upper_size))
-        else:
-            rows.append((display_name, ctype, image, status))
+                rows.append((display_name, ctype, image, status))
+        except OSError:
+            continue
 
     if not rows:
         print("(no instances found)")
