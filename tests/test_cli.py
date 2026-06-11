@@ -58,6 +58,27 @@ def test_lxc_create_help(capsys):
     assert "--vmid" in output
     assert "--port" in output
     assert "--start" in output
+    # --pve-arg applies to PVE-LXC, so it stays visible under lxc scope.
+    assert "--pve-arg" in output
+    # --lxc-arg is plain-LXC native config; visible under lxc scope.
+    assert "--lxc-arg" in output
+    # VM-only flags are hidden from lxc help (still rejected at runtime with a
+    # friendly message, but not advertised as accepted here).
+    assert "--qemu-arg" not in output
+    assert "--mac" not in output
+
+
+def test_vm_create_help(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["vm", "create", "--help"])
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    # VM-applicable flags are visible under vm scope.
+    assert "--qemu-arg" in output
+    assert "--mac" in output
+    assert "--pve-arg" in output
+    # --lxc-arg is plain-LXC only; hidden from vm help.
+    assert "--lxc-arg" not in output
 
 
 def test_pve_lxc_mutually_exclusive(capsys):
@@ -1073,18 +1094,26 @@ class TestSSHHostKeyFlags:
 class TestMacFlag:
     """Tests for the --mac flag on create and run."""
 
-    def test_mac_in_lxc_create_help(self, capsys):
-        """--mac appears in lxc create --help."""
+    def test_mac_hidden_from_lxc_create_help(self, capsys):
+        """--mac is VM-only, so it is hidden from lxc create --help."""
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
-        assert "--mac" in output
+        assert "--mac" not in output
 
-    def test_mac_in_lxc_run_help(self, capsys):
-        """--mac appears in lxc run --help."""
+    def test_mac_hidden_from_lxc_run_help(self, capsys):
+        """--mac is VM-only, so it is hidden from lxc run --help."""
         with pytest.raises(SystemExit) as exc:
             main(["lxc", "run", "--help"])
+        assert exc.value.code == 0
+        output = capsys.readouterr().out
+        assert "--mac" not in output
+
+    def test_mac_in_vm_create_help(self, capsys):
+        """--mac is advertised under vm create --help."""
+        with pytest.raises(SystemExit) as exc:
+            main(["vm", "create", "--help"])
         assert exc.value.code == 0
         output = capsys.readouterr().out
         assert "--mac" in output
