@@ -1,16 +1,24 @@
 """Kento — compose OCI images into LXC system containers via overlayfs."""
 
+import logging
 import os
 import pwd
 import re
-import sys
 from pathlib import Path
 
 try:
     from importlib.metadata import version as _pkg_version
-    __version__ = _pkg_version("kento")
+    __version__ = _pkg_version("kento-core")
 except Exception:
     __version__ = "unknown"
+
+logging.getLogger("kento").addHandler(logging.NullHandler())
+logger = logging.getLogger("kento")
+
+from kento.errors import (  # noqa: F401  (public re-export)
+    KentoError, ValidationError, InstanceNotFoundError, InstanceExistsError,
+    ImageNotFoundError, ModeError, StateError, SubprocessError,
+)
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
@@ -26,24 +34,22 @@ def validate_name(name: str, *, what: str = "instance name") -> None:
     alphanumeric. Max 63 chars (matches Linux HOST_NAME_MAX constraint).
     Rejects: empty, whitespace, shell metacharacters, `/`, `..`, NUL.
 
-    Calls sys.exit(1) with Error: ... on rejection. what is used in the
-    message for context (e.g. "instance name", "auto-generated name").
+    Raises ValidationError on rejection. what is used in the message for
+    context (e.g. "instance name", "auto-generated name").
     """
     if not isinstance(name, str) or not name:
-        print(f"Error: {what} cannot be empty", file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError(f"{what} cannot be empty")
     if len(name) > _NAME_MAX_LEN:
-        print(f"Error: {what} too long ({len(name)} chars, max {_NAME_MAX_LEN}): {name!r}",
-              file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError(
+            f"{what} too long ({len(name)} chars, max {_NAME_MAX_LEN}): {name!r}"
+        )
     if "\x00" in name:
-        print(f"Error: {what} contains NUL byte: {name!r}", file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError(f"{what} contains NUL byte: {name!r}")
     if not _NAME_RE.match(name):
-        print(f"Error: invalid {what}: {name!r}. Names must start with a letter "
-              f"or digit and contain only [A-Za-z0-9_.-] (max {_NAME_MAX_LEN} chars).",
-              file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError(
+            f"invalid {what}: {name!r}. Names must start with a letter "
+            f"or digit and contain only [A-Za-z0-9_.-] (max {_NAME_MAX_LEN} chars)."
+        )
 
 
 def _bridge_exists(name: str) -> bool:
@@ -86,27 +92,28 @@ def resolve_network(net_type: str | None, bridge_name: str | None,
             # network at all. Default to usermode instead; user can still pass
             # --network bridge=<name> explicitly (pve-vm handles bridge via qm).
             net_type = "usermode"
-            print("Network: using usermode networking (plain VM default)")
+            logger.info("Network: using usermode networking (plain VM default)")
         else:
             bridge = detect_bridge()
             if bridge:
                 net_type = "bridge"
                 bridge_name = bridge
-                print(f"Network: using bridge {bridge}")
+                logger.info("Network: using bridge %s", bridge)
             elif mode == "pve-vm":
                 net_type = "usermode"
-                print("Network: no bridge found, using usermode networking")
+                logger.info("Network: no bridge found, using usermode networking")
             else:
                 net_type = "none"
-                print("Network: no bridge found, networking disabled")
+                logger.info("Network: no bridge found, networking disabled")
     elif net_type == "bridge" and bridge_name is None:
         # --network bridge without name: auto-detect bridge
         bridge_name = detect_bridge()
         if bridge_name is None:
-            print("Error: --network bridge specified but no bridge interface found "
-                  "(checked vmbr0, lxcbr0)", file=sys.stderr)
-            sys.exit(1)
-        print(f"Network: using bridge {bridge_name}")
+            raise ValidationError(
+                "--network bridge specified but no bridge interface found "
+                "(checked vmbr0, lxcbr0)"
+            )
+        logger.info("Network: using bridge %s", bridge_name)
 
     return {
         "type": net_type,
@@ -123,9 +130,7 @@ def read_mode(container_dir: Path, default: str = "lxc") -> str:
 
 def require_root() -> None:
     if os.getuid() != 0:
-        print("Error: must run as root. Re-run with sudo "
-              "(e.g. 'sudo kento ...').", file=sys.stderr)
-        sys.exit(1)
+        raise StateError("must run as root. Re-run with sudo (e.g. 'sudo kento ...').")
 
 
 def detect_mode(force: str | None = None) -> str:
@@ -162,9 +167,10 @@ def upper_base(name: str, base: Path | None = None) -> Path:
         try:
             home = Path(pwd.getpwnam(sudo_user).pw_dir)
         except KeyError:
-            print(f"Error: SUDO_USER={sudo_user!r} is not a known user; "
-                  f"set KENTO_STATE_DIR or run directly as root.", file=sys.stderr)
-            sys.exit(1)
+            raise StateError(
+                f"SUDO_USER={sudo_user!r} is not a known user; "
+                f"set KENTO_STATE_DIR or run directly as root."
+            )
         return home / ".local" / "share" / "kento" / name
     return (base or LXC_BASE) / name
 
@@ -274,17 +280,13 @@ def is_running(container_dir: Path, mode: str) -> bool:
                 capture_output=True, text=True, timeout=5,
             )
         except subprocess.TimeoutExpired:
-            print(
-                "kento: warning: qm status timed out; assuming instance "
-                "may be running",
-                file=sys.stderr,
+            logger.warning(
+                "qm status timed out; assuming instance may be running"
             )
             return True
         if result.returncode != 0:
-            print(
-                "kento: warning: qm status returned non-zero; assuming "
-                "instance may be running",
-                file=sys.stderr,
+            logger.warning(
+                "qm status returned non-zero; assuming instance may be running"
             )
             return True
         return "running" in result.stdout
@@ -298,17 +300,13 @@ def is_running(container_dir: Path, mode: str) -> bool:
                 capture_output=True, text=True, timeout=5,
             )
         except subprocess.TimeoutExpired:
-            print(
-                "kento: warning: pct status timed out; assuming instance "
-                "may be running",
-                file=sys.stderr,
+            logger.warning(
+                "pct status timed out; assuming instance may be running"
             )
             return True
         if result.returncode != 0:
-            print(
-                "kento: warning: pct status returned non-zero; assuming "
-                "instance may be running",
-                file=sys.stderr,
+            logger.warning(
+                "pct status returned non-zero; assuming instance may be running"
             )
             return True
         return "running" in result.stdout
@@ -347,9 +345,10 @@ def resolve_container(name: str, scan_dir: Path | None = None) -> Path:
                     if (d / "kento-image").is_file():
                         return d
 
-    print(f"Error: no instance named '{name}'. "
-          f"Run 'kento list' to see available instances.", file=sys.stderr)
-    sys.exit(1)
+    raise InstanceNotFoundError(
+        f"no instance named '{name}'. "
+        f"Run 'kento list' to see available instances."
+    )
 
 
 def _scan_namespace(name: str, base: Path) -> Path | None:
@@ -386,9 +385,10 @@ def resolve_in_namespace(name: str, namespace: str) -> Path:
     if result is not None:
         return result
     list_cmd = "kento vm list" if namespace == "vm" else "kento lxc list"
-    print(f"Error: no {namespace} named '{name}'. "
-          f"Run '{list_cmd}' to see available instances.", file=sys.stderr)
-    sys.exit(1)
+    raise InstanceNotFoundError(
+        f"no {namespace} named '{name}'. "
+        f"Run '{list_cmd}' to see available instances."
+    )
 
 
 def resolve_any(name: str, namespace: str | None = None) -> tuple[Path, str]:
@@ -413,29 +413,27 @@ def resolve_any(name: str, namespace: str | None = None) -> tuple[Path, str]:
         hit = _scan_namespace(name, LXC_BASE)
         if hit is not None:
             return hit, read_mode(hit)
-        print(f"Error: no lxc named '{name}'. "
-              f"Run 'kento lxc list' to see available instances.",
-              file=sys.stderr)
-        sys.exit(1)
+        raise InstanceNotFoundError(
+            f"no lxc named '{name}'. "
+            f"Run 'kento lxc list' to see available instances."
+        )
     if namespace == "vm":
         hit = _scan_namespace(name, VM_BASE)
         if hit is not None:
             return hit, read_mode(hit, "vm")
-        print(f"Error: no vm named '{name}'. "
-              f"Run 'kento vm list' to see available instances.",
-              file=sys.stderr)
-        sys.exit(1)
+        raise InstanceNotFoundError(
+            f"no vm named '{name}'. "
+            f"Run 'kento vm list' to see available instances."
+        )
 
     lxc_hit = _scan_namespace(name, LXC_BASE)
     vm_hit = _scan_namespace(name, VM_BASE)
 
     if lxc_hit and vm_hit:
-        print(
-            f"Error: ambiguous name '{name}' — exists as both LXC and VM "
-            f"instance. Use 'kento lxc <cmd>' or 'kento vm <cmd>'.",
-            file=sys.stderr,
+        raise KentoError(
+            f"ambiguous name '{name}' — exists as both LXC and VM "
+            f"instance. Use 'kento lxc <cmd>' or 'kento vm <cmd>'."
         )
-        sys.exit(1)
 
     if lxc_hit:
         return lxc_hit, read_mode(lxc_hit)
@@ -443,9 +441,10 @@ def resolve_any(name: str, namespace: str | None = None) -> tuple[Path, str]:
     if vm_hit:
         return vm_hit, read_mode(vm_hit, "vm")
 
-    print(f"Error: no instance named '{name}'. "
-          f"Run 'kento list' to see available instances.", file=sys.stderr)
-    sys.exit(1)
+    raise InstanceNotFoundError(
+        f"no instance named '{name}'. "
+        f"Run 'kento list' to see available instances."
+    )
 
 
 def check_name_conflict(name: str, target_namespace: str) -> bool:

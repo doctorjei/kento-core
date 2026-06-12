@@ -1,5 +1,6 @@
 """Tests for kento __init__ shared utilities."""
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -12,11 +13,14 @@ from kento import (
     resolve_in_namespace, resolve_any, check_name_conflict,
     detect_bridge, resolve_network, is_running, pve_config_exists,
 )
+from kento.errors import (
+    KentoError, ValidationError, InstanceNotFoundError, StateError,
+)
 
 
 def test_require_root_fails_non_root():
     with patch("kento.os.getuid", return_value=1000):
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError):
             require_root()
 
 
@@ -39,22 +43,21 @@ def test_upper_base_sudo_user():
     assert result == Path("/home/alice/.local/share/kento/test")
 
 
-def test_upper_base_stale_sudo_user_branded_error(monkeypatch, capsys):
-    """A SUDO_USER absent from the passwd DB must exit cleanly, not traceback.
+def test_upper_base_stale_sudo_user_branded_error(monkeypatch):
+    """A SUDO_USER absent from the passwd DB must raise StateError, not traceback.
 
     Stale/forged SUDO_USER (deleted user, exported in automation, NSS/LDAP
     failure) makes pwd.getpwnam raise KeyError. kento's convention is a
-    branded 'Error:' + sys.exit(1), never an uncaught traceback.
+    StateError, never an uncaught traceback.
     """
     monkeypatch.delenv("KENTO_STATE_DIR", raising=False)
     monkeypatch.setenv("SUDO_USER", "ghost")
     with patch("kento.pwd.getpwnam", side_effect=KeyError("ghost")):
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(StateError) as exc_info:
             upper_base("test")
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "Error: SUDO_USER='ghost' is not a known user" in captured.err
-    assert "KENTO_STATE_DIR" in captured.err
+    msg = str(exc_info.value)
+    assert "SUDO_USER='ghost' is not a known user" in msg
+    assert "KENTO_STATE_DIR" in msg
 
 
 # --- sanitize_image_name ---
@@ -147,7 +150,7 @@ def test_resolve_container_by_kento_name(tmp_path):
 
 
 def test_resolve_container_not_found(tmp_path):
-    with pytest.raises(SystemExit):
+    with pytest.raises(InstanceNotFoundError):
         resolve_container("nonexistent", tmp_path)
 
 
@@ -274,12 +277,12 @@ def test_resolve_in_namespace_found_by_kento_name(tmp_path):
 
 
 def test_resolve_in_namespace_not_found(tmp_path):
-    """resolve_in_namespace exits with error when not found."""
+    """resolve_in_namespace raises InstanceNotFoundError when not found."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
 
     with patch("kento.LXC_BASE", lxc):
-        with pytest.raises(SystemExit):
+        with pytest.raises(InstanceNotFoundError):
             resolve_in_namespace("nope", "container")
 
 
@@ -295,7 +298,7 @@ def test_resolve_in_namespace_ignores_other(tmp_path):
     (d / "kento-image").write_text("debian:12\n")
 
     with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
-        with pytest.raises(SystemExit):
+        with pytest.raises(InstanceNotFoundError):
             resolve_in_namespace("mybox", "container")
 
 
@@ -369,7 +372,7 @@ def test_resolve_any_default_mode_vm(tmp_path):
 
 
 def test_resolve_any_ambiguous(tmp_path):
-    """resolve_any exits with error when name exists in both namespaces."""
+    """resolve_any raises KentoError when name exists in both namespaces."""
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -382,7 +385,7 @@ def test_resolve_any_ambiguous(tmp_path):
     (d_vm / "kento-image").write_text("debian:12\n")
 
     with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
-        with pytest.raises(SystemExit):
+        with pytest.raises(KentoError, match="ambiguous"):
             resolve_any("mybox")
 
 
@@ -423,7 +426,7 @@ class TestResolveAnyNamespaceScoped:
     def test_none_namespace_still_aborts_on_duplicate(self, tmp_path):
         lxc, vm, d_lxc, d_vm = self._both(tmp_path)
         with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
-            with pytest.raises(SystemExit):
+            with pytest.raises(KentoError):
                 resolve_any("dup", namespace=None)
 
     def test_container_alias_treated_as_lxc(self, tmp_path):
@@ -445,7 +448,7 @@ class TestResolveAnyNamespaceScoped:
         (d_lxc / "kento-mode").write_text("lxc\n")
 
         with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceNotFoundError):
                 resolve_any("onlylxc", namespace="vm")
 
     def test_lxc_scope_miss_on_vm_only_name_exits(self, tmp_path):
@@ -459,7 +462,7 @@ class TestResolveAnyNamespaceScoped:
         (d_vm / "kento-mode").write_text("vm\n")
 
         with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceNotFoundError):
                 resolve_any("onlyvm", namespace="lxc")
 
 
@@ -500,14 +503,14 @@ class TestResolveAnyPveVm:
 
 
 def test_resolve_any_not_found(tmp_path):
-    """resolve_any exits with error when name is not found anywhere."""
+    """resolve_any raises InstanceNotFoundError when name is not found anywhere."""
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
     vm.mkdir()
 
     with patch("kento.LXC_BASE", lxc), patch("kento.VM_BASE", vm):
-        with pytest.raises(SystemExit):
+        with pytest.raises(InstanceNotFoundError):
             resolve_any("ghost")
 
 
@@ -621,7 +624,7 @@ class TestResolveNetwork:
 
     @patch("kento.detect_bridge", return_value=None)
     def test_bridge_no_interface_errors(self, mock_detect):
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValidationError, match="no bridge interface found"):
             resolve_network("bridge", None, "lxc")
 
     def test_port_implies_usermode_for_vm(self):
@@ -721,53 +724,53 @@ class TestIsRunningPveTimeouts:
 
     @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_vm_qm_timeout(self, mock_run, mock_cfg, tmp_path, capsys):
+    def test_is_running_pve_vm_qm_timeout(self, mock_run, mock_cfg, tmp_path, caplog):
         import subprocess as _sp
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-vmid").write_text("100\n")
         mock_run.side_effect = _sp.TimeoutExpired(cmd=["qm", "status", "100"], timeout=5)
-        assert is_running(d, "pve-vm") is True
-        captured = capsys.readouterr()
-        assert "qm status timed out" in captured.err
-        assert "assuming instance may be running" in captured.err
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            assert is_running(d, "pve-vm") is True
+        assert "qm status timed out" in caplog.text
+        assert "assuming instance may be running" in caplog.text
 
     @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_lxc_pct_timeout(self, mock_run, mock_cfg, tmp_path, capsys):
+    def test_is_running_pve_lxc_pct_timeout(self, mock_run, mock_cfg, tmp_path, caplog):
         import subprocess as _sp
         d = tmp_path / "100"
         d.mkdir()
         mock_run.side_effect = _sp.TimeoutExpired(cmd=["pct", "status", "100"], timeout=5)
-        assert is_running(d, "pve") is True
-        captured = capsys.readouterr()
-        assert "pct status timed out" in captured.err
-        assert "assuming instance may be running" in captured.err
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            assert is_running(d, "pve") is True
+        assert "pct status timed out" in caplog.text
+        assert "assuming instance may be running" in caplog.text
 
     @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_vm_qm_nonzero_rc(self, mock_run, mock_cfg, tmp_path, capsys):
+    def test_is_running_pve_vm_qm_nonzero_rc(self, mock_run, mock_cfg, tmp_path, caplog):
         """Config PRESENT but status failed => transient, assume running."""
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-vmid").write_text("100\n")
         mock_run.return_value.returncode = 1
         mock_run.return_value.stdout = ""
-        assert is_running(d, "pve-vm") is True
-        captured = capsys.readouterr()
-        assert "qm status returned non-zero" in captured.err
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            assert is_running(d, "pve-vm") is True
+        assert "qm status returned non-zero" in caplog.text
 
     @patch("kento.pve_config_exists", return_value=True)
     @patch("subprocess.run")
-    def test_is_running_pve_lxc_pct_nonzero_rc(self, mock_run, mock_cfg, tmp_path, capsys):
+    def test_is_running_pve_lxc_pct_nonzero_rc(self, mock_run, mock_cfg, tmp_path, caplog):
         """Config PRESENT but status failed => transient, assume running."""
         d = tmp_path / "100"
         d.mkdir()
         mock_run.return_value.returncode = 1
         mock_run.return_value.stdout = ""
-        assert is_running(d, "pve") is True
-        captured = capsys.readouterr()
-        assert "pct status returned non-zero" in captured.err
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            assert is_running(d, "pve") is True
+        assert "pct status returned non-zero" in caplog.text
 
     @patch("kento.pve_config_exists", return_value=False)
     @patch("subprocess.run")
