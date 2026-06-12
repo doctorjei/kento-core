@@ -9,11 +9,14 @@ Dispatch per mode:
 Extra args (e.g. -f, -n, 50) are forwarded verbatim to journalctl.
 """
 
+import logging
 import subprocess
-import sys
 from pathlib import Path
 
 from kento import read_mode, require_root, resolve_any
+from kento.errors import ModeError
+
+logger = logging.getLogger("kento")
 
 
 def logs(name: str, args: list[str],
@@ -26,13 +29,11 @@ def logs(name: str, args: list[str],
         mode = read_mode(container_dir)
 
     if mode in ("vm", "pve-vm"):
-        print(
-            "Error: 'kento logs' is not supported for VM instances. "
+        raise ModeError(
+            "'kento logs' is not supported for VM instances. "
             "Use 'kento attach <name>' for the serial console, or SSH + "
-            "journalctl inside the guest.",
-            file=sys.stderr,
+            "journalctl inside the guest."
         )
-        return 1
 
     if mode == "pve":
         # pve-lxc: the instance directory name IS the VMID.

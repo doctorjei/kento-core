@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kento.errors import ModeError
 from kento.logs import logs
 
 
@@ -61,33 +62,28 @@ def test_logs_empty_args_ok(mock_root, mock_run, tmp_path):
 
 @patch("kento.logs.subprocess.run", side_effect=_ok)
 @patch("kento.logs.require_root")
-def test_logs_vm_errors(mock_root, mock_run, tmp_path, capsys):
+def test_logs_vm_errors(mock_root, mock_run, tmp_path):
     d = tmp_path / "myvm"
     d.mkdir()
 
     with patch("kento.logs.resolve_any", return_value=(d, "vm")):
-        rc = logs("myvm", ["-n", "10"])
+        with pytest.raises(ModeError, match="not supported for VM instances"):
+            logs("myvm", ["-n", "10"])
 
-    assert rc != 0
     mock_run.assert_not_called()
-    captured = capsys.readouterr()
-    assert "not supported for VM instances" in captured.err
-    assert "attach" in captured.err
 
 
 @patch("kento.logs.subprocess.run", side_effect=_ok)
 @patch("kento.logs.require_root")
-def test_logs_pve_vm_errors(mock_root, mock_run, tmp_path, capsys):
+def test_logs_pve_vm_errors(mock_root, mock_run, tmp_path):
     d = tmp_path / "pvevm"
     d.mkdir()
 
     with patch("kento.logs.resolve_any", return_value=(d, "pve-vm")):
-        rc = logs("pvevm", [])
+        with pytest.raises(ModeError, match="not supported for VM instances"):
+            logs("pvevm", [])
 
-    assert rc != 0
     mock_run.assert_not_called()
-    captured = capsys.readouterr()
-    assert "not supported for VM instances" in captured.err
 
 
 @patch("kento.logs.subprocess.run")
