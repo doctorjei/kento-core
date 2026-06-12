@@ -1,9 +1,13 @@
 """Subprocess wrapper that converts CalledProcessError/FileNotFoundError into
 kento-branded error messages, not Python tracebacks."""
 
+import logging
 import subprocess
-import sys
 from typing import Sequence
+
+from kento.errors import SubprocessError
+
+logger = logging.getLogger("kento")
 
 
 def run_or_die(
@@ -15,21 +19,21 @@ def run_or_die(
     env: dict | None = None,
     cwd: str | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run cmd and exit with a clean error on failure.
+    """Run cmd and raise SubprocessError on failure.
 
     Args:
         cmd: Command + args (first element is the executable).
         what: Human-readable operation description, e.g. "start LXC container".
-              Used in the error message: "Error: failed to {what}..."
+              Used in the error message: "failed to {what}..."
         name: Optional instance name for the message.
         hint: Optional follow-on line suggesting what to do next.
         env, cwd: Passed to subprocess.run.
 
-    Returns the CompletedProcess on success. On failure prints
-    Error: failed to {what}[ {name}] (exit {rc}): {stderr_snippet}
-    [hint: {hint}]
-    and exits with status 1 (CalledProcessError) or 2 (FileNotFoundError /
-    PermissionError / other OSError).
+    Returns the CompletedProcess on success. On failure raises SubprocessError
+    with a message of the form:
+        failed to {what}[ {name}] (exit {rc})[: {stderr_snippet}]
+    carrying cmd and returncode. FileNotFoundError / PermissionError / OSError
+    raise SubprocessError with returncode=None.
     """
     try:
         result = subprocess.run(
@@ -41,20 +45,18 @@ def run_or_die(
         )
     except FileNotFoundError:
         tool = cmd[0] if cmd else "(empty cmd)"
-        print(f"Error: '{tool}' not found on PATH. Install it or check your PATH.",
-              file=sys.stderr)
+        msg = f"'{tool}' not found on PATH. Install it or check your PATH."
         if hint:
-            print(f"hint: {hint}", file=sys.stderr)
-        sys.exit(2)
+            logger.info("hint: %s", hint)
+        raise SubprocessError(msg, cmd=list(cmd))
     except OSError as e:
         # PermissionError (binary lacks +x, or is a directory) and other OSError
         # (ENOEXEC / wrong-arch) — surface a branded message, not a traceback.
         tool = cmd[0] if cmd else "(empty cmd)"
-        print(f"Error: cannot execute '{tool}': {e.strerror} (check permissions/arch)",
-              file=sys.stderr)
+        msg = f"cannot execute '{tool}': {e.strerror} (check permissions/arch)"
         if hint:
-            print(f"hint: {hint}", file=sys.stderr)
-        sys.exit(2)
+            logger.info("hint: %s", hint)
+        raise SubprocessError(msg, cmd=list(cmd))
 
     if result.returncode != 0:
         label = f"{what} {name}" if name else what
@@ -64,12 +66,11 @@ def run_or_die(
         # caller didn't capture it.
         if len(stderr) > 500:
             stderr = stderr[:500] + "... (truncated)"
-        msg = f"Error: failed to {label} (exit {result.returncode})"
+        msg = f"failed to {label} (exit {result.returncode})"
         if stderr:
             msg += f": {stderr}"
-        print(msg, file=sys.stderr)
         if hint:
-            print(f"hint: {hint}", file=sys.stderr)
-        sys.exit(1)
+            logger.info("hint: %s", hint)
+        raise SubprocessError(msg, cmd=list(cmd), returncode=result.returncode)
 
     return result

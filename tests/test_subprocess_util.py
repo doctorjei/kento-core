@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kento.errors import SubprocessError
 from kento.subprocess_util import run_or_die
 
 
@@ -13,116 +14,105 @@ def test_success_returns_completed_process():
     assert result.returncode == 0
 
 
-def test_nonzero_exits_with_code_1_and_prints_error(capsys):
-    """Non-zero exit raises SystemExit(1) and prints 'Error: failed to <what>'."""
-    with pytest.raises(SystemExit) as exc_info:
+def test_nonzero_raises_subprocess_error():
+    """Non-zero exit raises SubprocessError with 'failed to <what>' message."""
+    with pytest.raises(SubprocessError, match=r"failed to run false") as exc_info:
         run_or_die(["false"], "run false")
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "Error: failed to run false" in captured.err
-    assert "(exit 1)" in captured.err
+    assert "(exit 1)" in str(exc_info.value)
+    assert exc_info.value.returncode == 1
+    assert exc_info.value.cmd == ["false"]
 
 
-def test_name_is_included_in_error(capsys):
+def test_name_is_included_in_error():
     """When name is supplied, it appears after the 'what' label."""
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SubprocessError, match=r"failed to start LXC container web01") as exc_info:
         run_or_die(["false"], "start LXC container", name="web01")
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "Error: failed to start LXC container web01" in captured.err
+    assert exc_info.value.returncode == 1
+    assert exc_info.value.cmd == ["false"]
 
 
-def test_hint_adds_hint_line(capsys):
-    """When hint is supplied, a 'hint: ...' line follows the error."""
-    with pytest.raises(SystemExit) as exc_info:
+def test_hint_adds_hint_line():
+    """When hint is supplied, the error message still carries the core text."""
+    with pytest.raises(SubprocessError, match=r"failed to run false") as exc_info:
         run_or_die(["false"], "run false", hint="check your config")
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
-    assert "Error: failed to run false" in captured.err
-    assert "hint: check your config" in captured.err
+    assert exc_info.value.returncode == 1
 
 
-def test_missing_binary_exits_with_code_2(capsys):
-    """Missing executable raises SystemExit(2) and mentions 'not found'."""
-    with pytest.raises(SystemExit) as exc_info:
+def test_missing_binary_raises_subprocess_error():
+    """Missing executable raises SubprocessError and mentions 'not found'."""
+    with pytest.raises(SubprocessError, match=r"not found") as exc_info:
         run_or_die(["this-does-not-exist-xyz"], "run missing tool")
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "not found" in captured.err
-    assert "this-does-not-exist-xyz" in captured.err
+    assert "this-does-not-exist-xyz" in str(exc_info.value)
+    assert exc_info.value.returncode is None
+    assert exc_info.value.cmd == ["this-does-not-exist-xyz"]
 
 
-def test_missing_binary_includes_hint(capsys):
-    """Missing executable path also emits hint if provided."""
-    with pytest.raises(SystemExit) as exc_info:
+def test_missing_binary_includes_cmd():
+    """Missing executable path carries cmd on SubprocessError."""
+    with pytest.raises(SubprocessError) as exc_info:
         run_or_die(
             ["this-does-not-exist-xyz"],
             "run missing tool",
             hint="install the thing",
         )
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "hint: install the thing" in captured.err
+    assert exc_info.value.cmd == ["this-does-not-exist-xyz"]
+    assert exc_info.value.returncode is None
 
 
-def test_permission_error_exits_cleanly(capsys):
-    """A non-executable binary (PermissionError) yields a branded message, exit 2.
+def test_permission_error_raises_subprocess_error():
+    """A non-executable binary (PermissionError) yields a branded SubprocessError.
 
     PermissionError is an OSError subclass distinct from FileNotFoundError;
     without the broadened except it would propagate as a traceback.
     """
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=PermissionError(13, "Permission denied")):
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(SubprocessError, match=r"cannot execute '/some/tool'") as exc_info:
             run_or_die(["/some/tool"], "run tool")
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "Error: cannot execute '/some/tool'" in captured.err
-    assert "Permission denied" in captured.err
-    assert "check permissions/arch" in captured.err
+    assert "Permission denied" in str(exc_info.value)
+    assert "check permissions/arch" in str(exc_info.value)
+    assert exc_info.value.returncode is None
+    assert exc_info.value.cmd == ["/some/tool"]
 
 
-def test_oserror_exec_format_exits_cleanly(capsys):
-    """A wrong-arch / ENOEXEC binary (OSError) yields a branded message, exit 2."""
+def test_oserror_exec_format_raises_subprocess_error():
+    """A wrong-arch / ENOEXEC binary (OSError) yields a branded SubprocessError."""
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=OSError(8, "Exec format error")):
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(SubprocessError, match=r"cannot execute '/some/tool'") as exc_info:
             run_or_die(["/some/tool"], "run tool", hint="rebuild for this arch")
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "Error: cannot execute '/some/tool'" in captured.err
-    assert "Exec format error" in captured.err
-    assert "hint: rebuild for this arch" in captured.err
+    assert "Exec format error" in str(exc_info.value)
+    assert exc_info.value.returncode is None
+    assert exc_info.value.cmd == ["/some/tool"]
 
 
-def test_stderr_truncated_when_longer_than_500_chars(capsys):
+def test_stderr_truncated_when_longer_than_500_chars():
     """Long stderr is truncated to 500 chars with a truncation marker."""
-    # Generate > 500 chars of stderr via a shell one-liner.
     long_payload = "x" * 800
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SubprocessError) as exc_info:
         run_or_die(
             ["sh", "-c", f"printf '%s' '{long_payload}' >&2; exit 1"],
             "emit long stderr",
         )
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
+    msg = str(exc_info.value)
     # Should contain the truncation marker, and not the entire 800-char string.
-    assert "... (truncated)" in captured.err
+    assert "... (truncated)" in msg
     # 800 x's would be present without truncation; 500 + marker should be the cap.
-    assert "x" * 800 not in captured.err
+    assert "x" * 800 not in msg
     # But there should still be a healthy chunk of x's.
-    assert "x" * 500 in captured.err
+    assert "x" * 500 in msg
+    assert exc_info.value.returncode == 1
 
 
-def test_empty_stderr_message_still_clean(capsys):
+def test_empty_stderr_message_still_clean():
     """If stderr is empty, no trailing ': ' garbage; message is still scannable."""
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SubprocessError) as exc_info:
         run_or_die(["sh", "-c", "exit 3"], "silent failure")
-    assert exc_info.value.code == 1
-    captured = capsys.readouterr()
+    msg = str(exc_info.value)
     # Exact shape: no ": " suffix after "(exit 3)".
-    assert "Error: failed to silent failure (exit 3)" in captured.err
+    assert "failed to silent failure (exit 3)" in msg
     # Make sure we didn't leave a dangling colon/space after the exit code.
-    for line in captured.err.splitlines():
-        if line.startswith("Error: failed to silent failure"):
-            assert line.rstrip() == "Error: failed to silent failure (exit 3)"
+    for part in msg.splitlines():
+        if "failed to silent failure" in part:
+            assert part.rstrip() == "failed to silent failure (exit 3)"
+    assert exc_info.value.returncode == 3
