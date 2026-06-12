@@ -5,6 +5,86 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-06-12
+
+Maintenance release from a skeptical top-to-bottom code review (31 confirmed
+findings after adversarial verification). Correctness, robustness, and
+create/set parity fixes; no new features and no intended behavior changes on
+the happy path. Each fix carries a regression test. Gates: unit 1238,
+integration 23, E2E 225/225 on bifrost (regression 210 + nested Section D 15).
+
+### Added
+
+- `exec`, `logs`, `attach`, `suspend`, `resume`, and `set` now honor the
+  explicit `kento lxc` / `kento vm` scope. Previously these commands discarded
+  the namespace and resolved by name across both, so an instance name created
+  in both namespaces via `create --force` could not be disambiguated (the
+  commands aborted with "ambiguous name" even when the scope was given).
+  `resolve_any()` gained an optional `namespace` argument; `namespace=None`
+  preserves the prior behavior exactly.
+
+### Fixed
+
+- **Port-forward teardown could delete another instance's rules.** The post-stop
+  hook matched its `kento:<name>` rule comment as an unanchored substring, so
+  stopping `web` also tore down a still-running `web2`'s nft/iptables DNAT and
+  masquerade rules. The match is now anchored to the full comment token.
+- **VM start could leak a mount and a virtiofsd process.** On the standalone
+  `kento start` / `kento vm start` path, a virtiofsd that never created its
+  socket (or died), or a missing/failing `qemu-system-x86_64`, left the overlay
+  mounted and virtiofsd running and wedged the next start. `start_vm` now
+  pre-checks for QEMU, aborts cleanly if the virtiofsd socket never appears, and
+  rolls back (kill virtiofsd, unmount, drop pid files) on any failure.
+- **`kento attach` could drop serial-console output.** The VM serial relay
+  forwarded socket data with a single `os.write()` that ignored short writes,
+  silently truncating console output to a pipe/file (e.g. `kento attach <vm> |
+  tee`). It now writes all bytes.
+- **`kento set` did not enforce the pass-through denylists `create` does.**
+  `--qemu-arg` / `--pve-arg` values reserved for kento (e.g. `-kernel`,
+  `memfd-size=`, `rootfs:`, `arch:`, `hostname:`) were accepted by `set` and
+  re-emitted into the boot config, duplicating or clobbering kento-owned keys.
+  `set` now applies the same `QEMU_ARG_DENYLIST` / `PVE_ARG_DENYLIST` checks,
+  and `set --mac` now rejects multicast/broadcast MACs at parse time like
+  `create` does.
+- **A PVE qm snapshot's `args:` could be corrupted.** `sync_qm_args_to_memory`
+  rewrote/dropped every `args:` line across the whole config, including those
+  inside `[snapshot]` sections. It now stops at the first section header,
+  mirroring the config parser.
+- **`kento scrub` could leave a half-scrubbed instance.** The writable layer was
+  cleared before re-resolving the image, so a scrub of an instance whose backing
+  image was gone wiped `upper`/`work` and then aborted. Image resolution now
+  happens first, so a missing image aborts with no side effects.
+- **`kento destroy` could leave an orphan directory.** A failure deleting the
+  PVE config (pmxcfs error) or parsing a corrupt `kento-vmid` aborted before the
+  instance directory was removed. Under `-f`, config cleanup is now best-effort
+  and destroy proceeds to remove the directory.
+- **`kento list` could crash on a single bad instance.** One unreadable or
+  concurrently-destroyed instance directory aborted the whole listing; per-entry
+  read errors are now skipped.
+- **`kento stop` on an already-stopped PVE instance could hard-fail.** When the
+  `pct`/`qm status` query timed out, kento assumed the instance was running and
+  issued a shutdown that errored out instead of reporting "Already stopped".
+  Stop now tolerates the not-running case.
+- **DHCP port-forward worker race.** A detached worker discovering a DHCP lease
+  could install NAT rules after the container had already stopped, leaving
+  orphan rules. post-stop now writes a cancel sentinel, kills the worker's
+  process group, and runs teardown unconditionally.
+- Verbose `kento info` no longer misaligns layer sizes against layer paths when
+  a layer directory is missing.
+- `--env` values are validated as `KEY=VALUE` with no control characters; an
+  embedded newline previously broke the generated cloud-init YAML and silently
+  dropped later directives.
+- `ssh-key-user` is matched as a literal `/etc/passwd` field rather than a
+  `grep` regex, so a username containing regex metacharacters can no longer
+  resolve to the wrong account.
+- `kento-memory` / `kento-cores` are validated before shell arithmetic in the
+  start hook, so a corrupt value warns and is skipped instead of aborting the
+  hook under `set -e`.
+- `run_or_die` reports `PermissionError` / exec-format errors with a branded
+  message instead of a traceback; a stale `SUDO_USER` no longer produces an
+  uncaught `KeyError`; a missing LXC snippets directory at destroy warns instead
+  of silently passing.
+
 ## [1.5.1] - 2026-06-11
 
 ### Added
