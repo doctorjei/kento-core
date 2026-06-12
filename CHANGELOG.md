@@ -5,6 +5,48 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-06-12
+
+Patch release: one machine-readability feature plus two robustness fixes, each
+with a regression test. Versioned as a patch to keep kento's cadence in step
+with the sibling projects. Gates: unit 1255, integration 24, E2E 210/210 on
+bifrost (regression — phase/iso/image across all four modes).
+
+### Added
+
+- **`kento list --json`** — machine-readable listing. Emits a JSON array with one
+  object per instance carrying the same per-instance keys `inspect --json` does
+  (`name`, `type`, `mode`, `image`, `status`, plus `vmid` / `mac` / `environment`
+  / `ssh_host_key_fingerprints` / `upper_size` when present), so orchestrators can
+  enumerate in a single call instead of parsing the columnar output and then
+  calling `inspect --json` once per instance (an N+1). Available on the bare
+  `list` and on `lxc list` / `vm list`. Zero instances emits `[]`. The
+  enrichment fields (and the `ssh-keygen` subprocess that reads fingerprints) are
+  computed only in `--json` mode, so the human table path is unchanged in cost.
+
+### Changed
+
+- **`inspect --json` `mode` is now normalized** (`pve` → `pve-lxc`), matching what
+  `list` already reports, so the two surfaces agree on the mode string for
+  PVE-LXC instances. `type` (the `LXC`/`VM` family) is unchanged.
+
+### Fixed
+
+- **Port-forward teardown could match a sibling instance's rules for dotted
+  names.** v1.5.2 anchored the post-stop `kento:<name>` comment match, but the
+  name was still interpolated into the `grep -E` pattern unescaped — and a valid
+  kento name may contain `.`, an ERE "any character". So tearing down `web.api`
+  could also match and delete a running `web1api`'s nft/iptables DNAT rules. The
+  teardown now regex-escapes the name before the iptables and nft greps. (The
+  install side writes literal comments and is unaffected.)
+- **`next_vmid()` could re-hand-out an orphan's VMID.** Allocation consulted only
+  PVE's view (`.vmlist` / `*.conf`), so a kento instance whose PVE config was
+  destroyed out-of-band — leaving an orphan kento dir — read as free and its VMID
+  could be reassigned. `next_vmid()` (and `validate_vmid()`) now also union
+  kento's own recorded VMIDs (PVE-LXC dir names + PVE-VM `kento-vmid` files,
+  including orphans) into the in-use set. Purely additive and defensive; nothing
+  is reaped.
+
 ## [1.5.2] - 2026-06-12
 
 Maintenance release from a skeptical top-to-bottom code review (31 confirmed
