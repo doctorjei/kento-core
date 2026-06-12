@@ -1,14 +1,17 @@
 """Proxmox VE integration — VMID allocation and PVE config generation."""
 
 import json
+import logging
 import os
 import platform
 import socket
-import sys
 from pathlib import Path
 
 from kento import LXC_BASE, VM_BASE
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
+from kento.errors import ValidationError
+
+logger = logging.getLogger("kento")
 
 PVE_DIR = Path("/etc/pve")
 PVE_LXC_DIR = PVE_DIR / "lxc"
@@ -136,16 +139,15 @@ def next_vmid() -> int:
 
 
 def validate_vmid(vmid: int) -> None:
-    """Exit with error if VMID is invalid or already taken."""
+    """Raise ValidationError if VMID is invalid or already taken."""
     if vmid < 100:
-        print(f"Error: VMID must be >= 100, got {vmid} "
-              f"(VMIDs 1-99 are reserved by Proxmox for internal use).",
-              file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError(
+            f"VMID must be >= 100, got {vmid} "
+            f"(VMIDs 1-99 are reserved by Proxmox for internal use)."
+        )
     used = _used_vmids()
     if vmid in used:
-        print(f"Error: VMID {vmid} is already in use", file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError(f"VMID {vmid} is already in use")
 
 
 def write_pve_config(vmid: int, content: str) -> Path:
@@ -314,7 +316,7 @@ def generate_qm_args(container_dir: Path, *,
     kento-managed defaults. Since ``args:`` is tokenized by qm with simple
     whitespace splitting (NOT shlex), a pass-through line that itself
     contains whitespace is a foot-gun: the user must split it across
-    multiple --qemu-arg flags. Enforced with sys.exit at consumption time.
+    multiple --qemu-arg flags. Raises ValidationError at consumption time.
 
     Usermode networking: if ``container_dir/kento-port`` exists (format
     ``HOST:GUEST``), a slirp netdev + virtio-net device are injected so a
@@ -387,10 +389,11 @@ def generate_qm_args(container_dir: Path, *,
             # into two QEMU flags at boot. Reject explicitly rather than
             # silently mangling the user's intent.
             if any(c.isspace() for c in line):
-                print(f"Error: kento-qemu-args line contains whitespace which "
-                      f"qm does not tokenize safely: {line!r}. Split into "
-                      f"separate --qemu-arg flags instead.", file=sys.stderr)
-                sys.exit(1)
+                raise ValidationError(
+                    f"kento-qemu-args line contains whitespace which "
+                    f"qm does not tokenize safely: {line!r}. Split into "
+                    f"separate --qemu-arg flags instead."
+                )
             args_parts.append(line)
 
     return " ".join(args_parts)

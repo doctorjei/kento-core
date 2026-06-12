@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kento.errors import ValidationError
 from kento.pve import (
     is_pve, _used_vmids, next_vmid, validate_vmid,
     generate_pve_config, write_pve_config, delete_pve_config,
@@ -209,16 +210,18 @@ class TestNextVmid:
 
 class TestValidateVmid:
     def test_rejects_low_vmid(self):
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValidationError) as exc:
             validate_vmid(50)
+        assert "VMID must be >= 100" in str(exc.value)
 
     def test_rejects_taken_vmid(self, tmp_path):
         pve = tmp_path / "pve"
         pve.mkdir()
         (pve / ".vmlist").write_text(json.dumps({"ids": {"100": {}}}))
         with patch("kento.pve.PVE_DIR", pve):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 validate_vmid(100)
+        assert "already in use" in str(exc.value)
 
     def test_accepts_free_vmid(self, tmp_path):
         pve = tmp_path / "pve"
@@ -757,16 +760,14 @@ class TestGenerateQmArgs:
         # Both pass-through entries appear at the tail in order.
         assert args.endswith(" -device=virtio-rng-pci -cpu=max")
 
-    def test_passthrough_whitespace_errors(self, tmp_path, capsys):
+    def test_passthrough_whitespace_errors(self, tmp_path):
         """B2: qm args: is whitespace-tokenized, so a line that itself
         contains whitespace would mis-split at boot. Reject explicitly."""
         (tmp_path / "kento-qemu-args").write_text("-device virtio-rng-pci\n")
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(ValidationError) as exc:
             generate_qm_args(tmp_path, memory=512, kvm=True)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "kento-qemu-args line contains whitespace" in captured.err
-        assert "--qemu-arg" in captured.err
+        assert "kento-qemu-args line contains whitespace" in str(exc.value)
+        assert "--qemu-arg" in str(exc.value)
 
     def test_passthrough_blank_lines_ignored(self, tmp_path):
         """Blank lines must not turn into empty tokens in the args: payload."""
