@@ -31,11 +31,15 @@ def test_name_is_included_in_error():
     assert exc_info.value.cmd == ["false"]
 
 
-def test_hint_adds_hint_line():
-    """When hint is supplied, the error message still carries the core text."""
-    with pytest.raises(SubprocessError, match=r"failed to run false") as exc_info:
-        run_or_die(["false"], "run false", hint="check your config")
+def test_hint_adds_hint_line(caplog):
+    """When hint is supplied, the error carries the core text AND the hint is
+    emitted via logger.info on the "kento" logger."""
+    import logging
+    with caplog.at_level(logging.INFO, logger="kento"):
+        with pytest.raises(SubprocessError, match=r"failed to run false") as exc_info:
+            run_or_die(["false"], "run false", hint="check your config")
     assert exc_info.value.returncode == 1
+    assert any("check your config" in r.message for r in caplog.records)
 
 
 def test_missing_binary_raises_subprocess_error():
