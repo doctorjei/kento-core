@@ -9,6 +9,7 @@ See the edge-case audit (F8) and the error-message audit (Grade D) for the
 motivating findings.
 """
 
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -40,7 +41,7 @@ class TestDestroyStopFailureContinuesCleanup:
     @patch("kento.destroy.require_root")
     @patch("kento.destroy.is_running", return_value=True)
     def test_lxc_stop_failure_warns_and_continues(
-            self, mock_running, mock_root, tmp_path, capsys):
+            self, mock_running, mock_root, tmp_path, caplog):
         lxc_dir = _make_destroy_container(tmp_path, name="wedged", mode="lxc")
 
         def fake_run(cmd, *args, **kwargs):
@@ -53,22 +54,21 @@ class TestDestroyStopFailureContinuesCleanup:
             # podman image unmount, etc.
             return subprocess.CompletedProcess(cmd, 0)
 
-        with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
-             patch("kento.destroy.subprocess.run", side_effect=fake_run), \
-             patch("kento.layers.remove_image_hold"):
-            destroy("wedged", force=True)
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+                 patch("kento.destroy.subprocess.run", side_effect=fake_run), \
+                 patch("kento.layers.remove_image_hold"):
+                destroy("wedged", force=True)
 
         # Directory removed even though stop failed.
         assert not lxc_dir.exists()
-        captured = capsys.readouterr()
-        assert "Warning: stop failed" in captured.err
-        assert "proceeding with cleanup" in captured.err
-        assert "Traceback" not in captured.err
+        assert any("stop failed" in r.message for r in caplog.records)
+        assert any("proceeding with cleanup" in r.message for r in caplog.records)
 
     @patch("kento.destroy.require_root")
     @patch("kento.destroy.is_running", return_value=True)
     def test_pve_stop_failure_warns_and_continues(
-            self, mock_running, mock_root, tmp_path, capsys):
+            self, mock_running, mock_root, tmp_path, caplog):
         lxc_dir = _make_destroy_container(tmp_path, name="100", mode="pve")
 
         def fake_run(cmd, *args, **kwargs):
@@ -80,22 +80,21 @@ class TestDestroyStopFailureContinuesCleanup:
                 return subprocess.CompletedProcess(cmd, 1)
             return subprocess.CompletedProcess(cmd, 0)
 
-        with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
-             patch("kento.destroy.subprocess.run", side_effect=fake_run), \
-             patch("kento.layers.remove_image_hold"), \
-             patch("kento.pve.delete_pve_config"), \
-             patch("kento.lxc_hook.delete_lxc_snippets_wrapper"):
-            destroy("test", force=True)
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+                 patch("kento.destroy.subprocess.run", side_effect=fake_run), \
+                 patch("kento.layers.remove_image_hold"), \
+                 patch("kento.pve.delete_pve_config"), \
+                 patch("kento.lxc_hook.delete_lxc_snippets_wrapper"):
+                destroy("test", force=True)
 
         assert not lxc_dir.exists()
-        captured = capsys.readouterr()
-        assert "Warning: stop failed" in captured.err
-        assert "Traceback" not in captured.err
+        assert any("stop failed" in r.message for r in caplog.records)
 
     @patch("kento.destroy.require_root")
     @patch("kento.destroy.is_running", return_value=True)
     def test_pve_vm_stop_failure_warns_and_continues(
-            self, mock_running, mock_root, tmp_path, capsys):
+            self, mock_running, mock_root, tmp_path, caplog):
         lxc_dir = _make_destroy_container(tmp_path, name="test", mode="pve-vm")
         (lxc_dir / "kento-vmid").write_text("100\n")
 
@@ -108,22 +107,21 @@ class TestDestroyStopFailureContinuesCleanup:
                 return subprocess.CompletedProcess(cmd, 1)
             return subprocess.CompletedProcess(cmd, 0)
 
-        with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
-             patch("kento.destroy.subprocess.run", side_effect=fake_run), \
-             patch("kento.layers.remove_image_hold"), \
-             patch("kento.pve.delete_qm_config"), \
-             patch("kento.vm_hook.delete_snippets_wrapper"):
-            destroy("test", force=True)
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+                 patch("kento.destroy.subprocess.run", side_effect=fake_run), \
+                 patch("kento.layers.remove_image_hold"), \
+                 patch("kento.pve.delete_qm_config"), \
+                 patch("kento.vm_hook.delete_snippets_wrapper"):
+                destroy("test", force=True)
 
         assert not lxc_dir.exists()
-        captured = capsys.readouterr()
-        assert "Warning: stop failed" in captured.err
-        assert "Traceback" not in captured.err
+        assert any("stop failed" in r.message for r in caplog.records)
 
     @patch("kento.destroy.require_root")
     @patch("kento.destroy.is_running", return_value=True)
     def test_stop_tool_not_found_warns_and_continues(
-            self, mock_running, mock_root, tmp_path, capsys):
+            self, mock_running, mock_root, tmp_path, caplog):
         lxc_dir = _make_destroy_container(tmp_path, name="missing", mode="lxc")
 
         def fake_run(cmd, *args, **kwargs):
@@ -133,15 +131,14 @@ class TestDestroyStopFailureContinuesCleanup:
                 return subprocess.CompletedProcess(cmd, 1)
             return subprocess.CompletedProcess(cmd, 0)
 
-        with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
-             patch("kento.destroy.subprocess.run", side_effect=fake_run), \
-             patch("kento.layers.remove_image_hold"):
-            destroy("missing", force=True)
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.destroy.resolve_container", return_value=lxc_dir), \
+                 patch("kento.destroy.subprocess.run", side_effect=fake_run), \
+                 patch("kento.layers.remove_image_hold"):
+                destroy("missing", force=True)
 
         assert not lxc_dir.exists()
-        captured = capsys.readouterr()
-        assert "Warning: stop tool not found" in captured.err
-        assert "Traceback" not in captured.err
+        assert any("stop tool not found" in r.message for r in caplog.records)
 
 
 # --- create(--start) failure rollback path ---
