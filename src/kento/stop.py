@@ -35,8 +35,8 @@ def _pve_shutdown_or_die(cmd, *, what: str, name: str, hint: str,
     On non-zero exit we distinguish two cases:
       - the instance is actually already down (the status query that drove us
         here merely timed out / returned non-zero, so is_running() assumed
-        running) -> print "Already stopped" and return None; OR
-      - a genuine failure -> branded error + sys.exit(1), exactly as before.
+        running) -> log "Already stopped" (info) and return None; OR
+      - a genuine failure -> raise SubprocessError (branded message), as before.
 
     The non-fatal run is issued via subprocess_util.subprocess so it shares the
     same dispatch (and test patch point) as run_or_die. On a genuine failure
