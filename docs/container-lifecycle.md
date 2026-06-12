@@ -143,7 +143,10 @@ Shows instance metadata: image, mode, status, directory paths, network
 config, layer count, and creation time. `inspect` is an alias for `info`.
 
 Pass `--json` for machine-readable output. Pass `-v` / `--verbose` to
-include layer sizes and individual layer paths.
+include layer sizes and individual layer paths. In `--json`, `mode` is
+normalized (`pve` → `pve-lxc`) and `type` is the `LXC` / `VM` family.
+`kento list --json` emits the same per-instance keys for every instance at
+once, so prefer it over an `inspect` per instance when enumerating.
 
 ## Sudo and user storage
 

@@ -239,10 +239,23 @@ list untouched. An empty `set` (no flags) is a usage error.
 ```
 sudo kento list
 sudo kento ls
+sudo kento list --json
 ```
 
-Shows name, image, status, mode, and writable layer size. Lists instances
-from all modes (lxc, pve-lxc, vm, pve-vm). `ls` is an alias for `list`.
+Shows name, image, status, mode, and (with `--size`) writable layer size.
+Lists instances from all modes (lxc, pve-lxc, vm, pve-vm). `ls` is an alias
+for `list`.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Machine-readable JSON array, one object per instance |
+| `--size` | Include writable-layer (upper) size |
+
+`--json` emits the same per-instance keys as `inspect --json` (`name`, `type`,
+`mode`, `image`, `status`, plus `vmid` / `mac` / `environment` /
+`ssh_host_key_fingerprints` / `upper_size` when present), so a tool can
+enumerate every instance in a single call instead of parsing the table and
+running `inspect` per instance. No instances → `[]`.
 
 ### Info / inspect
 
@@ -258,6 +271,9 @@ config, layer count, and more. `inspect` is an alias for `info`.
 |------|-------------|
 | `--json` | Machine-readable JSON output |
 | `-v` / `--verbose` | Include layer sizes and paths |
+
+For PVE-LXC instances, the `--json` `mode` reads `pve-lxc` (normalized to agree
+with `list --json`); the `type` field is the `LXC` / `VM` family.
 
 ### Scrub an instance
 

@@ -139,10 +139,14 @@ works as an alias.)
 ```
 sudo kento list
 sudo kento ls
+sudo kento list --json
 ```
 
 Shows all kento-managed instances across all modes (lxc, pve-lxc, vm,
-pve-vm) with their name, image, status, mode, and writable layer size.
+pve-vm) with their name, image, status, and mode (add `--size` for the
+writable layer size). `--json` emits a machine-readable array carrying the
+same per-instance fields as `inspect --json`, so an orchestrator can
+enumerate everything in one call (no instances → `[]`).
 
 ## Pass-through flags
 
