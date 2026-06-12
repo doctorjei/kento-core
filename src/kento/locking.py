@@ -8,10 +8,14 @@ auto-generated name.
 
 import errno
 import fcntl
+import logging
 import os
-import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+from kento.errors import StateError
+
+logger = logging.getLogger("kento")
 
 # Primary lock path (tmpfs-backed, cleared on reboot — fine for a lock).
 # Fallback when /run is not writable (unusual, but handles root-owned
@@ -33,12 +37,10 @@ def _open_lock_fd() -> int:
             return os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
         except OSError:
             continue
-    print(
-        "Error: could not open a kento lock file at /run/kento.lock or "
-        "/var/lib/kento/.lock. Check filesystem permissions.",
-        file=sys.stderr,
+    raise StateError(
+        "could not open a kento lock file at /run/kento.lock or "
+        "/var/lib/kento/.lock. Check filesystem permissions."
     )
-    sys.exit(1)
 
 
 @contextmanager

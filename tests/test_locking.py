@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kento import locking
+from kento.errors import StateError
 from kento.locking import _open_lock_fd, kento_lock
 
 
@@ -137,8 +138,8 @@ def test_fallback_path_used_when_primary_unavailable(tmp_path, monkeypatch):
         os.close(fd)
 
 
-def test_all_paths_fail_exits(tmp_path, monkeypatch, capsys):
-    """SystemExit(1) when both primary and fallback cannot be created."""
+def test_all_paths_fail_exits(tmp_path, monkeypatch):
+    """StateError when both primary and fallback cannot be created."""
     monkeypatch.setattr(
         locking, "_PRIMARY_LOCK", Path("/proc/nonexistent/kento.lock")
     )
@@ -146,9 +147,5 @@ def test_all_paths_fail_exits(tmp_path, monkeypatch, capsys):
         locking, "_FALLBACK_LOCK", Path("/proc/also-nonexistent/fallback.lock")
     )
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(StateError, match="could not open a kento lock file"):
         _open_lock_fd()
-    assert exc_info.value.code == 1
-
-    captured = capsys.readouterr()
-    assert "could not open a kento lock file" in captured.err
