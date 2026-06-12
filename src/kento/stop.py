@@ -1,10 +1,13 @@
 """Shut down a kento-managed instance."""
 
-import sys
+import logging
 from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_container
+from kento.errors import SubprocessError, ValidationError
 from kento.subprocess_util import run_or_die
+
+logger = logging.getLogger("kento")
 
 DEFAULT_PVE_VM_SHUTDOWN_TIMEOUT = 30
 
@@ -61,22 +64,20 @@ def _pve_shutdown_or_die(cmd, *, what: str, name: str, hint: str,
     # Re-query actual status; if the instance really is down (or its config is
     # gone), this was the already-stopped race, not a real failure.
     if _is_not_running_error(combined) or not is_running(container_dir, mode):
-        print(f"Already stopped: {name}")
+        logger.info("Already stopped: %s", name)
         return None
 
-    # Genuine failure: emit run_or_die's branded error + exit (without
-    # re-issuing the command).
+    # Genuine failure: raise SubprocessError (mirrors run_or_die's contract).
     label = f"{what} {name}" if name else what
     stderr = (result.stderr or "").strip()
     if len(stderr) > 500:
         stderr = stderr[:500] + "... (truncated)"
-    msg = f"Error: failed to {label} (exit {result.returncode})"
+    msg = f"failed to {label} (exit {result.returncode})"
     if stderr:
         msg += f": {stderr}"
-    print(msg, file=sys.stderr)
     if hint:
-        print(f"hint: {hint}", file=sys.stderr)
-    sys.exit(1)
+        logger.info("hint: %s", hint)
+    raise SubprocessError(msg, cmd=list(cmd), returncode=result.returncode)
 
 
 def shutdown(
@@ -100,32 +101,26 @@ def shutdown(
     # Mutually exclusive guards. timeout/graceful-only only meaningful
     # on the bounded-graceful pve-vm path; --force skips graceful entirely.
     if graceful_only and force:
-        print(
-            "Error: --graceful-only and --force are mutually exclusive "
-            "(one waits forever, the other kills now).",
-            file=sys.stderr,
+        raise ValidationError(
+            "--graceful-only and --force are mutually exclusive "
+            "(one waits forever, the other kills now)."
         )
-        sys.exit(1)
     if graceful_only and timeout is not None:
-        print(
-            "Error: --timeout has no effect with --graceful-only "
-            "(graceful-only drops --forceStop, so the timeout is meaningless).",
-            file=sys.stderr,
+        raise ValidationError(
+            "--timeout has no effect with --graceful-only "
+            "(graceful-only drops --forceStop, so the timeout is meaningless)."
         )
-        sys.exit(1)
     if force and timeout is not None:
-        print(
-            "Error: --timeout has no effect with --force "
-            "(force skips graceful shutdown entirely).",
-            file=sys.stderr,
+        raise ValidationError(
+            "--timeout has no effect with --force "
+            "(force skips graceful shutdown entirely)."
         )
-        sys.exit(1)
 
     # F15: idempotent stop — calling stop on an already-stopped instance
     # should be a no-op, not a traceback from lxc-stop/pct/qm exiting
     # non-zero because the target is already down.
     if not is_running(container_dir, mode):
-        print(f"Already stopped: {name}")
+        logger.info("Already stopped: %s", name)
         return
 
     if mode == "vm":
@@ -173,10 +168,9 @@ def shutdown(
             combined = (result.stdout or "") + (result.stderr or "")
             lowered = combined.lower()
             if "still running" in lowered or "terminating" in lowered:
-                print(
-                    f"kento: warning: VM {name} did not honor ACPI shutdown "
-                    f"within {effective_timeout}s, hard-stopped",
-                    file=sys.stderr,
+                logger.warning(
+                    "VM %s did not honor ACPI shutdown within %ss, hard-stopped",
+                    name, effective_timeout,
                 )
     elif mode == "pve":
         if force:
@@ -209,7 +203,7 @@ def shutdown(
         )
 
     action = "Stopped" if force else "Shut down"
-    print(f"{action}: {name}")
+    logger.info("%s: %s", action, name)
 
 
 # Alias for backward compatibility
