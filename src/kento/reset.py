@@ -45,8 +45,8 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
         raise StateError(f"instance is running. Stop it first: kento stop {name}")
 
     # Re-resolve layers from image BEFORE touching the writable layer. If the
-    # backing image is gone from the store, resolve_layers() sys.exit(1)s
-    # "image not found" — we want that to abort with zero side effects, not
+    # backing image is gone from the store, resolve_layers() raises
+    # ImageNotFoundError — we want that to abort with zero side effects, not
     # after _safe_clear_dir() has already wiped upper/work, leaving a
     # half-scrubbed instance with stale kento-layers/hook.
     image = (container_dir / "kento-image").read_text().strip()
