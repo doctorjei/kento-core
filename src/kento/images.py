@@ -15,11 +15,13 @@ commands report on and reclaim those holds:
   ``podman prune -a``.
 """
 
+import logging
 import subprocess
-import sys
 
 from kento import LXC_BASE, VM_BASE
 from kento.layers import _podman_cmd, remove_image_hold
+
+logger = logging.getLogger("kento")
 
 # Exact podman queries used by this module:
 #   hold enumeration (name + pinned image, tab-separated, one per line):
@@ -199,6 +201,6 @@ def prune(yes: bool = False) -> None:
             # podman refuses if the image is still in use — that is the
             # intended safety net, so we tolerate the failure and report.
             msg = (result.stderr or result.stdout or "").strip()
-            print(f"kento: skipped image {image}: {msg}", file=sys.stderr)
+            logger.warning("skipped image %s: %s", image, msg)
 
     print(f"Removed {removed_holds} orphaned hold(s), {removed_images} image(s).")
