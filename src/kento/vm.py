@@ -1,18 +1,21 @@
 """Gemet VM mode — QEMU + virtiofs VM management."""
 
 import hashlib
+import logging
 import os
 import re
 import signal
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from kento import VM_BASE
 from kento.defaults import VM_MEMORY, VM_CORES, VM_KVM, VM_MACHINE
+from kento.errors import StateError
 from kento.subprocess_util import run_or_die
+
+logger = logging.getLogger("kento")
 
 # Locally-administered MAC prefix (QEMU's standard block).
 MAC_PREFIX = "52:54:00"
@@ -49,8 +52,7 @@ def _find_virtiofsd() -> str:
     for candidate in _VIRTIOFSD_SEARCH:
         if Path(candidate).is_file():
             return candidate
-    print("Error: virtiofsd not found. Install virtiofsd or check PATH.", file=sys.stderr)
-    sys.exit(1)
+    raise StateError("virtiofsd not found. Install virtiofsd or check PATH.")
 
 
 def _find_qemu() -> str:
@@ -64,9 +66,7 @@ def _find_qemu() -> str:
     path = shutil.which("qemu-system-x86_64")
     if path:
         return path
-    print("Error: qemu-system-x86_64 not found. Install QEMU or check PATH.",
-          file=sys.stderr)
-    sys.exit(1)
+    raise StateError("qemu-system-x86_64 not found. Install QEMU or check PATH.")
 
 
 _PORT_MIN = 10022
@@ -105,8 +105,7 @@ def allocate_port() -> int:
     for port in range(_PORT_MIN, _PORT_MAX + 1):
         if port not in used_ports and _port_is_free(port):
             return port
-    print("Error: no free port in range 10022-10999", file=sys.stderr)
-    sys.exit(1)
+    raise StateError("no free port in range 10022-10999")
 
 
 def is_vm_running(container_dir: Path) -> bool:
@@ -153,8 +152,7 @@ def _umount_with_retry(path: Path, force: bool) -> bool:
         return True
 
     stderr = (result.stderr or "").strip()
-    print(f"Warning: umount {path} failed (exit {result.returncode}): {stderr}",
-          file=sys.stderr)
+    logger.warning("umount %s failed (exit %d): %s", path, result.returncode, stderr)
 
     # Best-effort: kill processes holding the mount. fuser is in psmisc,
     # which is not always installed; tolerate either FileNotFoundError or
@@ -174,9 +172,11 @@ def _umount_with_retry(path: Path, force: bool) -> bool:
 
     lazy_stderr = (lazy.stderr or "").strip()
     if force:
-        print(f"Warning: lazy umount {path} also failed (exit {lazy.returncode}): "
-              f"{lazy_stderr}; proceeding anyway (rmtree will detach on last ref).",
-              file=sys.stderr)
+        logger.warning(
+            "lazy umount %s also failed (exit %d): %s; proceeding anyway "
+            "(rmtree will detach on last ref).",
+            path, lazy.returncode, lazy_stderr,
+        )
         return True
     return False
 
@@ -185,8 +185,7 @@ def mount_rootfs(container_dir: Path, layers: str, state_dir: Path) -> None:
     """Mount overlayfs at container_dir/rootfs on the host."""
     rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
-        print(f"Error: rootfs already mounted at {rootfs}", file=sys.stderr)
-        sys.exit(1)
+        raise StateError(f"rootfs already mounted at {rootfs}")
     upper = state_dir / "upper"
     work = state_dir / "work"
     opts = f"lowerdir={layers},upperdir={upper},workdir={work}"
@@ -215,7 +214,7 @@ def start_vm(container_dir: Path, name: str) -> None:
     # protects direct callers (create --start flow) too. Match CLI
     # wording so users see the same message regardless of entry point.
     if is_vm_running(container_dir):
-        print(f"Already running: {name}")
+        logger.info("Already running: %s", name)
         return
 
     layers = (container_dir / "kento-layers").read_text().strip()
@@ -231,12 +230,10 @@ def start_vm(container_dir: Path, name: str) -> None:
     initramfs = rootfs / "boot" / "initramfs.img"
     if not kernel.is_file():
         unmount_rootfs(container_dir)
-        print(f"Error: kernel not found at {kernel}", file=sys.stderr)
-        sys.exit(1)
+        raise StateError(f"kernel not found at {kernel}")
     if not initramfs.is_file():
         unmount_rootfs(container_dir)
-        print(f"Error: initramfs not found at {initramfs}", file=sys.stderr)
-        sys.exit(1)
+        raise StateError(f"initramfs not found at {initramfs}")
 
     # Inject guest-side config (hostname/network/tz/env/ssh-key) into the
     # mounted rootfs before virtiofsd starts. inject.sh reads kento metadata
@@ -245,8 +242,7 @@ def start_vm(container_dir: Path, name: str) -> None:
     inject_script = container_dir / "kento-inject.sh"
     if not inject_script.is_file():
         unmount_rootfs(container_dir)
-        print(f"Error: inject script not found at {inject_script}", file=sys.stderr)
-        sys.exit(1)
+        raise StateError(f"inject script not found at {inject_script}")
     run_or_die(
         ["sh", str(inject_script), str(rootfs), str(container_dir)],
         what="inject guest config",
@@ -263,7 +259,7 @@ def start_vm(container_dir: Path, name: str) -> None:
 
     # Resolve binaries up-front so an absent QEMU fails cleanly (before we
     # spawn virtiofsd or leak the mount). _find_virtiofsd / _find_qemu both
-    # sys.exit(1) on miss; at this point only the mount is held, and the
+    # raise StateError on miss; at this point only the mount is held, and the
     # caller-agnostic rollback below has not yet been armed (nothing to undo
     # beyond the mount, which the missing-kernel/initramfs guards above also
     # leave to their own unmount — keep that behaviour for the binary checks).
@@ -302,13 +298,11 @@ def start_vm(container_dir: Path, name: str) -> None:
         # mount + the virtiofsd process. Mirror the abort-and-unmount logic in
         # vm_hook.py's pre-start phase. The single except below does the cleanup.
         if not socket_path.exists() or virtiofsd.poll() is not None:
-            print(f"Error: virtiofsd socket did not appear at {socket_path}",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise StateError(f"virtiofsd socket did not appear at {socket_path}")
 
         qemu = _launch_qemu(container_dir, name, rootfs, socket_path)
     except BaseException:
-        # Any failure in this block (the socket-abort sys.exit, qemu Popen
+        # Any failure in this block (the socket-abort StateError, qemu Popen
         # FileNotFoundError, OSError reading kento-memory/kento-cores, ...) must
         # roll back virtiofsd + mount + pid files exactly once, then re-raise so
         # the caller sees the original error. Cleanup is idempotent.
@@ -317,11 +311,11 @@ def start_vm(container_dir: Path, name: str) -> None:
 
     (container_dir / "kento-qemu-pid").write_text(str(qemu.pid) + "\n")
 
-    print(f"Started: {name}")
+    logger.info("Started: %s", name)
     port_file = container_dir / "kento-port"
     if port_file.is_file():
         host_port = port_file.read_text().strip().split(":")[0]
-        print(f"  SSH: ssh -p {host_port} root@localhost")
+        logger.info("  SSH: ssh -p %s root@localhost", host_port)
 
 
 def _cleanup_failed_start(container_dir: Path, virtiofsd) -> None:
@@ -502,9 +496,7 @@ def stop_vm(container_dir: Path, *, force: bool = False) -> None:
     rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
         if not _umount_with_retry(rootfs, force=force):
-            print(f"Error: failed to unmount {rootfs}. Is the instance still running?",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise StateError(f"failed to unmount {rootfs}. Is the instance still running?")
 
     # Clean up sockets (virtiofsd + serial/qmp from VM-interactive wiring).
     (container_dir / "virtiofsd.sock").unlink(missing_ok=True)

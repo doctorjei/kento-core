@@ -1,5 +1,6 @@
 """Tests for VM mode support."""
 
+import logging
 import signal
 import subprocess
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from kento.errors import StateError, SubprocessError
 from kento.vm import (
     VM_BASE, _PORT_MIN, _PORT_MAX, _port_is_free,
     allocate_port, is_vm_running, mount_rootfs, unmount_rootfs, start_vm, stop_vm,
@@ -130,14 +132,14 @@ class TestAllocatePort:
 
     @patch("kento.vm._port_is_free", return_value=False)
     def test_all_ports_exhausted(self, mock_free, tmp_path):
-        """Every port in range is busy — should exit with error."""
+        """Every port in range is busy — should raise StateError."""
         vm_base = tmp_path / "vm"
         vm_base.mkdir()
         lxc_base = tmp_path / "lxc"
         lxc_base.mkdir()
         with patch("kento.vm.VM_BASE", vm_base), \
              patch("kento.LXC_BASE", lxc_base):
-            with pytest.raises(SystemExit):
+            with pytest.raises(StateError, match="no free port in range"):
                 allocate_port()
 
     @patch("kento.vm._port_is_free", return_value=True)
@@ -216,12 +218,12 @@ class TestMountRootfs:
         lxc_dir = tmp_path / "vm1"
         lxc_dir.mkdir()
         (lxc_dir / "rootfs").mkdir()
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="rootfs already mounted"):
             mount_rootfs(lxc_dir, "/a:/b", lxc_dir)
 
     @patch("kento.vm._is_mountpoint", return_value=False)
-    def test_mount_failure_prints_clean_error(self, mock_mp, tmp_path, capsys):
-        """A failed mount prints a kento error + hint and SystemExit(1), not a traceback."""
+    def test_mount_failure_raises_clean_error(self, mock_mp, tmp_path, caplog):
+        """A failed mount raises SubprocessError with a kento message, not a traceback."""
         lxc_dir = tmp_path / "vm1"
         lxc_dir.mkdir()
         (lxc_dir / "rootfs").mkdir()
@@ -230,14 +232,11 @@ class TestMountRootfs:
             return subprocess.CompletedProcess(cmd, 32, stdout="",
                                                stderr="mount: overlay: bad superblock")
 
-        with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
-            with pytest.raises(SystemExit) as exc:
-                mount_rootfs(lxc_dir, "/a:/b", lxc_dir)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error: failed to mount overlayfs" in captured.err
-        assert "hint:" in captured.err
-        assert "Traceback" not in captured.err
+        with caplog.at_level(logging.INFO, logger="kento"):
+            with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
+                with pytest.raises(SubprocessError, match="failed to mount overlayfs"):
+                    mount_rootfs(lxc_dir, "/a:/b", lxc_dir)
+        assert any("hint:" in r.message for r in caplog.records)
 
 
 # --- unmount_rootfs ---
@@ -251,19 +250,16 @@ class TestUnmountRootfs:
         mock_run.assert_called_once()
         assert list(mock_run.call_args[0][0]) == ["umount", str(tmp_path / "rootfs")]
 
-    def test_unmount_failure_prints_clean_error(self, tmp_path, capsys):
-        """A failed umount prints a kento error + hint and SystemExit(1)."""
+    def test_unmount_failure_raises_clean_error(self, tmp_path, caplog):
+        """A failed umount raises SubprocessError with a kento message, not a traceback."""
         def _fail(cmd, **kwargs):
             return subprocess.CompletedProcess(cmd, 1, stdout="",
                                                stderr="umount: target busy")
-        with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
-            with pytest.raises(SystemExit) as exc:
-                unmount_rootfs(tmp_path)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error: failed to unmount rootfs" in captured.err
-        assert "hint:" in captured.err
-        assert "Traceback" not in captured.err
+        with caplog.at_level(logging.INFO, logger="kento"):
+            with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
+                with pytest.raises(SubprocessError, match="failed to unmount rootfs"):
+                    unmount_rootfs(tmp_path)
+        assert any("hint:" in r.message for r in caplog.records)
 
 
 # --- start_vm ---
@@ -396,7 +392,7 @@ class TestStartVm:
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="kernel not found"):
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
@@ -638,14 +634,14 @@ class TestStartVm:
         assert qemu_args[cpu_idx + 1] == "host,vmx=off,svm=off"
 
     @patch("kento.vm.is_vm_running", return_value=True)
-    def test_start_already_running_is_idempotent(self, mock_running, tmp_path, capsys):
+    def test_start_already_running_is_idempotent(self, mock_running, tmp_path, caplog):
         """F15: start_vm on an already-running VM is a no-op, not an error."""
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
-        # Does not raise; returns cleanly.
-        start_vm(lxc_dir, "testvm")
-        captured = capsys.readouterr()
-        assert "Already running: testvm" in captured.out
+        with caplog.at_level(logging.INFO, logger="kento"):
+            # Does not raise; returns cleanly.
+            start_vm(lxc_dir, "testvm")
+        assert any("Already running: testvm" in r.message for r in caplog.records)
 
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.unmount_rootfs")
@@ -662,7 +658,7 @@ class TestStartVm:
         (lxc_dir / "kento-layers").write_text("/a:/b\n")
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="initramfs not found"):
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
@@ -730,11 +726,11 @@ class TestStartVm:
     @patch("kento.vm.subprocess.Popen")
     @patch("kento.vm.mount_rootfs")
     def test_start_inject_failure_propagates(
-            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path, capsys):
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
         """A failing inject.sh must abort start — virtiofsd/qemu never launch.
 
-        run_or_die converts the non-zero exit into a SystemExit(1) with a
-        kento-branded Error line, not a CalledProcessError traceback.
+        run_or_die converts the non-zero exit into a SubprocessError with a
+        kento-branded message, not a CalledProcessError traceback.
         """
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
@@ -748,15 +744,11 @@ class TestStartVm:
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\nexit 1\n")
 
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(SubprocessError, match="failed to inject guest config testvm"):
             start_vm(lxc_dir, "testvm")
-        assert exc.value.code == 1
 
         # Neither virtiofsd nor qemu should have launched.
         mock_popen.assert_not_called()
-        captured = capsys.readouterr()
-        assert "Error: failed to inject guest config testvm" in captured.err
-        assert "Traceback" not in captured.err
 
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
     @patch("kento.vm.is_vm_running", return_value=False)
@@ -764,7 +756,7 @@ class TestStartVm:
     @patch("kento.vm.mount_rootfs")
     def test_start_missing_inject_script(
             self, mock_mount, mock_unmount, mock_running, mock_find, tmp_path):
-        """Missing kento-inject.sh aborts start with an unmount + exit."""
+        """Missing kento-inject.sh aborts start with an unmount + StateError."""
         lxc_dir = tmp_path / "testvm"
         lxc_dir.mkdir()
         rootfs = lxc_dir / "rootfs"
@@ -777,7 +769,7 @@ class TestStartVm:
         (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
         # No kento-inject.sh
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="inject script not found"):
             start_vm(lxc_dir, "testvm")
         mock_unmount.assert_called_once()
 
@@ -1234,14 +1226,14 @@ class TestStartVmCleanupOnFailure:
             self, mock_mount, mock_popen, mock_umount, mock_mp, mock_running,
             mock_find, mock_run, tmp_path):
         """virtiofsd starts but its socket never appears -> terminate virtiofsd,
-        unmount, drop pid files, sys.exit(1). QEMU must NOT launch."""
+        unmount, drop pid files, raise StateError. QEMU must NOT launch."""
         lxc_dir = self._setup(tmp_path)
         # Do NOT create virtiofsd.sock -> wait loop times out.
         mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
         mock_popen.return_value = mock_vfs
 
         with patch("kento.vm.time.sleep"):  # don't actually wait 5s
-            with pytest.raises(SystemExit):
+            with pytest.raises(StateError, match="virtiofsd socket did not appear"):
                 start_vm(lxc_dir, "testvm")
 
         # Only virtiofsd was spawned; QEMU never launched.
@@ -1267,7 +1259,7 @@ class TestStartVmCleanupOnFailure:
             self, mock_mount, mock_popen, mock_umount, mock_mp, mock_running,
             mock_find, mock_run, tmp_path):
         """virtiofsd dies during the wait (poll() returns non-None) -> abort,
-        terminate, unmount, sys.exit(1) even though the socket exists."""
+        terminate, unmount, raise StateError even though the socket exists."""
         lxc_dir = self._setup(tmp_path)
         (lxc_dir / "virtiofsd.sock").write_text("")  # socket present...
         mock_vfs = MagicMock(); mock_vfs.pid = 1
@@ -1275,7 +1267,7 @@ class TestStartVmCleanupOnFailure:
         mock_popen.return_value = mock_vfs
 
         with patch("kento.vm.time.sleep"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(StateError, match="virtiofsd socket did not appear"):
                 start_vm(lxc_dir, "testvm")
 
         assert mock_popen.call_count == 1  # QEMU never launched
