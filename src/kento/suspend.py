@@ -15,15 +15,18 @@ LXC-scoped invocation just hits the unsupported-mode error.
 """
 
 import json
+import logging
 import socket
 import subprocess
-import sys
 from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_any
+from kento.errors import ModeError, StateError, SubprocessError
+
+logger = logging.getLogger("kento")
 
 _LXC_UNSUPPORTED = (
-    "Error: suspend/resume is not supported for LXC instances; "
+    "suspend/resume is not supported for LXC instances; "
     "use 'kento stop' / 'kento start'."
 )
 
@@ -115,60 +118,48 @@ class _LineReader:
             return msg
 
 
-def _qmp_sock_error(name: str, sock_path: Path) -> None:
-    print(
-        f"Error: QMP socket not found for '{name}' ({sock_path}). The "
-        f"instance is not running, or it was started by an older kento "
-        f"without QMP support. Start it with 'kento start {name}' and retry.",
-        file=sys.stderr,
-    )
-
-
-def _vm_qmp(name: str, container_dir: Path, command: str, label: str) -> int:
+def _vm_qmp(name: str, container_dir: Path, command: str, label: str) -> None:
     """Run a single QMP command on a plain VM. command is 'stop' or 'cont'."""
     sock_path = container_dir / "qmp.sock"
     if not sock_path.exists():
-        _qmp_sock_error(name, sock_path)
-        return 1
+        raise SubprocessError(
+            f"QMP socket not found for '{name}' ({sock_path}). The "
+            f"instance is not running, or it was started by an older kento "
+            f"without QMP support. Start it with 'kento start {name}' and retry."
+        )
     try:
         (reply,) = qmp_command(sock_path, {"execute": command})
     except (OSError, ValueError) as exc:
-        print(
-            f"Error: QMP {command} failed for '{name}': {exc}. Is it running?",
-            file=sys.stderr,
-        )
-        return 1
+        raise SubprocessError(
+            f"QMP {command} failed for '{name}': {exc}. Is it running?"
+        ) from exc
     if "error" in reply:
         err = reply["error"]
         desc = err.get("desc", err) if isinstance(err, dict) else err
-        print(f"Error: QMP {command} rejected for '{name}': {desc}",
-              file=sys.stderr)
-        return 1
-    print(f"{label}: {name}")
-    return 0
+        raise SubprocessError(f"QMP {command} rejected for '{name}': {desc}")
+    logger.info("%s: %s", label, name)
 
 
-def _pve_vm_qm(name: str, container_dir: Path, verb: str, label: str) -> int:
+def _pve_vm_qm(name: str, container_dir: Path, verb: str, label: str) -> None:
     """Run 'qm suspend|resume <vmid>' for a pve-vm. verb is 'suspend'/'resume'."""
     vmid = (container_dir / "kento-vmid").read_text().strip()
     result = subprocess.run(
         ["qm", verb, vmid], capture_output=True, text=True)
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
-        print(
-            f"Error: 'qm {verb} {vmid}' failed for '{name}'"
+        raise SubprocessError(
+            f"'qm {verb} {vmid}' failed for '{name}'"
             + (f": {stderr}" if stderr else "")
             + f". Run 'qm {verb} {vmid}' directly for details.",
-            file=sys.stderr,
+            cmd=["qm", verb, vmid],
+            returncode=result.returncode,
         )
-        return 1
-    print(f"{label}: {name}")
-    return 0
+    logger.info("%s: %s", label, name)
 
 
 def _dispatch(name: str, *, vm_qmp_command: str, qm_verb: str,
-              label: str, namespace: str | None = None) -> int:
-    """Shared body for suspend/resume. Returns an exit code."""
+              label: str, namespace: str | None = None) -> None:
+    """Shared body for suspend/resume."""
     require_root()
 
     container_dir, mode = resolve_any(name, namespace)
@@ -176,13 +167,13 @@ def _dispatch(name: str, *, vm_qmp_command: str, qm_verb: str,
         mode = read_mode(container_dir)
 
     if mode in ("lxc", "pve"):
-        print(_LXC_UNSUPPORTED, file=sys.stderr)
-        return 1
+        raise ModeError(_LXC_UNSUPPORTED)
 
     if not is_running(container_dir, mode):
-        print(f"Error: instance is not running: {name}. "
-              f"Start it first: kento start {name}", file=sys.stderr)
-        return 1
+        raise StateError(
+            f"instance is not running: {name}. "
+            f"Start it first: kento start {name}"
+        )
 
     if mode == "vm":
         return _vm_qmp(name, container_dir, vm_qmp_command, label)
@@ -190,18 +181,16 @@ def _dispatch(name: str, *, vm_qmp_command: str, qm_verb: str,
         return _pve_vm_qm(name, container_dir, qm_verb, label)
 
     # Unknown mode (shouldn't happen — resolve_any returns a known mode).
-    print(f"Error: unsupported mode {mode!r} for suspend/resume.",
-          file=sys.stderr)
-    return 1
+    raise ModeError(f"unsupported mode {mode!r} for suspend/resume.")
 
 
-def suspend(name: str, namespace: str | None = None) -> int:
-    """Pause a running VM's vCPUs (QMP stop / qm suspend). Exit code."""
-    return _dispatch(name, vm_qmp_command="stop", qm_verb="suspend",
-                     label="Suspended", namespace=namespace)
+def suspend(name: str, namespace: str | None = None) -> None:
+    """Pause a running VM's vCPUs (QMP stop / qm suspend)."""
+    _dispatch(name, vm_qmp_command="stop", qm_verb="suspend",
+              label="Suspended", namespace=namespace)
 
 
-def resume(name: str, namespace: str | None = None) -> int:
-    """Resume a suspended VM's vCPUs (QMP cont / qm resume). Exit code."""
-    return _dispatch(name, vm_qmp_command="cont", qm_verb="resume",
-                     label="Resumed", namespace=namespace)
+def resume(name: str, namespace: str | None = None) -> None:
+    """Resume a suspended VM's vCPUs (QMP cont / qm resume)."""
+    _dispatch(name, vm_qmp_command="cont", qm_verb="resume",
+              label="Resumed", namespace=namespace)

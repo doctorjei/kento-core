@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kento.errors import ModeError, StateError, SubprocessError
 from kento.suspend import qmp_command, resume, suspend
 
 
@@ -141,8 +142,7 @@ def test_suspend_forwards_namespace_to_resolve_any(tmp_path):
          patch("kento.suspend.qmp_command", return_value=[{"return": {}}]), \
          patch("kento.suspend.resolve_any",
                return_value=(d, "vm")) as mock_resolve:
-        rc = suspend("dup", namespace="vm")
-    assert rc == 0
+        suspend("dup", namespace="vm")
     mock_resolve.assert_called_once_with("dup", "vm")
 
 
@@ -155,8 +155,7 @@ def test_resume_default_namespace_is_none(tmp_path):
          patch("kento.suspend.qmp_command", return_value=[{"return": {}}]), \
          patch("kento.suspend.resolve_any",
                return_value=(d, "vm")) as mock_resolve:
-        rc = resume("box")
-    assert rc == 0
+        resume("box")
     mock_resolve.assert_called_once_with("box", None)
 
 
@@ -169,8 +168,7 @@ def test_suspend_vm_sends_stop(tmp_path):
     with _env(d, "vm"), \
          patch("kento.suspend.qmp_command",
                return_value=[{"return": {}}]) as mock_qmp:
-        rc = suspend("box")
-    assert rc == 0
+        suspend("box")
     args, kwargs = mock_qmp.call_args
     assert args[0] == d / "qmp.sock"
     assert args[1] == {"execute": "stop"}
@@ -183,45 +181,41 @@ def test_resume_vm_sends_cont(tmp_path):
     with _env(d, "vm"), \
          patch("kento.suspend.qmp_command",
                return_value=[{"return": {}}]) as mock_qmp:
-        rc = resume("box")
-    assert rc == 0
+        resume("box")
     args, _ = mock_qmp.call_args
     assert args[1] == {"execute": "cont"}
 
 
-def test_suspend_vm_missing_socket_errors(tmp_path, capsys):
+def test_suspend_vm_missing_socket_errors(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"), \
          patch("kento.suspend.qmp_command") as mock_qmp:
-        rc = suspend("box")
-    assert rc == 1
+        with pytest.raises(SubprocessError, match="QMP socket not found"):
+            suspend("box")
     mock_qmp.assert_not_called()
-    assert "QMP socket not found" in capsys.readouterr().err
 
 
-def test_suspend_vm_qmp_error_surfaced(tmp_path, capsys):
+def test_suspend_vm_qmp_error_surfaced(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     (d / "qmp.sock").write_text("")
     err = {"error": {"class": "GenericError", "desc": "already paused"}}
     with _env(d, "vm"), \
          patch("kento.suspend.qmp_command", return_value=[err]):
-        rc = suspend("box")
-    assert rc == 1
-    assert "already paused" in capsys.readouterr().err
+        with pytest.raises(SubprocessError, match="already paused"):
+            suspend("box")
 
 
-def test_suspend_vm_not_running_errors(tmp_path, capsys):
+def test_suspend_vm_not_running_errors(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     (d / "qmp.sock").write_text("")
     with _env(d, "vm", running=False), \
          patch("kento.suspend.qmp_command") as mock_qmp:
-        rc = suspend("box")
-    assert rc == 1
+        with pytest.raises(StateError, match="not running"):
+            suspend("box")
     mock_qmp.assert_not_called()
-    assert "not running" in capsys.readouterr().err
 
 
 # -- pve-vm ----------------------------------------------------------------
@@ -248,8 +242,7 @@ def test_suspend_pve_vm_runs_qm_suspend(tmp_path):
     (d / "kento-vmid").write_text("100\n")
     with _env(d, "pve-vm"), \
          patch("kento.suspend.subprocess.run", return_value=_ok()) as mock_run:
-        rc = suspend("box")
-    assert rc == 0
+        suspend("box")
     assert mock_run.call_args[0][0] == ["qm", "suspend", "100"]
 
 
@@ -259,46 +252,43 @@ def test_resume_pve_vm_runs_qm_resume(tmp_path):
     (d / "kento-vmid").write_text("100\n")
     with _env(d, "pve-vm"), \
          patch("kento.suspend.subprocess.run", return_value=_ok()) as mock_run:
-        rc = resume("box")
-    assert rc == 0
+        resume("box")
     assert mock_run.call_args[0][0] == ["qm", "resume", "100"]
 
 
-def test_suspend_pve_vm_failure_surfaces(tmp_path, capsys):
+def test_suspend_pve_vm_failure_surfaces(tmp_path):
     d = tmp_path / "100"
     d.mkdir()
     (d / "kento-vmid").write_text("100\n")
     with _env(d, "pve-vm"), \
          patch("kento.suspend.subprocess.run", return_value=_fail("nope")):
-        rc = suspend("box")
-    assert rc == 1
-    assert "nope" in capsys.readouterr().err
+        with pytest.raises(SubprocessError, match="nope"):
+            suspend("box")
 
 
 # -- lxc / pve-lxc unsupported ---------------------------------------------
 
 @pytest.mark.parametrize("mode", ["lxc", "pve"])
-def test_suspend_lxc_unsupported(tmp_path, capsys, mode):
+def test_suspend_lxc_unsupported(tmp_path, mode):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, mode), \
          patch("kento.suspend.qmp_command") as mock_qmp, \
          patch("kento.suspend.subprocess.run") as mock_run:
-        rc = suspend("box")
-    assert rc == 1
+        with pytest.raises(ModeError, match="not supported for LXC"):
+            suspend("box")
     mock_qmp.assert_not_called()
     mock_run.assert_not_called()
-    assert "not supported for LXC" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("mode", ["lxc", "pve"])
-def test_resume_lxc_unsupported(tmp_path, capsys, mode):
+def test_resume_lxc_unsupported(tmp_path, mode):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, mode), \
          patch("kento.suspend.qmp_command") as mock_qmp, \
          patch("kento.suspend.subprocess.run") as mock_run:
-        rc = resume("box")
-    assert rc == 1
+        with pytest.raises(ModeError, match="not supported for LXC"):
+            resume("box")
     mock_qmp.assert_not_called()
     mock_run.assert_not_called()
