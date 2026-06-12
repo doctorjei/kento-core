@@ -47,8 +47,8 @@ def _run_start_or_rollback(cmd: list[str], *, name: str, scope: str) -> None:
     On failure, raises RuntimeError instead of letting CalledProcessError
     propagate. The surrounding try/except in create() catches it and runs
     the rollback undos (which include the matching stop). We *don't* use
-    run_or_die here because run_or_die calls sys.exit(1) which would also
-    trigger the rollback but with a duplicate error message from the
+    run_or_die here because run_or_die raises SubprocessError which would
+    also trigger the rollback but with a duplicate error message from the
     `Error during create:` line — explicit RuntimeError keeps a single
     clear message.
     """
@@ -555,8 +555,9 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # on name/vmid/container_dir, so a missing image fails here with ZERO
     # filesystem side effects (no orphan instance dir left behind — F2). Staying
     # outside the lock also avoids serializing image pulls across concurrent
-    # creates. resolve_layers either returns a non-empty string or sys.exits on
-    # missing image, so no defensive empty-string check is needed here.
+    # creates. resolve_layers either returns a non-empty string or raises
+    # ImageNotFoundError on a missing image, so no defensive empty-string check
+    # is needed here.
     layers = resolve_layers(image)
 
     # detect_cloudinit() does filesystem I/O over every layer. ``layers`` is
