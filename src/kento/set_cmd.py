@@ -25,13 +25,16 @@ default=None):
   - provided but all entries empty ('')-> CLEAR (unlink the metadata file).
 """
 
+import logging
 import re
-import sys
 from pathlib import Path
 
 from kento import is_running, require_root, resolve_any
 from kento.defaults import (LXC_ARG_DENYLIST, PVE_ARG_DENYLIST,
                             QEMU_ARG_DENYLIST)
+from kento.errors import ModeError, StateError, ValidationError
+
+logger = logging.getLogger("kento")
 
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
@@ -156,7 +159,7 @@ def _drop_passthrough_block(content: str, known_lines: list[str]) -> str:
 def set_cmd(name, *, memory=None, cores=None, mac=None,
             qemu_args=None, pve_args=None, lxc_args=None,
             namespace=None) -> int:
-    """Mutate scalar settings on a stopped instance. Returns an exit code."""
+    """Mutate scalar settings on a stopped instance. Returns 0 on success, raises on error."""
     require_root()
 
     container_dir, mode = resolve_any(name, namespace)
@@ -164,61 +167,67 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
     # No fields at all -> usage error.
     if (memory is None and cores is None and mac is None
             and qemu_args is None and pve_args is None and lxc_args is None):
-        print("Error: nothing to set. Provide at least one of --memory, "
-              "--cores, --mac, --qemu-arg, --pve-arg, --lxc-arg.",
-              file=sys.stderr)
-        return 1
+        raise ValidationError(
+            "nothing to set. Provide at least one of --memory, "
+            "--cores, --mac, --qemu-arg, --pve-arg, --lxc-arg."
+        )
 
     if is_running(container_dir, mode):
-        print(f"Error: instance is running. Stop it first: kento stop {name}",
-              file=sys.stderr)
-        return 1
+        raise StateError(
+            f"instance is running. Stop it first: kento stop {name}"
+        )
 
     # --- Field validity (error BEFORE mutating anything) ---
     vm_modes = ("vm", "pve-vm")
     pve_modes = ("pve", "pve-vm")
 
     if mac is not None and mode not in vm_modes:
-        print("Error: --mac is not supported for LXC/PVE-LXC instances "
-              "(no virtio NIC).", file=sys.stderr)
-        return 1
+        raise ModeError(
+            "--mac is not supported for LXC/PVE-LXC instances (no virtio NIC)."
+        )
     if qemu_args is not None and mode not in vm_modes:
-        print("Error: --qemu-arg is not supported for LXC/PVE-LXC instances; "
-              "it applies to VM modes only.", file=sys.stderr)
-        return 1
+        raise ModeError(
+            "--qemu-arg is not supported for LXC/PVE-LXC instances; "
+            "it applies to VM modes only."
+        )
     if pve_args is not None and mode not in pve_modes:
         if mode == "lxc":
-            print("Error: --pve-arg is not supported for plain LXC; it appends "
-                  "lines to the PVE lxc config and only applies on PVE hosts. "
-                  "Plain LXC has no PVE config. For plain-LXC native config "
-                  "pass-through use --lxc-arg.", file=sys.stderr)
+            raise ModeError(
+                "--pve-arg is not supported for plain LXC; it appends "
+                "lines to the PVE lxc config and only applies on PVE hosts. "
+                "Plain LXC has no PVE config. For plain-LXC native config "
+                "pass-through use --lxc-arg."
+            )
         else:  # vm
-            print("Error: --pve-arg is not supported for plain VM; it appends "
-                  "lines to the PVE qm config and only applies on PVE hosts. "
-                  "Plain VM has no PVE config.", file=sys.stderr)
-        return 1
+            raise ModeError(
+                "--pve-arg is not supported for plain VM; it appends "
+                "lines to the PVE qm config and only applies on PVE hosts. "
+                "Plain VM has no PVE config."
+            )
     if lxc_args is not None and mode != "lxc":
         if mode == "pve":
-            print("Error: --lxc-arg is not supported on a PVE host. On PVE the "
-                  "LXC config is the PVE config; use --pve-arg, which carries "
-                  "raw lxc.* lines.", file=sys.stderr)
+            raise ModeError(
+                "--lxc-arg is not supported on a PVE host. On PVE the "
+                "LXC config is the PVE config; use --pve-arg, which carries "
+                "raw lxc.* lines."
+            )
         else:  # vm / pve-vm
-            print("Error: --lxc-arg is not applicable to VM modes (no native "
-                  "LXC config).", file=sys.stderr)
-        return 1
+            raise ModeError(
+                "--lxc-arg is not applicable to VM modes (no native LXC config)."
+            )
 
     # Denylist: reject --lxc-arg values that collide with kento's structural
-    # plain-LXC config lines (mirrors create.py's _validate_lxc_args, but
-    # returns an exit code instead of sys.exit).
+    # plain-LXC config lines (mirrors create.py's _validate_lxc_args).
     if lxc_args is not None:
         for arg in lxc_args:
             for needle in LXC_ARG_DENYLIST:
                 if needle in arg:
-                    print(f"Error: kento manages {needle!r} directly — "
-                          f"--lxc-arg {arg!r} would collide with kento's own "
-                          "plain-LXC config. Drop the flag or file an issue "
-                          "if you need it overridable.", file=sys.stderr)
-                    return 1
+                    raise ValidationError(
+                        f"kento manages {needle!r} directly — "
+                        f"--lxc-arg {arg!r} would collide with kento's own "
+                        "plain-LXC config. Drop the flag or file an issue "
+                        "if you need it overridable."
+                    )
 
     # Same denylist enforcement create.py applies for --qemu-arg / --pve-arg
     # (create/set parity): without these, `kento set` would re-emit a
@@ -231,11 +240,12 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
                 continue
             for needle in QEMU_ARG_DENYLIST:
                 if needle in arg:
-                    print(f"Error: kento manages {needle!r} directly — "
-                          f"--qemu-arg {arg!r} would collide with kento's own "
-                          "QEMU argv. Drop the flag or file an issue if you "
-                          "need it overridable.", file=sys.stderr)
-                    return 1
+                    raise ValidationError(
+                        f"kento manages {needle!r} directly — "
+                        f"--qemu-arg {arg!r} would collide with kento's own "
+                        "QEMU argv. Drop the flag or file an issue if you "
+                        "need it overridable."
+                    )
 
     if pve_args is not None:
         for arg in pve_args:
@@ -243,24 +253,25 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
                 continue
             for needle in PVE_ARG_DENYLIST:
                 if needle in arg:
-                    print(f"Error: kento manages {needle!r} directly — "
-                          f"--pve-arg {arg!r} would collide with kento's own "
-                          "PVE config. Drop the flag or file an issue if you "
-                          "need it overridable.", file=sys.stderr)
-                    return 1
+                    raise ValidationError(
+                        f"kento manages {needle!r} directly — "
+                        f"--pve-arg {arg!r} would collide with kento's own "
+                        "PVE config. Drop the flag or file an issue if you "
+                        "need it overridable."
+                    )
 
     if mac is not None and not _MAC_RE.match(mac):
-        print(f"Error: invalid MAC address {mac!r}; expected format "
-              f"XX:XX:XX:XX:XX:XX.", file=sys.stderr)
-        return 1
+        raise ValidationError(
+            f"invalid MAC address {mac!r}; expected format XX:XX:XX:XX:XX:XX."
+        )
     if memory is not None and memory <= 0:
-        print(f"Error: --memory must be a positive integer (MB), got {memory}.",
-              file=sys.stderr)
-        return 1
+        raise ValidationError(
+            f"--memory must be a positive integer (MB), got {memory}."
+        )
     if cores is not None and cores <= 0:
-        print(f"Error: --cores must be a positive integer, got {cores}.",
-              file=sys.stderr)
-        return 1
+        raise ValidationError(
+            f"--cores must be a positive integer, got {cores}."
+        )
 
     # --- Apply per mode ---
     if mode == "vm":
@@ -272,8 +283,8 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
     elif mode == "pve-vm":
         _apply_pve_vm(container_dir, memory, cores, mac, qemu_args, pve_args)
 
-    print(f"Updated: {name}")
-    print("  Changes take effect on next start.")
+    logger.info("Updated: %s", name)
+    logger.info("  Changes take effect on next start.")
     return 0
 
 
@@ -460,10 +471,12 @@ def _apply_pve_vm(container_dir, memory, cores, mac, qemu_args,
                 # net0 exists but has no virtio token (e.g. a user-edited
                 # non-virtio model). The MAC couldn't be applied to the conf;
                 # warn so "Updated" isn't misleading (metadata still written).
-                print(f"Warning: net0 has no 'virtio' token; the MAC {mac!r} "
-                      "could not be applied to the existing net0 form. "
-                      "kento-mac metadata was updated but the qm config NIC "
-                      "was left unchanged.", file=sys.stderr)
+                logger.warning(
+                    "net0 has no 'virtio' token; the MAC %r "
+                    "could not be applied to the existing net0 form. "
+                    "kento-mac metadata was updated but the qm config NIC "
+                    "was left unchanged.", mac
+                )
         # If net0 absent, best-effort: metadata written, skip conf edit.
 
     # pve_args: drop old block, re-emit new at end (before persisting we read

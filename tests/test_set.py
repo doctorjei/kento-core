@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kento.errors import ModeError, StateError, ValidationError
 from kento.set_cmd import set_cmd
 
 
@@ -85,14 +86,16 @@ def test_empty_set_is_usage_error(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box") == 1
+        with pytest.raises(ValidationError, match="nothing to set"):
+            set_cmd("box")
 
 
 def test_running_instance_errors(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm", running=True):
-        assert set_cmd("box", memory=512) == 1
+        with pytest.raises(StateError, match="instance is running"):
+            set_cmd("box", memory=512)
     assert not (d / "kento-memory").exists()
 
 
@@ -100,7 +103,8 @@ def test_bad_mac_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box", mac="zz:zz:zz:zz:zz:zz") == 1
+        with pytest.raises(ValidationError, match="invalid MAC address"):
+            set_cmd("box", mac="zz:zz:zz:zz:zz:zz")
     assert not (d / "kento-mac").exists()
 
 
@@ -108,7 +112,8 @@ def test_nonpositive_memory_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box", memory=0) == 1
+        with pytest.raises(ValidationError, match="--memory must be a positive integer"):
+            set_cmd("box", memory=0)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +138,8 @@ def test_vm_pve_arg_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box", pve_args=["balloon: 0"]) == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", pve_args=["balloon: 0"])
     assert not (d / "kento-pve-args").exists()
 
 
@@ -183,7 +189,8 @@ def test_lxc_mac_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "lxc"):
-        assert set_cmd("box", mac="de:ad:be:ef:00:01") == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", mac="de:ad:be:ef:00:01")
     assert not (d / "kento-mac").exists()
 
 
@@ -191,14 +198,16 @@ def test_lxc_qemu_arg_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "lxc"):
-        assert set_cmd("box", qemu_args=["-foo"]) == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", qemu_args=["-foo"])
 
 
 def test_lxc_pve_arg_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "lxc"):
-        assert set_cmd("box", pve_args=["x: y"]) == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", pve_args=["x: y"])
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +259,8 @@ def test_lxc_arg_denied_key_rejected(tmp_path):
     d.mkdir()
     (d / "config").write_text(_LXC_CONFIG)
     with _env(d, "lxc"):
-        assert set_cmd("box", lxc_args=["lxc.rootfs.path = /evil"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", lxc_args=["lxc.rootfs.path = /evil"])
     assert not (d / "kento-lxc-args").exists()
 
 
@@ -258,14 +268,16 @@ def test_lxc_arg_rejected_on_vm(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box", lxc_args=["lxc.cap.drop = x"]) == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", lxc_args=["lxc.cap.drop = x"])
     assert not (d / "kento-lxc-args").exists()
 
 
 def test_lxc_arg_rejected_on_pve_lxc(tmp_path):
     pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
     with _env(d, "pve"), _pve_patch(pve_dir):
-        assert set_cmd("box", lxc_args=["lxc.cap.drop = x"]) == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", lxc_args=["lxc.cap.drop = x"])
     assert not (d / "kento-lxc-args").exists()
 
 
@@ -342,13 +354,15 @@ def test_pve_lxc_pve_arg_clear(tmp_path):
 def test_pve_lxc_mac_rejected(tmp_path):
     pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
     with _env(d, "pve"), _pve_patch(pve_dir):
-        assert set_cmd("box", mac="de:ad:be:ef:00:01") == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", mac="de:ad:be:ef:00:01")
 
 
 def test_pve_lxc_qemu_arg_rejected(tmp_path):
     pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
     with _env(d, "pve"), _pve_patch(pve_dir):
-        assert set_cmd("box", qemu_args=["-foo"]) == 1
+        with pytest.raises(ModeError):
+            set_cmd("box", qemu_args=["-foo"])
 
 
 # ---------------------------------------------------------------------------
@@ -433,25 +447,23 @@ def test_pve_vm_pve_arg_replace(tmp_path):
     assert "balloon: 0" in text
 
 
-def test_pve_vm_mac_non_virtio_net0_warns(tmp_path):
+def test_pve_vm_mac_non_virtio_net0_warns(tmp_path, caplog):
     """F: a net0 that exists but has no 'virtio' token (e.g. a user-edited
-    non-virtio model) can't take the MAC. set_cmd must surface a stderr
-    WARNING so "Updated" isn't misleading, while STILL writing kento-mac
+    non-virtio model) can't take the MAC. set_cmd must surface a WARNING log
+    so "Updated" isn't misleading, while STILL writing kento-mac
     metadata and returning success."""
+    import logging
     qm = _QM_CONF.replace(
         "net0: virtio=DE:AD:BE:EF:00:01,bridge=vmbr0\n",
         "net0: e1000=DE:AD:BE:EF:00:01,bridge=vmbr0\n")
     pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", qm)
     with _env(d, "pve-vm"), _pve_patch(pve_dir):
-        import io
-        import contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stderr(buf):
+        with caplog.at_level(logging.WARNING, logger="kento"):
             rc = set_cmd("box", mac="00:11:22:33:44:55")
     assert rc == 0
-    err = buf.getvalue()
-    assert "virtio" in err.lower()
-    assert "could not be applied" in err.lower()
+    warning_text = " ".join(caplog.messages)
+    assert "virtio" in warning_text.lower()
+    assert "could not be applied" in warning_text.lower()
     # Metadata IS written even though the conf NIC was left alone.
     assert (d / "kento-mac").read_text() == "00:11:22:33:44:55\n"
     # The non-virtio net0 line is preserved unchanged (no MAC swapped in).
@@ -465,11 +477,12 @@ def test_pve_vm_mac_non_virtio_net0_warns(tmp_path):
 
 def test_vm_qemu_arg_denylisted_token_rejected(tmp_path):
     """A denylisted --qemu-arg token (-kernel) in vm mode is rejected with
-    exit 1 and no metadata file is written (create/set parity)."""
+    ValidationError and no metadata file is written (create/set parity)."""
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box", qemu_args=["-kernel", "/x"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", qemu_args=["-kernel", "/x"])
     assert not (d / "kento-qemu-args").exists()
 
 
@@ -479,7 +492,8 @@ def test_vm_qemu_arg_denylisted_memfd_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
     with _env(d, "vm"):
-        assert set_cmd("box", qemu_args=["memfd-size=2048"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", qemu_args=["memfd-size=2048"])
     assert not (d / "kento-qemu-args").exists()
 
 
@@ -497,30 +511,34 @@ def test_pve_vm_qemu_arg_denylisted_rejected(tmp_path):
     metadata behind."""
     pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", _QM_CONF)
     with _env(d, "pve-vm"), _pve_patch(pve_dir):
-        assert set_cmd("box", qemu_args=["-kernel", "/x"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", qemu_args=["-kernel", "/x"])
     assert not (d / "kento-qemu-args").exists()
 
 
 def test_pve_lxc_pve_arg_denylisted_rootfs_rejected(tmp_path):
     """A denylisted --pve-arg token (rootfs:) in pve (pve-lxc) mode is
-    rejected with exit 1 and no metadata file written."""
+    rejected with ValidationError and no metadata file written."""
     pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
     with _env(d, "pve"), _pve_patch(pve_dir):
-        assert set_cmd("box", pve_args=["rootfs: /evil"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", pve_args=["rootfs: /evil"])
     assert not (d / "kento-pve-args").exists()
 
 
 def test_pve_lxc_pve_arg_denylisted_arch_rejected(tmp_path):
     pve_dir, d, conf = _make_pve(tmp_path, 100, "lxc", _PVE_LXC_CONF)
     with _env(d, "pve"), _pve_patch(pve_dir):
-        assert set_cmd("box", pve_args=["arch: x"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", pve_args=["arch: x"])
     assert not (d / "kento-pve-args").exists()
 
 
 def test_pve_vm_pve_arg_denylisted_hostname_rejected(tmp_path):
     pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", _QM_CONF)
     with _env(d, "pve-vm"), _pve_patch(pve_dir):
-        assert set_cmd("box", pve_args=["hostname: y"]) == 1
+        with pytest.raises(ValidationError, match="kento manages"):
+            set_cmd("box", pve_args=["hostname: y"])
     assert not (d / "kento-pve-args").exists()
 
 
