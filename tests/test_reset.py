@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from kento.reset import reset
+from kento.errors import StateError
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +141,7 @@ def test_reset_refuses_running(mock_root, mock_run, tmp_path):
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
 
     with patch("kento.reset.resolve_container", return_value=lxc_dir):
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="instance is running"):
             reset("test")
 
 
@@ -243,7 +244,7 @@ def test_reset_pve_refuses_running(mock_root, mock_run, tmp_path):
     with patch("kento.reset.resolve_container", return_value=lxc_dir), \
          patch("kento.pve.PVE_DIR", tmp_path / "pve"), \
          patch("kento.pve._pve_node_name", return_value="node1"):
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="instance is running"):
             reset("mybox")
 
 
@@ -678,7 +679,7 @@ def test_reset_vm_refuses_running(mock_root, tmp_path):
 
     with patch("kento.reset.resolve_container", return_value=lxc_dir), \
          patch("kento.vm.is_vm_running", return_value=True):
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError, match="instance is running"):
             reset("testvm")
 
 

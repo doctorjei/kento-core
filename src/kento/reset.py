@@ -1,14 +1,17 @@
 """Scrub a kento-managed instance back to clean OCI state."""
 
+import logging
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_container
+from kento.errors import StateError
 from kento.hook import write_hook
 from kento.layers import ensure_image_hold, resolve_layers
 from kento.vm_hook import write_vm_hook
+
+logger = logging.getLogger("kento")
 
 
 def _safe_clear_dir(path: Path) -> None:
@@ -39,9 +42,7 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
 
     # Refuse if running
     if is_running(container_dir, mode):
-        print(f"Error: instance is running. Stop it first: kento stop {name}",
-              file=sys.stderr)
-        sys.exit(1)
+        raise StateError(f"instance is running. Stop it first: kento stop {name}")
 
     # Re-resolve layers from image BEFORE touching the writable layer. If the
     # backing image is gone from the store, resolve_layers() sys.exit(1)s
@@ -61,9 +62,7 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
                       capture_output=True).returncode == 0:
         result = subprocess.run(["umount", str(rootfs)])
         if result.returncode != 0:
-            print(f"Error: failed to unmount {rootfs}. Is the container still running?",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise StateError(f"failed to unmount {rootfs}. Is the container still running?")
 
     # Clear writable layer (crash-safe: rename then rm, not rm then mkdir)
     _safe_clear_dir(state_dir / "upper")
@@ -195,5 +194,5 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
                 container_dir / "kento-hook",
             )
 
-    print(f"Scrubbed: {name}")
-    print("  Writable layer cleared, layers re-resolved from image.")
+    logger.info("Scrubbed: %s", name)
+    logger.info("  Writable layer cleared, layers re-resolved from image.")
