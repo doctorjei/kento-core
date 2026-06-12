@@ -1,9 +1,12 @@
 """Start a kento-managed instance."""
 
+import logging
 from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_container
 from kento.subprocess_util import run_or_die
+
+logger = logging.getLogger("kento")
 
 
 def start(name: str, *, container_dir: Path | None = None, mode: str | None = None) -> None:
@@ -20,7 +23,7 @@ def start(name: str, *, container_dir: Path | None = None, mode: str | None = No
     # be a no-op that reports the current state, not a traceback from
     # lxc-start/pct/qm complaining the container is already up.
     if is_running(container_dir, mode):
-        print(f"Already running: {name}")
+        logger.info("Already running: %s", name)
         return
 
     # Backfill the image-hold container if missing (self-heals guests created
@@ -59,4 +62,4 @@ def start(name: str, *, container_dir: Path | None = None, mode: str | None = No
             hint=f"run 'lxc-start -F -n {container_id}' in the foreground for details.",
         )
 
-    print(f"Started: {name}")
+    logger.info("Started: %s", name)

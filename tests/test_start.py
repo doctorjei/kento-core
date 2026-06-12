@@ -1,10 +1,12 @@
 """Tests for container start."""
 
+import logging
 import subprocess
 from unittest.mock import patch, MagicMock
 
 import pytest
 
+from kento.errors import SubprocessError
 from kento.start import start
 
 
@@ -111,12 +113,12 @@ class TestStartPveVm:
 
 
 class TestStartFailurePaths:
-    """Failures must print a clean error + hint and SystemExit(1),
+    """Failures must raise SubprocessError with a clean message,
     never a CalledProcessError traceback."""
 
     @patch("kento.start.is_running", return_value=False)
     @patch("kento.start.require_root")
-    def test_lxc_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path, capsys):
+    def test_lxc_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path):
         d = tmp_path / "mybox"
         d.mkdir()
         (d / "kento-image").write_text("debian:12\n")
@@ -127,18 +129,16 @@ class TestStartFailurePaths:
 
         with patch("kento.subprocess_util.subprocess.run", side_effect=_fail), \
              patch("kento.start.resolve_container", return_value=d):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(SubprocessError) as exc:
                 start("mybox")
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error: failed to start LXC container mybox" in captured.err
-        assert "boot failed" in captured.err
-        assert "hint:" in captured.err
-        assert "Traceback" not in captured.err
+        assert exc.value.returncode == 1
+        assert exc.value.cmd == ["lxc-start", "-n", "mybox"]
+        assert "start LXC container mybox" in str(exc.value)
+        assert "boot failed" in str(exc.value)
 
     @patch("kento.start.is_running", return_value=False)
     @patch("kento.start.require_root")
-    def test_pve_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path, capsys):
+    def test_pve_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path):
         d = tmp_path / "100"
         d.mkdir()
         (d / "kento-image").write_text("debian:12\n")
@@ -149,16 +149,15 @@ class TestStartFailurePaths:
 
         with patch("kento.subprocess_util.subprocess.run", side_effect=_fail), \
              patch("kento.start.resolve_container", return_value=d):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(SubprocessError) as exc:
                 start("mybox")
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error: failed to start PVE container mybox" in captured.err
-        assert "pct refused" in captured.err
+        assert exc.value.returncode == 1
+        assert "start PVE container mybox" in str(exc.value)
+        assert "pct refused" in str(exc.value)
 
     @patch("kento.start.is_running", return_value=False)
     @patch("kento.start.require_root")
-    def test_pve_vm_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path, capsys):
+    def test_pve_vm_start_failure_prints_clean_error(self, mock_root, mock_running, tmp_path):
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-image").write_text("myimage\n")
@@ -170,12 +169,11 @@ class TestStartFailurePaths:
 
         with patch("kento.subprocess_util.subprocess.run", side_effect=_fail), \
              patch("kento.start.resolve_container", return_value=d):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(SubprocessError) as exc:
                 start("test")
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error: failed to start PVE VM test" in captured.err
-        assert "qm refused" in captured.err
+        assert exc.value.returncode == 1
+        assert "start PVE VM test" in str(exc.value)
+        assert "qm refused" in str(exc.value)
 
 
 # --- Image-hold backfill on start ---
@@ -243,67 +241,67 @@ class TestStartIdempotent:
     @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
     @patch("kento.start.require_root")
     def test_lxc_already_running_is_no_op(self, mock_root, mock_run, mock_running,
-                                           tmp_path, capsys):
+                                           tmp_path, caplog):
         d = tmp_path / "mybox"
         d.mkdir()
         (d / "kento-image").write_text("debian:12\n")
         (d / "kento-mode").write_text("lxc\n")
 
-        with patch("kento.start.resolve_container", return_value=d):
+        with caplog.at_level(logging.INFO, logger="kento"), \
+             patch("kento.start.resolve_container", return_value=d):
             start("mybox")
 
         mock_run.assert_not_called()
-        captured = capsys.readouterr()
-        assert "Already running: mybox" in captured.out
+        assert "Already running: mybox" in caplog.text
 
     @patch("kento.start.is_running", return_value=True)
     @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
     @patch("kento.start.require_root")
     def test_pve_already_running_is_no_op(self, mock_root, mock_run, mock_running,
-                                           tmp_path, capsys):
+                                           tmp_path, caplog):
         d = tmp_path / "100"
         d.mkdir()
         (d / "kento-image").write_text("debian:12\n")
         (d / "kento-mode").write_text("pve\n")
 
-        with patch("kento.start.resolve_container", return_value=d):
+        with caplog.at_level(logging.INFO, logger="kento"), \
+             patch("kento.start.resolve_container", return_value=d):
             start("mybox")
 
         mock_run.assert_not_called()
-        captured = capsys.readouterr()
-        assert "Already running: mybox" in captured.out
+        assert "Already running: mybox" in caplog.text
 
     @patch("kento.start.is_running", return_value=True)
     @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
     @patch("kento.start.require_root")
     def test_pve_vm_already_running_is_no_op(self, mock_root, mock_run, mock_running,
-                                              tmp_path, capsys):
+                                              tmp_path, caplog):
         d = tmp_path / "test"
         d.mkdir()
         (d / "kento-image").write_text("myimage\n")
         (d / "kento-mode").write_text("pve-vm\n")
         (d / "kento-vmid").write_text("100\n")
 
-        with patch("kento.start.resolve_container", return_value=d):
+        with caplog.at_level(logging.INFO, logger="kento"), \
+             patch("kento.start.resolve_container", return_value=d):
             start("test")
 
         mock_run.assert_not_called()
-        captured = capsys.readouterr()
-        assert "Already running: test" in captured.out
+        assert "Already running: test" in caplog.text
 
     @patch("kento.start.is_running", return_value=True)
     @patch("kento.start.require_root")
     def test_vm_already_running_skips_start_vm(self, mock_root, mock_running,
-                                                 tmp_path, capsys):
+                                                 tmp_path, caplog):
         d = tmp_path / "testvm"
         d.mkdir()
         (d / "kento-image").write_text("debian:12\n")
         (d / "kento-mode").write_text("vm\n")
 
-        with patch("kento.start.resolve_container", return_value=d), \
+        with caplog.at_level(logging.INFO, logger="kento"), \
+             patch("kento.start.resolve_container", return_value=d), \
              patch("kento.vm.start_vm") as mock_start_vm:
             start("testvm")
 
         mock_start_vm.assert_not_called()
-        captured = capsys.readouterr()
-        assert "Already running: testvm" in captured.out
+        assert "Already running: testvm" in caplog.text
