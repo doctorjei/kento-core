@@ -1,7 +1,11 @@
 """Resolve OCI image layer paths via podman."""
 
+import logging
 import subprocess
-import sys
+
+from kento.errors import ImageNotFoundError
+
+logger = logging.getLogger("kento")
 
 
 def _podman_cmd() -> list[str]:
@@ -22,9 +26,10 @@ def resolve_layers(image: str) -> str:
         capture_output=True,
     )
     if result.returncode != 0:
-        print(f"Error: image not found in local store: {image}", file=sys.stderr)
-        print(f"  Pull it first:  kento pull {image}", file=sys.stderr)
-        sys.exit(1)
+        raise ImageNotFoundError(
+            f"image not found in local store: {image}"
+            f" — pull it first:  kento pull {image}"
+        )
 
     upper = subprocess.run(
         [*podman, "image", "inspect", image,

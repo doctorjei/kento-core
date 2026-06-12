@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from kento.errors import ImageNotFoundError
 from kento.layers import resolve_layers, ensure_image_hold, _podman_cmd
 
 
@@ -57,19 +58,18 @@ def test_resolve_layers_single(mock_run):
 @patch("kento.layers.subprocess.run")
 def test_resolve_layers_missing_image(mock_run):
     mock_run.side_effect = _mock_run_no_image
-    with pytest.raises(SystemExit):
+    with pytest.raises(ImageNotFoundError):
         resolve_layers("nonexistent:latest")
 
 
 @patch("kento.layers.subprocess.run")
-def test_resolve_layers_missing_image_hints_pull(mock_run, capsys):
+def test_resolve_layers_missing_image_hints_pull(mock_run):
     """F3: the missing-image error must point the user at `kento pull`."""
     mock_run.side_effect = _mock_run_no_image
-    with pytest.raises(SystemExit):
+    with pytest.raises(ImageNotFoundError, match="not found in local store"):
         resolve_layers("nonexistent:latest")
-    err = capsys.readouterr().err
-    assert "not found in local store" in err
-    assert "kento pull nonexistent:latest" in err
+    with pytest.raises(ImageNotFoundError, match="kento pull nonexistent:latest"):
+        resolve_layers("nonexistent:latest")
 
 
 class TestEnsureImageHold:
