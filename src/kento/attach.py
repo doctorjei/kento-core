@@ -12,6 +12,7 @@ Detach with Ctrl-] then Q. The escape handling lives in EscapeDetector, a
 pure state machine that is unit-testable without a tty or socket.
 """
 
+import logging
 import os
 import select
 import socket
@@ -20,6 +21,9 @@ import sys
 from pathlib import Path
 
 from kento import read_mode, require_root, resolve_any
+from kento.errors import StateError
+
+logger = logging.getLogger("kento")
 
 # Ctrl-] (GS, group separator) — the classic telnet/qm escape lead-in.
 ESCAPE_BYTE = 0x1d
@@ -88,14 +92,12 @@ def _relay_serial(name: str, container_dir: Path) -> int:
     """Interactive serial console relay for VM mode. Returns an exit code."""
     sock_path = container_dir / "serial.sock"
     if not sock_path.exists():
-        print(
-            f"Error: serial socket not found for '{name}' "
+        raise StateError(
+            f"serial socket not found for '{name}' "
             f"({sock_path}). The instance is not running, or it was started "
             f"by an older kento without serial support. Start it with "
-            f"'kento start {name}' and retry.",
-            file=sys.stderr,
+            f"'kento start {name}' and retry."
         )
-        return 1
 
     try:
         stdin_fd = sys.stdin.fileno()
@@ -104,29 +106,22 @@ def _relay_serial(name: str, container_dir: Path) -> int:
         # Redirected/replaced stdin with no real fd: not interactive.
         is_tty = False
     if not is_tty:
-        print(
-            "Error: 'kento attach' on a VM needs an interactive terminal "
+        raise StateError(
+            "'kento attach' on a VM needs an interactive terminal "
             "(stdin is not a tty). Run it from a real terminal, or use SSH "
-            "for non-interactive access.",
-            file=sys.stderr,
+            "for non-interactive access."
         )
-        return 1
 
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(str(sock_path))
     except OSError as exc:
-        print(
-            f"Error: could not connect to serial socket {sock_path}: {exc}. "
-            f"Is '{name}' running?",
-            file=sys.stderr,
-        )
-        return 1
+        raise StateError(
+            f"could not connect to serial socket {sock_path}: {exc}. "
+            f"Is '{name}' running?"
+        ) from exc
 
-    print(
-        f"Connected to {name}. Escape: Ctrl-] then Q",
-        file=sys.stderr,
-    )
+    logger.info("Connected to %s. Escape: Ctrl-] then Q", name)
 
     import termios
     import tty
@@ -165,7 +160,7 @@ def _relay_serial(name: str, container_dir: Path) -> int:
         termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
         sock.close()
         # Leave the cursor on a fresh line after raw-mode teardown.
-        print(f"\r\nDetached from {name}.", file=sys.stderr)
+        logger.info("\r\nDetached from %s.", name)
     return 0
 
 

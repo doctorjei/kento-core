@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from kento.attach import ESCAPE_BYTE, EscapeDetector, _write_all, attach
+from kento.errors import StateError
 
 
 def _ok(*args, **kwargs):
@@ -76,36 +77,30 @@ def test_attach_propagates_returncode(mock_root, mock_run, tmp_path):
 
 @patch("kento.attach.socket.socket")
 @patch("kento.attach.require_root")
-def test_attach_vm_missing_socket_errors(mock_root, mock_socket, tmp_path, capsys):
+def test_attach_vm_missing_socket_errors(mock_root, mock_socket, tmp_path):
     d = tmp_path / "testvm"
     d.mkdir()  # no serial.sock created
 
     with patch("kento.attach.resolve_any", return_value=(d, "vm")):
-        rc = attach("testvm")
+        with pytest.raises(StateError, match="serial socket not found"):
+            attach("testvm")
 
-    assert rc != 0
     mock_socket.assert_not_called()
-    captured = capsys.readouterr()
-    assert "serial socket not found" in captured.err
-    assert "testvm" in captured.err
 
 
 @patch("kento.attach.os.isatty", return_value=False)
 @patch("kento.attach.socket.socket")
 @patch("kento.attach.require_root")
-def test_attach_vm_non_tty_errors(mock_root, mock_socket, mock_isatty,
-                                  tmp_path, capsys):
+def test_attach_vm_non_tty_errors(mock_root, mock_socket, mock_isatty, tmp_path):
     d = tmp_path / "testvm"
     d.mkdir()
     (d / "serial.sock").write_bytes(b"")  # present, but stdin is not a tty
 
     with patch("kento.attach.resolve_any", return_value=(d, "vm")):
-        rc = attach("testvm")
+        with pytest.raises(StateError, match="interactive terminal"):
+            attach("testvm")
 
-    assert rc != 0
     mock_socket.assert_not_called()
-    captured = capsys.readouterr()
-    assert "interactive terminal" in captured.err
 
 
 # -- EscapeDetector state machine (pure, no tty/socket) --
