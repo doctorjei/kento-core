@@ -18,6 +18,7 @@ import pytest
 
 from kento.create import create
 from kento.destroy import destroy
+from kento.errors import SubprocessError
 
 
 # --- destroy -f with stop failure: must continue to cleanup ---
@@ -237,8 +238,7 @@ class TestSshKeygenFailure:
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_ssh_keygen_nonzero_exit(self, mock_root, mock_layers,
-                                      tmp_path, capsys):
+    def test_ssh_keygen_nonzero_exit(self, mock_root, mock_layers, tmp_path):
         def fake_run(cmd, *args, **kwargs):
             if cmd[0] == "ssh-keygen":
                 raise subprocess.CalledProcessError(
@@ -248,11 +248,9 @@ class TestSshKeygenFailure:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"), \
              patch("kento.create.subprocess.run", side_effect=fake_run):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(SubprocessError) as exc:
                 create("myimage:latest", name="test", mode="lxc",
                        ssh_host_keys=True)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error: ssh-keygen failed" in captured.err
-        assert "unable to write key" in captured.err
-        assert "Traceback" not in captured.err
+        msg = str(exc.value)
+        assert "ssh-keygen failed" in msg
+        assert "unable to write key" in msg

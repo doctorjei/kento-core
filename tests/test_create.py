@@ -1,6 +1,7 @@
 """Tests for container creation."""
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -8,6 +9,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from kento.create import create, generate_config
+from kento.errors import (InstanceExistsError, ModeError, StateError,
+                           SubprocessError, ValidationError)
 from kento.vm import VM_BASE
 
 
@@ -102,22 +105,21 @@ class TestGenerateConfig:
         assert "lxc.apparmor.profile = unconfined" in cfg
         assert "lxc.apparmor.profile = generated" not in cfg
 
-    def test_kento_apparmor_profile_rejects_bogus_value(self, tmp_path, monkeypatch, capsys):
+    def test_kento_apparmor_profile_rejects_bogus_value(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KENTO_APPARMOR_PROFILE", "bogus")
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValidationError, match="must be 'generated' or 'unconfined'"):
             generate_config("test", tmp_path, mode="lxc")
-        assert "must be 'generated' or 'unconfined'" in capsys.readouterr().err
 
     def test_generated_preflight_fails_closed_when_parser_absent(
-            self, tmp_path, monkeypatch, capsys):
+            self, tmp_path, monkeypatch):
         # AppArmor active in kernel + apparmor_parser absent + default
         # `generated` profile → fail-closed pre-flight error (would otherwise
         # hard-fail at lxc-start). Patch the detection helpers for determinism.
         monkeypatch.setattr("kento.create._apparmor_active", lambda: True)
         monkeypatch.setattr("kento.create._apparmor_parser_present", lambda: False)
-        with pytest.raises(SystemExit):
+        with pytest.raises(StateError) as exc:
             generate_config("test", tmp_path, mode="lxc")
-        err = capsys.readouterr().err
+        err = str(exc.value)
         assert "apparmor_parser" in err
         assert "KENTO_APPARMOR_PROFILE=unconfined" in err
 
@@ -223,7 +225,7 @@ class TestCreate:
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
             create("myimage:latest", name="test", mode="lxc")
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceExistsError):
                 create("myimage:latest", name="test", mode="lxc")
 
     @patch("kento.create.subprocess.run")
@@ -296,7 +298,7 @@ class TestCreate:
                                         mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ModeError):
                 create("myimage:latest", name="test", mode="lxc", vmid=100)
 
     @patch("kento.create.subprocess.run")
@@ -378,7 +380,7 @@ class TestCreate:
                    Path(f"/etc/pve/lxc/{vmid}.conf")):
             (tmp_path / "vm").mkdir()
             create("myimage:latest", name="dup", mode="pve", vmid=100)
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceExistsError):
                 create("myimage:latest", name="dup", mode="pve", vmid=101)
 
     @patch("kento.create.subprocess.run")
@@ -424,7 +426,7 @@ class TestCreate:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
             create("myimage:latest", name="shared", mode="lxc")
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceExistsError):
                 create("myimage:latest", name="shared", mode="vm")
 
     @patch("kento.create.subprocess.run")
@@ -489,7 +491,7 @@ class TestCreate:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
             create("myimage:latest", name="shared", mode="vm")
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceExistsError):
                 create("myimage:latest", name="shared", mode="vm", force=True)
 
     @patch("kento.create.subprocess.run")
@@ -508,7 +510,7 @@ class TestCreate:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
             create("myimage:latest", name="shared", mode="lxc")
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceExistsError):
                 create("myimage:latest", name="shared", mode="lxc",
                        force=True)
 
@@ -527,7 +529,7 @@ class TestCreate:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n):
             create("myimage:latest", name="shared", mode="vm")
-            with pytest.raises(SystemExit):
+            with pytest.raises(InstanceExistsError):
                 create("myimage:latest", name="shared", mode="lxc",
                        )
 
@@ -631,8 +633,7 @@ class TestStaticIp:
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_ip_with_plain_vm_rejected(self, mock_root, mock_layers, tmp_path,
-                                        capsys):
+    def test_ip_with_plain_vm_rejected(self, mock_root, mock_layers, tmp_path):
         """F10: Plain VM only supports usermode networking (F3), and --ip now
         requires bridge (F10) — so plain VM + --ip is now unreachable and
         should be rejected with a clear message.
@@ -642,58 +643,49 @@ class TestStaticIp:
 
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError, match="--ip requires bridge networking"):
                 create("myimage:latest", name="test", mode="vm",
                        ip="192.168.0.160/22", gateway="192.168.0.1")
-        err = capsys.readouterr().err
-        assert "--ip requires bridge networking" in err
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_ip_with_usermode_rejected(self, mock_root, mock_layers, tmp_path,
-                                        capsys):
+    def test_ip_with_usermode_rejected(self, mock_root, mock_layers, tmp_path):
         """F10: --ip + explicit --network usermode is rejected."""
         vm_dir = tmp_path / "vm"
         vm_dir.mkdir()
 
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError, match="--ip requires bridge networking"):
                 create("myimage:latest", name="test", mode="vm",
                        net_type="usermode", ip="10.0.0.5/24")
-        err = capsys.readouterr().err
-        assert "--ip requires bridge networking" in err
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_gateway_with_usermode_rejected(self, mock_root, mock_layers,
-                                             tmp_path, capsys):
+                                             tmp_path):
         """F10: --gateway + usermode is rejected (even with --ip)."""
         vm_dir = tmp_path / "vm"
         vm_dir.mkdir()
 
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError, match="requires bridge networking"):
                 create("myimage:latest", name="test", mode="vm",
                        net_type="usermode", ip="10.0.0.5/24",
                        gateway="10.0.0.1")
-        err = capsys.readouterr().err
-        assert "requires bridge networking" in err
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_ip_with_network_none_rejected(self, mock_root, mock_layers,
-                                            mock_run, tmp_path, capsys):
+                                            mock_run, tmp_path):
         """F10: --ip + --network none is rejected."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError, match="--ip requires bridge networking"):
                 create("myimage:latest", name="test", mode="lxc",
                        net_type="none", ip="10.0.0.5/24")
-        err = capsys.readouterr().err
-        assert "--ip requires bridge networking" in err
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -702,7 +694,7 @@ class TestStaticIp:
                                         mock_run, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError):
                 create("myimage:latest", name="test", mode="lxc", gateway="192.168.0.1")
 
     @patch("kento.create.subprocess.run")
@@ -811,14 +803,13 @@ class TestGuestConfig:
     @patch("kento.create.require_root")
     def test_ssh_keys_missing_file_errors(self, mock_root, mock_layers,
                                             mock_run, tmp_path):
-        """Missing --ssh-key path exits 1."""
+        """Missing --ssh-key path raises ValidationError."""
         missing = tmp_path / "does-not-exist.pub"
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(ValidationError, match="SSH key file not found"):
                 create("myimage:latest", name="test", mode="lxc",
                        ssh_keys=[str(missing)])
-            assert exc.value.code == 1
         # Container dir should not have been created yet
         assert not (tmp_path / "test" / "kento-authorized-keys").exists()
 
@@ -882,18 +873,19 @@ class TestGuestConfig:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_cloudinit_root_ssh_warns(self, mock_root, mock_layers, mock_run,
-                                      mock_ci, tmp_path, capsys):
+                                      mock_ci, tmp_path, caplog):
         """Injecting root keys on a cloud-init image emits a non-fatal advisory."""
         key = tmp_path / "id.pub"
         key.write_text("ssh-rsa AAAA user@host\n")
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.create.LXC_BASE", tmp_path), \
+                 patch("kento.create.upper_base", return_value=tmp_path / "test"):
+                create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
 
-        err = capsys.readouterr().err
-        assert "injecting SSH keys for 'root' on a cloud-init image" in err
-        assert "--ssh-key-user" in err
-        assert "debian" in err
+        warn_msgs = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        assert "injecting SSH keys for 'root' on a cloud-init image" in warn_msgs
+        assert "--ssh-key-user" in warn_msgs
+        assert "debian" in warn_msgs
         # Advisory only: create still proceeds (keys written).
         assert (tmp_path / "test" / "kento-authorized-keys").is_file()
 
@@ -902,44 +894,50 @@ class TestGuestConfig:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_cloudinit_non_root_user_no_warn(self, mock_root, mock_layers,
-                                             mock_run, mock_ci, tmp_path, capsys):
+                                             mock_run, mock_ci, tmp_path, caplog):
         """A non-root --ssh-key-user on a cloud-init image does not warn."""
         key = tmp_path / "id.pub"
         key.write_text("ssh-rsa AAAA user@host\n")
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc",
-                   ssh_keys=[str(key)], ssh_key_user="debian")
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.create.LXC_BASE", tmp_path), \
+                 patch("kento.create.upper_base", return_value=tmp_path / "test"):
+                create("myimage:latest", name="test", mode="lxc",
+                       ssh_keys=[str(key)], ssh_key_user="debian")
 
-        assert "cloud-init image" not in capsys.readouterr().err
+        warn_msgs = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        assert "cloud-init image" not in warn_msgs
 
     @patch("kento.create.detect_cloudinit", return_value=True)
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_cloudinit_no_keys_no_warn(self, mock_root, mock_layers, mock_run,
-                                       mock_ci, tmp_path, capsys):
+                                       mock_ci, tmp_path, caplog):
         """No injected keys → no advisory even on a cloud-init image."""
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc")
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.create.LXC_BASE", tmp_path), \
+                 patch("kento.create.upper_base", return_value=tmp_path / "test"):
+                create("myimage:latest", name="test", mode="lxc")
 
-        assert "cloud-init image" not in capsys.readouterr().err
+        warn_msgs = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        assert "cloud-init image" not in warn_msgs
 
     @patch("kento.create.detect_cloudinit", return_value=False)
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_non_cloudinit_root_no_warn(self, mock_root, mock_layers, mock_run,
-                                        mock_ci, tmp_path, capsys):
+                                        mock_ci, tmp_path, caplog):
         """A non-cloud image gets no advisory even for root key injection."""
         key = tmp_path / "id.pub"
         key.write_text("ssh-rsa AAAA user@host\n")
-        with patch("kento.create.LXC_BASE", tmp_path), \
-             patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            with patch("kento.create.LXC_BASE", tmp_path), \
+                 patch("kento.create.upper_base", return_value=tmp_path / "test"):
+                create("myimage:latest", name="test", mode="lxc", ssh_keys=[str(key)])
 
-        assert "cloud-init image" not in capsys.readouterr().err
+        warn_msgs = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        assert "cloud-init image" not in warn_msgs
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -1040,28 +1038,26 @@ class TestSSHHostKeys:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_ssh_host_key_dir_missing_errors(self, mock_root, mock_layers, tmp_path):
-        """--ssh-host-key-dir with missing directory exits 1."""
+        """--ssh-host-key-dir with missing directory raises ValidationError."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(ValidationError, match="SSH host key directory not found"):
                 create("myimage:latest", name="test", mode="lxc",
                        ssh_host_key_dir=str(tmp_path / "nonexistent"))
-            assert exc.value.code == 1
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_ssh_host_key_dir_no_keys_errors(self, mock_root, mock_layers, tmp_path):
-        """--ssh-host-key-dir with no ssh_host_*_key files exits 1."""
+        """--ssh-host-key-dir with no ssh_host_*_key files raises ValidationError."""
         src = tmp_path / "empty-keys"
         src.mkdir()
         (src / "some_file.txt").write_text("not a key")
 
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(ValidationError, match="no ssh_host_\\*_key files found"):
                 create("myimage:latest", name="test", mode="lxc",
                        ssh_host_key_dir=str(src))
-            assert exc.value.code == 1
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -1080,7 +1076,7 @@ class TestSSHHostKeys:
     @patch("kento.create.require_root")
     def test_ssh_keygen_not_found_errors(self, mock_root, mock_layers,
                                           mock_run, tmp_path):
-        """If ssh-keygen is missing, a clear error is printed."""
+        """If ssh-keygen is missing, SubprocessError is raised."""
         def _side_effect(args, **kwargs):
             if args[0] == "ssh-keygen":
                 raise FileNotFoundError("ssh-keygen")
@@ -1088,9 +1084,8 @@ class TestSSHHostKeys:
         mock_run.side_effect = _side_effect
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(SubprocessError, match="ssh-keygen not found"):
                 create("myimage:latest", name="test", mode="lxc", ssh_host_keys=True)
-            assert exc.value.code == 1
 
 
 class TestVmCreate:
@@ -1166,7 +1161,7 @@ class TestVmCreate:
 
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ModeError):
                 create("myimage:latest", name="test", mode="vm", vmid=100)
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
@@ -1683,7 +1678,7 @@ class TestLxcPortForwarding:
         """--port with net_type=none errors for LXC mode."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError):
                 create("myimage:latest", name="test", mode="lxc",
                        port="10022:22", net_type="none")
 
@@ -1712,14 +1707,13 @@ class TestLxcPortForwarding:
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            with pytest.raises(SystemExit):
+            with pytest.raises((ModeError, ValidationError)):
                 create("myimage:latest", name="test", mode="vm",
                        port="10022:22", net_type="bridge", bridge="vmbr0")
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
-    def test_vm_bridge_named_rejected(self, mock_root, mock_layers,
-                                       tmp_path, capsys):
+    def test_vm_bridge_named_rejected(self, mock_root, mock_layers, tmp_path):
         """Plain VM + --network bridge=<name> is rejected (F3: start_vm has
         no bridge/tap support, silently boots with zero NICs otherwise)."""
         vm_dir = tmp_path / "vm"
@@ -1727,10 +1721,10 @@ class TestLxcPortForwarding:
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ModeError) as exc:
                 create("myimage:latest", name="test", mode="vm",
                        net_type="bridge", bridge="vmbr0")
-        err = capsys.readouterr().err
+        err = str(exc.value)
         assert "plain VM mode does not support bridge networking" in err
         # Guidance must lead with usermode (most users aren't on PVE).
         assert "usermode" in err
@@ -1738,7 +1732,7 @@ class TestLxcPortForwarding:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_vm_bridge_autodetect_rejected(self, mock_root, mock_layers,
-                                            tmp_path, capsys):
+                                            tmp_path):
         """Plain VM + --network bridge (no name, auto-detect) is rejected.
 
         In practice resolve_network() already defaults plain VM to usermode
@@ -1753,18 +1747,18 @@ class TestLxcPortForwarding:
              patch("kento.create.upper_base", return_value=vm_dir / "test"), \
              patch("kento.detect_bridge", return_value="lxcbr0"), \
              patch("kento._bridge_exists", return_value=True):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ModeError) as exc:
                 create("myimage:latest", name="test", mode="vm",
                        net_type="bridge")
-        err = capsys.readouterr().err
+        err = str(exc.value)
         assert "plain VM mode does not support bridge networking" in err
         assert "usermode" in err
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_vm_bridge_with_port_still_rejected(self, mock_root, mock_layers,
-                                                 tmp_path, capsys):
-        """Plain VM + bridge + port: whichever check fires first, exit 1.
+                                                 tmp_path):
+        """Plain VM + bridge + port: whichever check fires first, raises.
 
         The new F3 block fires before the existing bridge+port block, but
         either way the user must see an error.
@@ -1774,7 +1768,7 @@ class TestLxcPortForwarding:
         with patch("kento.create.VM_BASE", vm_dir), \
              patch("kento.create.upper_base", return_value=vm_dir / "test"), \
              patch("kento._bridge_exists", return_value=True):
-            with pytest.raises(SystemExit):
+            with pytest.raises((ModeError, ValidationError)):
                 create("myimage:latest", name="test", mode="vm",
                        port="10022:22", net_type="bridge", bridge="vmbr0")
 
@@ -1940,18 +1934,17 @@ class TestCloudInitMode:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_cloudinit_forced_without_cloud_init_errors(self, mock_root, mock_layers,
-                                                         mock_run, tmp_path, capsys):
+                                                         mock_run, tmp_path):
         """F14: forcing cloudinit mode without cloud-init in image is a hard error."""
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="lxc",
                        config_mode="cloudinit")
-            assert exc.value.code == 1
 
-        captured = capsys.readouterr()
-        assert "requires cloud-init" in captured.err
-        assert "--config-mode injection" in captured.err
+        err = str(exc.value)
+        assert "requires cloud-init" in err
+        assert "--config-mode injection" in err
         # Half-created container is cleaned up — no orphaned dir left behind.
         assert not (tmp_path / "test").exists()
 
@@ -2329,10 +2322,9 @@ class TestCreateRollback:
         not attempt rollback — there's nothing to roll back."""
         missing = tmp_path / "absent.pub"
         with patch("kento.create.LXC_BASE", tmp_path):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(ValidationError):
                 create("myimage:latest", name="test", mode="lxc",
                        ssh_keys=[str(missing)])
-        assert exc.value.code == 1
         # Nothing got created.
         assert not (tmp_path / "test").exists()
 
@@ -2439,15 +2431,12 @@ class TestEnvValidation:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_malformed_env_rejected(self, mock_root, mock_layers, mock_run,
-                                    bad, tmp_path, capsys):
+                                    bad, tmp_path):
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit) as exc:
+            with pytest.raises(ValidationError):
                 create("myimage:latest", name="test", mode="lxc", env=[bad])
 
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert err.startswith("Error:") or "\nError:" in err
         # Validation runs before any seed/state write, so nothing is left behind.
         assert not (tmp_path / "test").exists()
 
@@ -2455,16 +2444,14 @@ class TestEnvValidation:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_newline_env_rejected_before_state(self, mock_root, mock_layers,
-                                               mock_run, tmp_path, capsys):
+                                               mock_run, tmp_path):
         # The headline case: a newline-laden entry would terminate the
         # cloud-init `content: |` block early and silently drop ssh keys etc.
         with patch("kento.create.LXC_BASE", tmp_path), \
              patch("kento.create.upper_base", return_value=tmp_path / "test"):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError, match="control character"):
                 create("myimage:latest", name="test", mode="lxc",
                        env=["A=1\nmalformed"])
-        err = capsys.readouterr().err
-        assert "Error:" in err and "control character" in err
         # No instance directory and no seed should exist.
         assert not (tmp_path / "test").exists()
 

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from kento.create import create
+from kento.errors import ModeError, ValidationError
 
 
 # ---------- Persistence / storage tests ----------
@@ -56,17 +57,16 @@ class TestQemuArgStorage:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_denylisted_qemu_arg_kernel_rejected(self, mock_root, mock_layers,
-                                                  mock_run, tmp_path, capsys):
+                                                  mock_run, tmp_path):
         vm_base = tmp_path / "vm"
         vm_base.mkdir()
         with patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or vm_base) / n):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="vm",
                        qemu_args=["-kernel /other/vmlinuz"])
-        err = capsys.readouterr().err
-        assert "kento manages '-kernel'" in err
+        assert "kento manages '-kernel'" in str(exc.value)
         # nothing should have been written
         assert not (vm_base / "test").exists() or \
                not (vm_base / "test" / "kento-qemu-args").exists()
@@ -75,34 +75,32 @@ class TestQemuArgStorage:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_denylisted_qemu_arg_initrd_rejected(self, mock_root, mock_layers,
-                                                  mock_run, tmp_path, capsys):
+                                                  mock_run, tmp_path):
         vm_base = tmp_path / "vm"
         vm_base.mkdir()
         with patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or vm_base) / n):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="vm",
                        qemu_args=["-initrd /other/initramfs"])
-        err = capsys.readouterr().err
-        assert "kento manages '-initrd'" in err
+        assert "kento manages '-initrd'" in str(exc.value)
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_denylisted_qemu_arg_memfd_rejected(self, mock_root, mock_layers,
-                                                 mock_run, tmp_path, capsys):
+                                                 mock_run, tmp_path):
         """memory-backend-memfd is kento-managed (scrub resyncs size=)."""
         vm_base = tmp_path / "vm"
         vm_base.mkdir()
         with patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or vm_base) / n):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="vm",
                        qemu_args=["-object memory-backend-memfd,id=mem2,size=1G"])
-        err = capsys.readouterr().err
-        assert "memory-backend-memfd" in err
+        assert "memory-backend-memfd" in str(exc.value)
 
 
 class TestLxcArgStorage:
@@ -148,7 +146,7 @@ class TestLxcArgStorage:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_lxc_arg_denied_key_rejected(self, mock_root, mock_layers,
-                                         mock_run, tmp_path, capsys):
+                                         mock_run, tmp_path):
         """A denied structural key (lxc.rootfs.path) kills the create."""
         lxc_base = tmp_path / "lxc"
         lxc_base.mkdir()
@@ -156,10 +154,10 @@ class TestLxcArgStorage:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n), \
              patch("kento.pve.is_pve", return_value=False):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="lxc",
                        lxc_args=["lxc.rootfs.path = /evil"])
-        err = capsys.readouterr().err
+        err = str(exc.value)
         assert "lxc.rootfs.path" in err
         assert "kento manages" in err
 
@@ -167,7 +165,7 @@ class TestLxcArgStorage:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_lxc_arg_denied_net_prefix_rejected(self, mock_root, mock_layers,
-                                                mock_run, tmp_path, capsys):
+                                                mock_run, tmp_path):
         """The lxc.net. prefix denial catches lxc.net.0.* keys."""
         lxc_base = tmp_path / "lxc"
         lxc_base.mkdir()
@@ -175,32 +173,32 @@ class TestLxcArgStorage:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n), \
              patch("kento.pve.is_pve", return_value=False):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="lxc",
                        lxc_args=["lxc.net.0.type = phys"])
-        assert "lxc.net." in capsys.readouterr().err
+        assert "lxc.net." in str(exc.value)
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_lxc_arg_rejected_on_vm_mode(self, mock_root, mock_layers,
-                                         mock_run, tmp_path, capsys):
+                                         mock_run, tmp_path):
         vm_base = tmp_path / "vm"
         vm_base.mkdir()
         with patch("kento.create.VM_BASE", vm_base), \
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or vm_base) / n), \
              patch("kento.pve.is_pve", return_value=False):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ModeError) as exc:
                 create("myimage:latest", name="test", mode="vm",
                        lxc_args=["lxc.cap.drop = sys_module"])
-        assert "not applicable to VM modes" in capsys.readouterr().err
+        assert "not applicable to VM modes" in str(exc.value)
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_lxc_arg_rejected_on_pve_lxc_mode(self, mock_root, mock_layers,
-                                              mock_run, tmp_path, capsys):
+                                              mock_run, tmp_path):
         pve = tmp_path / "pve"
         pve.mkdir()
         (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
@@ -210,11 +208,10 @@ class TestLxcArgStorage:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n), \
              patch("kento.pve.PVE_DIR", pve):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ModeError) as exc:
                 create("myimage:latest", name="test", mode="pve",
                        lxc_args=["lxc.cap.drop = sys_module"])
-        err = capsys.readouterr().err
-        assert "--lxc-arg is not supported on a PVE host" in err
+        assert "--lxc-arg is not supported on a PVE host" in str(exc.value)
 
 
 class TestPveArgStorage:
@@ -248,7 +245,7 @@ class TestPveArgStorage:
     @patch("kento.create.resolve_layers", return_value="/a:/b")
     @patch("kento.create.require_root")
     def test_pve_args_denylist_rootfs_rejected(self, mock_root, mock_layers,
-                                                mock_run, tmp_path, capsys):
+                                                mock_run, tmp_path):
         pve = tmp_path / "pve"
         pve.mkdir()
         (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
@@ -259,10 +256,10 @@ class TestPveArgStorage:
              patch("kento.create.upper_base",
                    side_effect=lambda n, b=None: (b or lxc_base) / n), \
              patch("kento.pve.PVE_DIR", pve):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ValidationError) as exc:
                 create("myimage:latest", name="test", mode="pve",
                        pve_args=["rootfs: local-lvm:vm-100-disk-0"])
-        err = capsys.readouterr().err
+        err = str(exc.value)
         assert "rootfs:" in err
         assert "kento manages" in err
 

@@ -1,9 +1,9 @@
 """Create an instance backed by an OCI image."""
 
+import logging
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from kento import (LXC_BASE, VM_BASE, _scan_namespace, next_instance_name,
@@ -12,10 +12,14 @@ from kento.cloudinit import detect_cloudinit, write_seed
 from kento.defaults import (LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING,
                             LXC_ARG_DENYLIST, PVE_ARG_DENYLIST,
                             QEMU_ARG_DENYLIST)
+from kento.errors import (InstanceExistsError, ModeError, StateError,
+                          SubprocessError, ValidationError)
 from kento.hook import write_hook
 from kento.inject import write_inject
 from kento.layers import resolve_layers
 from kento.locking import kento_lock
+
+logger = logging.getLogger("kento")
 
 
 def _apparmor_active() -> bool:
@@ -75,11 +79,12 @@ def _validate_qemu_args(qemu_args: list[str]) -> None:
     for arg in qemu_args:
         for needle in QEMU_ARG_DENYLIST:
             if needle in arg:
-                print(f"Error: kento manages {needle!r} directly — "
-                      f"--qemu-arg {arg!r} would collide with kento's own "
-                      "QEMU argv. Drop the flag or file an issue if you "
-                      "need it overridable.", file=sys.stderr)
-                sys.exit(1)
+                raise ValidationError(
+                    f"kento manages {needle!r} directly — "
+                    f"--qemu-arg {arg!r} would collide with kento's own "
+                    "QEMU argv. Drop the flag or file an issue if you "
+                    "need it overridable."
+                )
 
 
 def _validate_pve_args(pve_args: list[str]) -> None:
@@ -90,11 +95,12 @@ def _validate_pve_args(pve_args: list[str]) -> None:
     for arg in pve_args:
         for needle in PVE_ARG_DENYLIST:
             if needle in arg:
-                print(f"Error: kento manages {needle!r} directly — "
-                      f"--pve-arg {arg!r} would collide with kento's own "
-                      "PVE config. Drop the flag or file an issue if you "
-                      "need it overridable.", file=sys.stderr)
-                sys.exit(1)
+                raise ValidationError(
+                    f"kento manages {needle!r} directly — "
+                    f"--pve-arg {arg!r} would collide with kento's own "
+                    "PVE config. Drop the flag or file an issue if you "
+                    "need it overridable."
+                )
 
 
 def _validate_lxc_args(lxc_args: list[str]) -> None:
@@ -108,11 +114,12 @@ def _validate_lxc_args(lxc_args: list[str]) -> None:
     for arg in lxc_args:
         for needle in LXC_ARG_DENYLIST:
             if needle in arg:
-                print(f"Error: kento manages {needle!r} directly — "
-                      f"--lxc-arg {arg!r} would collide with kento's own "
-                      "plain-LXC config. Drop the flag or file an issue if "
-                      "you need it overridable.", file=sys.stderr)
-                sys.exit(1)
+                raise ValidationError(
+                    f"kento manages {needle!r} directly — "
+                    f"--lxc-arg {arg!r} would collide with kento's own "
+                    "plain-LXC config. Drop the flag or file an issue if "
+                    "you need it overridable."
+                )
 
 
 def _validate_env(env: list[str]) -> None:
@@ -131,19 +138,20 @@ def _validate_env(env: list[str]) -> None:
     key_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     for e in env:
         if any(ord(c) < 0x20 or ord(c) == 0x7f for c in e):
-            print(f"Error: --env value contains a control character: {e!r}. "
-                  "Each --env must be a single-line KEY=VALUE pair.",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"--env value contains a control character: {e!r}. "
+                "Each --env must be a single-line KEY=VALUE pair."
+            )
         if "=" not in e:
-            print(f"Error: --env value is not KEY=VALUE (missing '='): {e!r}.",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"--env value is not KEY=VALUE (missing '='): {e!r}."
+            )
         key = e.split("=", 1)[0]
         if not key_re.match(key):
-            print(f"Error: --env key {key!r} is invalid in {e!r}; keys must "
-                  "match [A-Za-z_][A-Za-z0-9_]*.", file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"--env key {key!r} is invalid in {e!r}; keys must "
+                "match [A-Za-z_][A-Za-z0-9_]*."
+            )
 
 
 def _run_cleanup(undos: list[tuple[str, object]]) -> None:
@@ -158,8 +166,7 @@ def _run_cleanup(undos: list[tuple[str, object]]) -> None:
         try:
             undo()
         except Exception as cleanup_err:  # noqa: BLE001 — best-effort cleanup
-            print(f"Warning: rollback step {label!r} failed: {cleanup_err}",
-                  file=sys.stderr)
+            logger.warning("rollback step %r failed: %s", label, cleanup_err)
 
 
 def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
@@ -245,9 +252,10 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
     if mode == "lxc":
         profile = os.environ.get("KENTO_APPARMOR_PROFILE", "generated")
         if profile not in ("generated", "unconfined"):
-            print(f"Error: KENTO_APPARMOR_PROFILE must be 'generated' or "
-                  f"'unconfined', got {profile!r}", file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"KENTO_APPARMOR_PROFILE must be 'generated' or "
+                f"'unconfined', got {profile!r}"
+            )
         # Fail-closed pre-flight: `generated` is loaded by apparmor_parser at
         # lxc-start time on a host whose kernel has AppArmor active as an LSM.
         # If the parser is absent the container HARD-FAILS at start ("Cannot
@@ -257,16 +265,14 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         # Only `generated` needs the parser; explicit `unconfined` is fine.
         if (profile == "generated" and _apparmor_active()
                 and not _apparmor_parser_present()):
-            print(
-                "Error: AppArmor is active in this kernel but 'apparmor_parser' is not\n"
+            raise StateError(
+                "AppArmor is active in this kernel but 'apparmor_parser' is not\n"
                 "installed, so LXC's default 'generated' profile cannot be loaded and the\n"
                 "instance would fail to start. Fix one of:\n"
                 "  - install the 'apparmor' package (provides apparmor_parser), or\n"
                 "  - set KENTO_APPARMOR_PROFILE=unconfined (namespaces/cgroups still\n"
-                "    enforce the host/container boundary; in-kernel MAC confinement off).",
-                file=sys.stderr,
+                "    enforce the host/container boundary; in-kernel MAC confinement off)."
             )
-            sys.exit(1)
         lines.append(f"lxc.apparmor.profile = {profile}")
         lines.append("lxc.apparmor.allow_nesting = 1")
         lines.append("lxc.apparmor.allow_incomplete = 1")
@@ -357,14 +363,17 @@ def _generate_ssh_host_keys(dest_dir: Path) -> None:
         try:
             subprocess.run(cmd, check=True, capture_output=True)
         except FileNotFoundError:
-            print("Error: ssh-keygen not found. Install openssh-client to use --ssh-host-keys.",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise SubprocessError(
+                "ssh-keygen not found. Install openssh-client to use --ssh-host-keys.",
+                cmd=cmd,
+            )
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or b"").decode("utf-8", "replace").strip()
-            print(f"Error: ssh-keygen failed for {key_type} host key: {stderr}",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise SubprocessError(
+                f"ssh-keygen failed for {key_type} host key: {stderr}",
+                cmd=cmd,
+                returncode=e.returncode,
+            )
 
 
 def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
@@ -420,9 +429,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         for key_path in ssh_keys:
             p = Path(key_path)
             if not p.is_file():
-                print(f"Error: SSH key file not found: {key_path}",
-                      file=sys.stderr)
-                sys.exit(1)
+                raise ValidationError(f"SSH key file not found: {key_path}")
             parts.append(p.read_text())
         ssh_key_contents = "\n".join(parts)
         if not ssh_key_contents.endswith("\n"):
@@ -432,22 +439,21 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     if ssh_host_key_dir is not None:
         src = Path(ssh_host_key_dir)
         if not src.is_dir():
-            print(f"Error: SSH host key directory not found: {ssh_host_key_dir}",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"SSH host key directory not found: {ssh_host_key_dir}"
+            )
         has_key = any(f.name.startswith("ssh_host_") and f.name.endswith("_key")
                       and f.is_file() for f in src.iterdir())
         if not has_key:
-            print(f"Error: no ssh_host_*_key files found in {ssh_host_key_dir}",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"no ssh_host_*_key files found in {ssh_host_key_dir}"
+            )
 
     # Resolve PVE promotion
     from kento.pve import is_pve
     if pve is True:
         if not is_pve():
-            print("Error: --pve specified but this is not a PVE host", file=sys.stderr)
-            sys.exit(1)
+            raise ModeError("--pve specified but this is not a PVE host")
         if mode == "vm":
             mode = "pve-vm"
         else:
@@ -468,14 +474,16 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # silently writing kento-lxc-args that nothing would ever consume.
     if lxc_args:
         if mode == "pve":
-            print("Error: --lxc-arg is not supported on a PVE host. On PVE "
-                  "the LXC config is the PVE config; use --pve-arg, which "
-                  "carries raw lxc.* lines.", file=sys.stderr)
-            sys.exit(1)
+            raise ModeError(
+                "--lxc-arg is not supported on a PVE host. On PVE "
+                "the LXC config is the PVE config; use --pve-arg, which "
+                "carries raw lxc.* lines."
+            )
         if mode in ("vm", "pve-vm"):
-            print("Error: --lxc-arg is not applicable to VM modes (no native "
-                  "LXC config).", file=sys.stderr)
-            sys.exit(1)
+            raise ModeError(
+                "--lxc-arg is not applicable to VM modes (no native "
+                "LXC config)."
+            )
 
     # Pre-validate PVE snippets storage (before any filesystem writes).
     # pve-vm always needs it; pve-lxc needs it when port/memory/cores set
@@ -499,14 +507,12 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # tap device; only -netdev user is implemented). Reject bridge networking
     # up front so the VM doesn't boot with zero NICs and no warning.
     if mode == "vm" and network["type"] == "bridge":
-        print("Error: plain VM mode does not support bridge networking.",
-              file=sys.stderr)
-        print("  Use --network usermode (default) for outbound access and",
-              file=sys.stderr)
-        print("  port forwarding via --port, or run on a PVE host for",
-              file=sys.stderr)
-        print("  bridged VMs.", file=sys.stderr)
-        sys.exit(1)
+        raise ModeError(
+            "plain VM mode does not support bridge networking.\n"
+            "  Use --network usermode (default) for outbound access and\n"
+            "  port forwarding via --port, or run on a PVE host for\n"
+            "  bridged VMs."
+        )
 
     # Determine base directory for this mode
     base_dir = VM_BASE if mode in ("vm", "pve-vm") else LXC_BASE
@@ -514,21 +520,19 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # Validate mode-specific flags (pure validation — no state mutation, so
     # no need to hold the lock around these).
     if vmid and mode not in ("pve", "pve-vm"):
-        print(f"Error: --vmid cannot be used with {mode.upper()} mode", file=sys.stderr)
-        sys.exit(1)
+        raise ModeError(f"--vmid cannot be used with {mode.upper()} mode")
     if port is not None and mode in ("lxc", "pve"):
         if network["type"] != "bridge":
-            print("Error: --port requires bridge networking for LXC/PVE mode",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                "--port requires bridge networking for LXC/PVE mode"
+            )
     if port is not None and mode in ("vm", "pve-vm"):
         if network["type"] == "bridge":
-            print("Error: --port cannot be used with bridge networking in VM mode",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                "--port cannot be used with bridge networking in VM mode"
+            )
     if gateway and not ip:
-        print("Error: --gateway requires --ip", file=sys.stderr)
-        sys.exit(1)
+        raise ValidationError("--gateway requires --ip")
     # F10: --ip / --gateway only make sense with bridge networking. Silent
     # acceptance with usermode/host/none produced broken configs: usermode
     # gets a conflicting DHCP lease from QEMU's built-in 10.0.2.x while
@@ -536,15 +540,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # interface for the address to bind to.
     if network["type"] in ("none", "host", "usermode"):
         if ip:
-            print(f"Error: --ip requires bridge networking; got --network {network['type']}.",
-                  file=sys.stderr)
-            print("  Use --network bridge (or bridge=<name>) for a static IP, "
-                  "or remove --ip.", file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"--ip requires bridge networking; got --network {network['type']}.\n"
+                "  Use --network bridge (or bridge=<name>) for a static IP, "
+                "or remove --ip."
+            )
         if gateway:
-            print(f"Error: --gateway requires bridge networking; got --network {network['type']}.",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise ValidationError(
+                f"--gateway requires bridge networking; got --network {network['type']}."
+            )
 
     # Resolve layers (validates image exists). Done BEFORE the lock and before
     # any directory is created: image resolution depends only on ``image``, not
@@ -593,8 +597,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 conflict = (_scan_namespace(name, LXC_BASE) is not None
                             or _scan_namespace(name, VM_BASE) is not None)
             if conflict:
-                print(f"Error: instance name already taken: {name}", file=sys.stderr)
-                sys.exit(1)
+                raise InstanceExistsError(f"instance name already taken: {name}")
 
         # Resolve container_id for directory paths
         if mode == "pve":
@@ -604,7 +607,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             else:
                 vmid = next_vmid()
             container_id = str(vmid)
-            print(f"Mode: pve (VMID {vmid})")
+            logger.info("Mode: pve (VMID %s)", vmid)
         elif mode == "pve-vm":
             from kento.pve import next_vmid, validate_vmid, generate_qm_config, write_qm_config
             from kento.vm_hook import write_vm_hook, write_snippets_wrapper
@@ -613,19 +616,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             else:
                 vmid = next_vmid()
             container_id = name  # VM_BASE uses name, not VMID
-            print(f"Mode: pve-vm (VMID {vmid})")
+            logger.info("Mode: pve-vm (VMID %s)", vmid)
         elif mode == "vm":
             container_id = name
-            print("Mode: vm")
+            logger.info("Mode: vm")
         else:
             container_id = name
-            print("Mode: lxc")
+            logger.info("Mode: lxc")
 
         container_dir = base_dir / container_id
 
         if container_dir.exists():
-            print(f"Error: instance already exists: {container_id}", file=sys.stderr)
-            sys.exit(1)
+            raise InstanceExistsError(f"instance already exists: {container_id}")
 
         # Create container_dir inside the lock so a concurrent create() sees
         # it on its own .exists() check above. Slower post-setup happens
@@ -638,12 +640,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # guest would boot unconfigured. Reject up front rather than warning and
     # silently producing a broken instance. ``auto`` falls back to injection.
     if config_mode == "cloudinit" and not has_cloudinit:
-        print(f"Error: --config-mode cloudinit requires cloud-init in the "
-              f"image, but none was detected in {image}.", file=sys.stderr)
-        print("  Drop --config-mode to auto-detect, or use "
-              "--config-mode injection.", file=sys.stderr)
         shutil.rmtree(container_dir, ignore_errors=True)
-        sys.exit(1)
+        raise ValidationError(
+            f"--config-mode cloudinit requires cloud-init in the "
+            f"image, but none was detected in {image}.\n"
+            "  Drop --config-mode to auto-detect, or use "
+            "--config-mode injection."
+        )
 
     # Advisory (non-fatal): cloud images (Debian/Ubuntu cloud) lock root SSH
     # login and expect a distro login user (e.g. ``debian``). Injecting keys
@@ -652,12 +655,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # restriction affects both injection and cloudinit seeding.
     if (ssh_key_contents is not None and ssh_key_user == "root"
             and has_cloudinit):
-        print("Warning: injecting SSH keys for 'root' on a cloud-init image. "
-              "Cloud images", file=sys.stderr)
-        print("  usually disable root SSH login; if you can't connect, "
-              "recreate with", file=sys.stderr)
-        print("  --ssh-key-user <user> (e.g. 'debian' for Debian cloud "
-              "images).", file=sys.stderr)
+        logger.warning(
+            "injecting SSH keys for 'root' on a cloud-init image. Cloud images\n"
+            "  usually disable root SSH login; if you can't connect, "
+            "recreate with\n"
+            "  --ssh-key-user <user> (e.g. 'debian' for Debian cloud "
+            "images)."
+        )
 
     # Accumulator of rollback actions for every side-effecting step past
     # this point. On exception, each undo runs in LIFO order — see F4 in
@@ -879,25 +883,25 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 undos.append(("qm-config",
                               lambda v=vmid: delete_qm_config(v)))
 
-                print(f"\nVM created: {name}")
-                print(f"  Image:   {image}")
-                print(f"  VMID:    {vmid}")
+                logger.info("\nVM created: %s", name)
+                logger.info("  Image:   %s", image)
+                logger.info("  VMID:    %s", vmid)
                 if network["type"] == "usermode":
-                    print(f"  Port:    {host_port}:{guest_port}")
+                    logger.info("  Port:    %s:%s", host_port, guest_port)
                 elif network["type"] == "bridge":
-                    print(f"  Bridge:  {bridge}")
-                print(f"  Config:  {qm_conf}")
-                print(f"  Nesting: {'allowed' if nesting else 'disabled'}")
-                print(f"  Dir:     {container_dir}")
+                    logger.info("  Bridge:  %s", bridge)
+                logger.info("  Config:  %s", qm_conf)
+                logger.info("  Nesting: %s", 'allowed' if nesting else 'disabled')
+                logger.info("  Dir:     %s", container_dir)
             else:
                 # Plain VM mode (no PVE)
                 write_inject(container_dir)
-                print(f"\nContainer created: {name}")
-                print(f"  Image:   {image}")
+                logger.info("\nContainer created: %s", name)
+                logger.info("  Image:   %s", image)
                 if network["type"] == "usermode":
-                    print(f"  Port:    {host_port}:{guest_port}")
-                print(f"  Nesting: {'allowed' if nesting else 'disabled'}")
-                print(f"  Dir:     {container_dir}")
+                    logger.info("  Port:    %s:%s", host_port, guest_port)
+                logger.info("  Nesting: %s", 'allowed' if nesting else 'disabled')
+                logger.info("  Dir:     %s", container_dir)
         else:
             # Port forwarding for LXC/PVE modes. Hold kento_lock across
             # allocate + write so concurrent creates don't collide on the
@@ -972,18 +976,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 )
                 config_path = f"{container_dir}/config"
 
-            print(f"\nContainer created: {name}")
-            print(f"  Image:   {image}")
-            print(f"  Bridge:  {bridge}")
+            logger.info("\nContainer created: %s", name)
+            logger.info("  Image:   %s", image)
+            logger.info("  Bridge:  %s", bridge)
             if mode == "pve":
-                print(f"  VMID:    {vmid}")
+                logger.info("  VMID:    %s", vmid)
             if port is not None:
-                print(f"  Port:    {host_port}:{guest_port}")
-            print(f"  Nesting: {'allowed' if nesting else 'disabled'}")
-            print(f"  Config:  {config_path}")
+                logger.info("  Port:    %s:%s", host_port, guest_port)
+            logger.info("  Nesting: %s", 'allowed' if nesting else 'disabled')
+            logger.info("  Config:  %s", config_path)
 
         if start:
-            print("\nStarting...")
+            logger.info("\nStarting...")
             # Register the stop undo BEFORE issuing start: if the start call
             # succeeds partially (container registers, then crashes), we still
             # want to attempt the stop on rollback.
@@ -1017,13 +1021,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 _run_start_or_rollback(
                     ["lxc-start", "-n", name], name=name, scope="lxc",
                 )
-            print("  Status: running")
+            logger.info("  Status: running")
         else:
-            print(f"  Status: stopped (use 'kento start {name}' to boot)")
+            logger.info("  Status: stopped (use 'kento start %s' to boot)", name)
     except BaseException as exc:
         # Rollback every side-effect we successfully made before re-raising.
-        # Use BaseException so SystemExit/KeyboardInterrupt also trigger cleanup.
-        print(f"\nError during create: {exc}", file=sys.stderr)
-        print("Rolling back partial state...", file=sys.stderr)
+        # Use BaseException so KentoError/KeyboardInterrupt also trigger cleanup.
+        logger.info("\nError during create: %s", exc)
+        logger.info("Rolling back partial state...")
         _run_cleanup(undos)
         raise
