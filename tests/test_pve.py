@@ -79,6 +79,92 @@ class TestUsedVmids:
              patch("kento.pve.PVE_QEMU_DIR", pve / "qemu-server"):
             assert _used_vmids() == {100}
 
+    def test_includes_kento_pve_lxc_orphan(self, tmp_path):
+        """A pve-lxc instance whose dir name is a vmid must be counted even
+        when PVE has no .conf for it (destroyed out-of-band → orphan)."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        # PVE knows nothing (no .vmlist, empty config dirs).
+        lxc_base = tmp_path / "lxc-base"
+        lxc_base.mkdir()
+        # Orphaned pve-lxc instance: dir name IS the vmid, no PVE .conf.
+        (lxc_base / "103").mkdir()
+        vm_base = tmp_path / "vm-base"
+        vm_base.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.PVE_LXC_DIR", pve / "lxc"), \
+             patch("kento.pve.PVE_QEMU_DIR", pve / "qemu-server"), \
+             patch("kento.pve.LXC_BASE", lxc_base), \
+             patch("kento.pve.VM_BASE", vm_base):
+            assert 103 in _used_vmids()
+
+    def test_includes_kento_pve_vm_orphan(self, tmp_path):
+        """A pve-vm instance records its vmid in a kento-vmid file; that vmid
+        must be counted even when PVE has no .conf for it (orphan)."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        lxc_base = tmp_path / "lxc-base"
+        lxc_base.mkdir()
+        vm_base = tmp_path / "vm-base"
+        vm_base.mkdir()
+        inst = vm_base / "myvm"
+        inst.mkdir()
+        (inst / "kento-vmid").write_text("104\n")
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.PVE_LXC_DIR", pve / "lxc"), \
+             patch("kento.pve.PVE_QEMU_DIR", pve / "qemu-server"), \
+             patch("kento.pve.LXC_BASE", lxc_base), \
+             patch("kento.pve.VM_BASE", vm_base):
+            assert 104 in _used_vmids()
+
+    def test_kento_recorded_unioned_with_pve_view(self, tmp_path):
+        """kento-recorded vmids are unioned with PVE's view, not replacing it."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {"100": {}}}))
+        lxc_base = tmp_path / "lxc-base"
+        lxc_base.mkdir()
+        (lxc_base / "103").mkdir()
+        vm_base = tmp_path / "vm-base"
+        vm_base.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.LXC_BASE", lxc_base), \
+             patch("kento.pve.VM_BASE", vm_base):
+            assert _used_vmids() == {100, 103}
+
+    def test_kento_recorded_tolerates_garbage(self, tmp_path):
+        """Non-integer pve-lxc dir names and missing/malformed kento-vmid
+        files are skipped, not fatal."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        lxc_base = tmp_path / "lxc-base"
+        lxc_base.mkdir()
+        (lxc_base / "not-a-vmid").mkdir()  # non-integer name → skip
+        (lxc_base / "105").mkdir()         # valid
+        vm_base = tmp_path / "vm-base"
+        vm_base.mkdir()
+        (vm_base / "novmid").mkdir()       # no kento-vmid file → skip
+        bad = vm_base / "badvmid"
+        bad.mkdir()
+        (bad / "kento-vmid").write_text("garbage\n")  # malformed → skip
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.PVE_LXC_DIR", pve / "lxc"), \
+             patch("kento.pve.PVE_QEMU_DIR", pve / "qemu-server"), \
+             patch("kento.pve.LXC_BASE", lxc_base), \
+             patch("kento.pve.VM_BASE", vm_base):
+            assert _used_vmids() == {105}
+
+    def test_kento_recorded_missing_bases_ok(self, tmp_path):
+        """Absent LXC_BASE / VM_BASE dirs are skipped (no instances yet)."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.PVE_LXC_DIR", pve / "lxc"), \
+             patch("kento.pve.PVE_QEMU_DIR", pve / "qemu-server"), \
+             patch("kento.pve.LXC_BASE", tmp_path / "nope-lxc"), \
+             patch("kento.pve.VM_BASE", tmp_path / "nope-vm"):
+            assert _used_vmids() == set()
+
 
 class TestNextVmid:
     def test_empty_returns_100(self, tmp_path):
@@ -102,6 +188,23 @@ class TestNextVmid:
         (pve / ".vmlist").write_text(json.dumps({"ids": {"100": {}, "101": {}, "102": {}}}))
         with patch("kento.pve.PVE_DIR", pve):
             assert next_vmid() == 103
+
+    def test_skips_kento_orphan_vmid(self, tmp_path):
+        """Regression (F3): a kento pve-lxc orphan (dir present, PVE .conf
+        destroyed out-of-band) must not be reassigned. PVE knows 100/101/102;
+        kento still holds an orphan at 103 → next free is 104, not 103."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {"100": {}, "101": {}, "102": {}}}))
+        lxc_base = tmp_path / "lxc-base"
+        lxc_base.mkdir()
+        (lxc_base / "103").mkdir()  # orphan: kento dir, no PVE .conf
+        vm_base = tmp_path / "vm-base"
+        vm_base.mkdir()
+        with patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.pve.LXC_BASE", lxc_base), \
+             patch("kento.pve.VM_BASE", vm_base):
+            assert next_vmid() == 104
 
 
 class TestValidateVmid:

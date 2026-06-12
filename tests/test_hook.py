@@ -217,16 +217,23 @@ def test_generate_hook_validates_memory_and_cores_before_arithmetic():
 
 
 def test_generate_hook_post_stop_anchors_comment_match():
-    """#1: the post-stop teardown must anchor the comment-tag match to the
+    """#1/F1: the post-stop teardown must anchor the comment-tag match to the
     full token so stopping ``web`` does not delete ``web2``'s rules from the
-    shared nft table / iptables nat chains (prefix collision)."""
+    shared nft table / iptables nat chains (prefix collision), AND regex-escape
+    the name (NAME_RE) so a name's ``.`` is a literal dot, not an ERE wildcard
+    (so stopping ``web.api`` does not also match ``web1api``'s rule)."""
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     post_body = script[script.index("post-stop)"):]
-    # nft: full quoted comment token + trailing boundary.
-    assert r'comment \"kento:${NAME}\"( |\$)' in post_body
+    # F1: the raw name is regex-escaped into NAME_RE before the greps.
+    assert (
+        r"""NAME_RE=$(printf '%s' "$NAME" | sed 's/[.[\*^$]/\\&/g')"""
+        in post_body
+    )
+    # nft: full quoted comment token + trailing boundary, over NAME_RE.
+    assert r'comment \"kento:${NAME_RE}\"( |\$)' in post_body
     assert 'grep "kento:${NAME}"' not in post_body
-    # iptables: trailing-boundary anchored grep -E, not a bare grep -F.
-    assert r'kento:${NAME}( |\$)' in post_body
+    # iptables: trailing-boundary anchored grep -E over NAME_RE, not a bare -F.
+    assert r'kento:${NAME_RE}( |\$)' in post_body
     assert 'grep -F "kento:${NAME}"' not in post_body
 
 

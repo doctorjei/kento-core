@@ -307,6 +307,18 @@ def test_info_json_with_optional_fields(mock_running, tmp_path, capsys):
 
 
 @patch("kento.info.is_running", return_value=False)
+def test_info_json_mode_pve_normalized_to_pve_lxc(mock_running, tmp_path, capsys):
+    """inspect --json normalizes the raw 'pve' mode to 'pve-lxc' so it agrees
+    with `list --json`. data["type"] stays the LXC/VM family."""
+    d = _make_container(tmp_path, **{"kento-mode": "pve\n"})
+    info("mybox", container_dir=d, mode="pve", as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "pve-lxc"
+    assert data["type"] == "LXC"
+
+
+@patch("kento.info.is_running", return_value=False)
 def test_info_json_environment_is_list(mock_running, tmp_path, capsys):
     d = _make_container(tmp_path, **{"kento-env": "A=1\nB=2\n"})
     info("mybox", container_dir=d, mode="lxc", as_json=True)

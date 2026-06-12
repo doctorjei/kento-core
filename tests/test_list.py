@@ -1,5 +1,6 @@
 """Tests for container listing."""
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -725,3 +726,204 @@ def test_list_default_columns_widths_align_without_size(mock_run, tmp_path, caps
     sep_groups = lines[1].split("  ")
     assert len(sep_groups) == 4
     assert all(set(g) == {"-"} for g in sep_groups)
+
+
+# --- list --json tests (v1.5.3) ---
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_json_emits_array_with_expected_keys(mock_run, tmp_path, capsys):
+    """--json emits a JSON array; each object carries the inspect --json keys."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("lxc\n")
+    (lxc_dir / "kento-name").write_text("mybox\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    assert len(data) == 1
+    entry = data[0]
+    assert entry["name"] == "mybox"
+    assert entry["type"] == "LXC"
+    assert entry["mode"] == "lxc"
+    assert entry["image"] == "myimage:latest"
+    assert entry["status"] == "running"
+
+
+@patch("kento.list.subprocess.run")
+def test_list_json_empty_is_array(mock_run, tmp_path, capsys):
+    """Zero instances → '[]', NOT the human '(no instances found)' string."""
+    vm = tmp_path / "vm"
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(as_json=True)
+
+    output = capsys.readouterr().out
+    assert "no instances found" not in output
+    assert json.loads(output) == []
+
+
+@patch("kento.pve_config_exists", return_value=True)
+@patch("kento.list.pve_config_exists", return_value=True)
+@patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
+def test_list_json_pve_mode_normalized(mock_run, mock_cfg, mock_cfg2,
+                                       tmp_path, capsys):
+    """A pve-lxc instance reports mode == 'pve-lxc' (normalized) in --json,
+    matching inspect --json."""
+    lxc_dir = tmp_path / "100"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-name").write_text("webbox\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert len(data) == 1
+    assert data[0]["mode"] == "pve-lxc"
+    assert data[0]["type"] == "LXC"
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_json_includes_optional_fields_when_present(mock_run, tmp_path,
+                                                         capsys):
+    """vmid / mac / environment surface in the JSON object when present."""
+    vm = tmp_path / "vm"
+    vm.mkdir()
+    vm_dir = vm / "testvm"
+    vm_dir.mkdir()
+    (vm_dir / "kento-image").write_text("vm-image:latest\n")
+    (vm_dir / "kento-mode").write_text("vm\n")
+    (vm_dir / "kento-name").write_text("testvm\n")
+    (vm_dir / "kento-vmid").write_text("200\n")
+    (vm_dir / "kento-mac").write_text("aa:bb:cc:dd:ee:ff\n")
+    (vm_dir / "kento-env").write_text("A=1\nB=2\n")
+    (vm_dir / "kento-state").write_text(str(vm_dir) + "\n")
+    (vm_dir / "upper").mkdir()
+    lxc = tmp_path / "lxc"
+
+    with patch("kento.list.LXC_BASE", lxc), \
+         patch("kento.list.VM_BASE", vm), \
+         patch("kento.vm.is_vm_running", return_value=False):
+        list_containers(as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    assert len(data) == 1
+    entry = data[0]
+    assert entry["type"] == "VM"
+    assert entry["mode"] == "vm"
+    assert entry["vmid"] == 200
+    assert entry["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert entry["environment"] == ["A=1", "B=2"]
+
+
+@patch("kento.info.is_running", return_value=False)
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_json_keys_consistent_with_inspect_json(mock_run, mock_running,
+                                                     tmp_path, capsys):
+    """Key parity: every key emitted by list --json is also emitted by
+    inspect --json for the same instance, with matching values."""
+    from kento.info import info
+
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("pve\n")
+    (lxc_dir / "kento-name").write_text("mybox\n")
+    (lxc_dir / "kento-vmid").write_text("100\n")
+    (lxc_dir / "kento-mac").write_text("aa:bb:cc:dd:ee:ff\n")
+    (lxc_dir / "kento-env").write_text("A=1\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm), \
+         patch("kento.list.pve_config_exists", return_value=True):
+        list_containers(as_json=True)
+    list_entry = json.loads(capsys.readouterr().out)[0]
+
+    info("mybox", container_dir=lxc_dir, mode="pve-lxc", as_json=True)
+    inspect_data = json.loads(capsys.readouterr().out)
+
+    # Every list key is present in inspect output with the same value.
+    for key, value in list_entry.items():
+        assert key in inspect_data, f"list key {key!r} missing from inspect"
+        assert inspect_data[key] == value, (
+            f"value mismatch for {key!r}: "
+            f"list={value!r} inspect={inspect_data[key]!r}")
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_json_skips_unreadable_entry(mock_run, tmp_path, capsys):
+    """A racing destroy drops that instance from the array, never aborts."""
+    good = tmp_path / "goodbox"
+    good.mkdir()
+    (good / "kento-image").write_text("good-image:latest\n")
+    (good / "kento-mode").write_text("lxc\n")
+    (good / "kento-name").write_text("goodbox\n")
+    (good / "kento-state").write_text(str(good) + "\n")
+    (good / "upper").mkdir()
+
+    bad = tmp_path / "badbox"
+    bad.mkdir()
+    bad_image = bad / "kento-image"
+    bad_image.write_text("bad-image:latest\n")
+    (bad / "kento-state").write_text(str(bad) + "\n")
+    (bad / "upper").mkdir()
+
+    vm = tmp_path / "vm"
+    real_read_text = Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == bad_image:
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm), \
+         patch.object(Path, "read_text", flaky_read_text):
+        list_containers(as_json=True)
+
+    data = json.loads(capsys.readouterr().out)
+    names = [e["name"] for e in data]
+    assert "goodbox" in names
+    assert "badbox" not in names
+
+
+@patch("kento.list.subprocess.run", side_effect=_mock_run)
+def test_list_json_size_includes_upper_size(mock_run, tmp_path, capsys):
+    """show_size=True includes upper_size in the JSON object; omitted otherwise."""
+    lxc_dir = tmp_path / "mybox"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-mode").write_text("lxc\n")
+    (lxc_dir / "kento-name").write_text("mybox\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    vm = tmp_path / "vm"
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(as_json=True)
+    no_size = json.loads(capsys.readouterr().out)[0]
+    assert "upper_size" not in no_size
+
+    with patch("kento.list.LXC_BASE", tmp_path), \
+         patch("kento.list.VM_BASE", vm):
+        list_containers(as_json=True, show_size=True)
+    with_size = json.loads(capsys.readouterr().out)[0]
+    assert with_size["upper_size"] == "16K"

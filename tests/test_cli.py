@@ -294,37 +294,62 @@ class TestListSizeFlag:
     def test_bare_list_default_passes_show_size_false(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["list"])
-        mock_lc.assert_called_once_with(scope=None, show_size=False)
+        mock_lc.assert_called_once_with(scope=None, show_size=False,
+                                        as_json=False)
 
     def test_bare_list_with_size_long(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["list", "--size"])
-        mock_lc.assert_called_once_with(scope=None, show_size=True)
+        mock_lc.assert_called_once_with(scope=None, show_size=True,
+                                        as_json=False)
 
     def test_bare_list_with_size_short(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["list", "-s"])
-        mock_lc.assert_called_once_with(scope=None, show_size=True)
+        mock_lc.assert_called_once_with(scope=None, show_size=True,
+                                        as_json=False)
 
     def test_bare_ls_with_size(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["ls", "--size"])
-        mock_lc.assert_called_once_with(scope=None, show_size=True)
+        mock_lc.assert_called_once_with(scope=None, show_size=True,
+                                        as_json=False)
 
     def test_lxc_list_default_show_size_false(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["lxc", "list"])
-        mock_lc.assert_called_once_with(scope="lxc", show_size=False)
+        mock_lc.assert_called_once_with(scope="lxc", show_size=False,
+                                        as_json=False)
 
     def test_lxc_list_with_size(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["lxc", "list", "--size"])
-        mock_lc.assert_called_once_with(scope="lxc", show_size=True)
+        mock_lc.assert_called_once_with(scope="lxc", show_size=True,
+                                        as_json=False)
 
     def test_vm_list_with_size(self):
         with patch("kento.list.list_containers") as mock_lc:
             main(["vm", "list", "-s"])
-        mock_lc.assert_called_once_with(scope="vm", show_size=True)
+        mock_lc.assert_called_once_with(scope="vm", show_size=True,
+                                        as_json=False)
+
+    def test_bare_list_json_flag(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["list", "--json"])
+        mock_lc.assert_called_once_with(scope=None, show_size=False,
+                                        as_json=True)
+
+    def test_lxc_list_json_flag(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["lxc", "list", "--json"])
+        mock_lc.assert_called_once_with(scope="lxc", show_size=False,
+                                        as_json=True)
+
+    def test_vm_list_json_flag(self):
+        with patch("kento.list.list_containers") as mock_lc:
+            main(["vm", "list", "--json"])
+        mock_lc.assert_called_once_with(scope="vm", show_size=False,
+                                        as_json=True)
 
     def test_bare_list_help_mentions_size(self, capsys):
         with pytest.raises(SystemExit) as exc:

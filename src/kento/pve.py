@@ -7,6 +7,7 @@ import socket
 import sys
 from pathlib import Path
 
+from kento import LXC_BASE, VM_BASE
 from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
 
 PVE_DIR = Path("/etc/pve")
@@ -45,8 +46,8 @@ def is_pve() -> bool:
     return PVE_DIR.is_dir()
 
 
-def _used_vmids() -> set[int]:
-    """Return the set of VMIDs already in use.
+def _pve_view_vmids() -> set[int]:
+    """Return the set of VMIDs PVE itself knows about.
 
     Fast path: reads /etc/pve/.vmlist (JSON index).
     Fallback: scans /etc/pve/lxc/*.conf and /etc/pve/qemu-server/*.conf.
@@ -69,6 +70,60 @@ def _used_vmids() -> set[int]:
                 except ValueError:
                     continue
     return ids
+
+
+def _kento_recorded_vmids() -> set[int]:
+    """Return VMIDs kento itself has recorded for PVE instances.
+
+    PVE's view (`_pve_view_vmids`) misses an instance whose `.conf` was
+    destroyed out-of-band (an "orphan"): kento still owns the instance dir
+    but PVE reports the VMID as free, so a naive allocation would re-hand it
+    out and collide. Union these in so allocation/validation reserve them.
+
+      - PVE-LXC: the instance dir lives under LXC_BASE and its NAME is the
+        VMID (an integer) — mirrors list.py's `vmid = container_dir.name`.
+      - PVE-VM: the instance dir lives under VM_BASE; the VMID is stored in a
+        ``kento-vmid`` file inside it.
+
+    Best-effort and purely additive: missing base dirs, non-integer dir
+    names, and missing/malformed ``kento-vmid`` files are skipped, never
+    fatal. Nothing here reaps or mutates state.
+    """
+    ids: set[int] = set()
+
+    # PVE-LXC: dir name is the VMID.
+    if LXC_BASE.is_dir():
+        for d in LXC_BASE.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                ids.add(int(d.name))
+            except ValueError:
+                continue
+
+    # PVE-VM: VMID recorded in the kento-vmid file.
+    if VM_BASE.is_dir():
+        for d in VM_BASE.iterdir():
+            vmid_file = d / "kento-vmid"
+            if not vmid_file.is_file():
+                continue
+            try:
+                ids.add(int(vmid_file.read_text().strip()))
+            except (ValueError, OSError):
+                continue
+
+    return ids
+
+
+def _used_vmids() -> set[int]:
+    """Return the set of VMIDs already in use.
+
+    Union of (a) PVE's own view (`_pve_view_vmids`) and (b) kento's recorded
+    VMIDs (`_kento_recorded_vmids`) so that orphaned kento instances — whose
+    PVE `.conf` was destroyed out-of-band — still reserve their VMID and are
+    not reassigned.
+    """
+    return _pve_view_vmids() | _kento_recorded_vmids()
 
 
 def next_vmid() -> int:

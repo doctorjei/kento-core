@@ -93,7 +93,9 @@ def info(name: str, *, container_dir: Path, mode: str,
     data = {}
     data["name"] = _read_meta(container_dir, "kento-name") or name
     data["image"] = _read_meta(container_dir, "kento-image") or "unknown"
-    data["mode"] = mode
+    # Normalize the raw mode ('pve' -> 'pve-lxc') so inspect --json and
+    # list --json agree on the mode string. type stays the LXC/VM family.
+    data["mode"] = "pve-lxc" if mode == "pve" else mode
     data["type"] = "VM" if mode in ("vm", "pve-vm") else "LXC"
     data["status"] = "running" if is_running(container_dir, mode) else "stopped"
     data["directory"] = str(container_dir)

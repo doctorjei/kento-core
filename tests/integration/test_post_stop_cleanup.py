@@ -247,6 +247,102 @@ def test_post_stop_prefix_collision_spares_other_instance(
     )
 
 
+def _write_nft_dotted_collision_stub(
+    bin_dir, stopping_name: str, victim_name: str
+) -> None:
+    """Drop an ``nft`` stub modelling the dotted-wildcard collision scenario.
+
+    The stopping instance's name contains a ``.`` (an ERE metacharacter
+    meaning "any single char"). If the teardown grep interpolates the name
+    unescaped, ``kento:web.api`` matches ``kento:web1api``'s rule too — so
+    stopping ``web.api`` would tear down the live ``web1api``'s forwarding.
+
+    The table holds a rule for the stopping instance (handle 5) and one for
+    the victim (handle 9) in every chain, rendered exactly as ``nft -a list
+    chain`` does (leading tab, trailing `` # handle <N>``).
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    nft = bin_dir / "nft"
+    nft.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{bin_dir}/nft.log"\n'
+        'case "$1" in\n'
+        "  -a)\n"
+        "    # `nft -a list chain ip kento <chain>` — emit both instances.\n"
+        '    printf "\\ttcp dport 10270 dnat to 10.0.3.1:22 '
+        f'comment \\"kento:{stopping_name}\\" # handle 5\\n"\n'
+        '    printf "\\ttcp dport 10280 dnat to 10.0.3.2:22 '
+        f'comment \\"kento:{victim_name}\\" # handle 9\\n"\n'
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+    nft.chmod(nft.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def test_post_stop_dotted_wildcard_spares_other_instance(
+    hook_fixture_factory, tmp_path
+):
+    """Stopping ``web.api`` must NOT delete ``web1api``'s port-forward rules.
+
+    Regression for F1: the post-stop nft teardown interpolates ``$NAME`` into
+    an ERE unescaped, so the ``.`` in ``web.api`` acts as a one-char wildcard
+    and ``grep "comment \"kento:web.api\""`` also matches ``kento:web1api``'s
+    rule. Stopping ``web.api`` would then delete the still-running
+    ``web1api``'s DNAT/masquerade handles from the SHARED ``ip kento`` table.
+
+    The fix regex-escapes ``$NAME`` before the grep. The nft stub models both
+    instances co-resident; we run ``web.api``'s post-stop and assert only its
+    own handle (5) is deleted, never ``web1api``'s (9).
+    """
+    fx = hook_fixture_factory(name="web.api")
+    (fx.container_dir / "kento-portfwd-active").write_text("10270:22:10.0.3.1\n")
+    # nft is the default backend (no backend marker -> nft).
+
+    bin_dir = tmp_path / "bin"
+    _write_nft_dotted_collision_stub(
+        bin_dir, stopping_name="web.api", victim_name="web1api"
+    )
+
+    env = dict(fx.env)
+    env["LXC_HOOK_TYPE"] = "post-stop"
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        ["sh", str(fx.hook_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, (
+        f"post-stop hook exited {result.returncode}.\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    nft_log = bin_dir / "nft.log"
+    assert nft_log.exists(), "nft was never invoked during teardown"
+    log = nft_log.read_text()
+    delete_lines = [ln for ln in log.splitlines() if "delete rule" in ln]
+
+    # web1api's handle (9) must NEVER be deleted — that's the live instance.
+    assert not any("handle 9" in ln for ln in delete_lines), (
+        "post-stop teardown for 'web.api' deleted web1api's handle (9); the "
+        "name's '.' was treated as an ERE wildcard (unescaped interpolation)."
+        "\nnft delete calls:\n" + "\n".join(delete_lines)
+    )
+    # web.api's own handle (5) must be deleted in each of the three chains.
+    own_deletes = [ln for ln in delete_lines if "handle 5" in ln]
+    assert len(own_deletes) == 3, (
+        "expected web.api's handle (5) deleted once per chain (3 total), got "
+        f"{len(own_deletes)}:\n" + "\n".join(delete_lines)
+    )
+
+    assert not (fx.container_dir / "kento-portfwd-active").exists(), (
+        "active marker must be removed after teardown"
+    )
+
+
 def test_post_stop_nft_teardown_anchors_comment_match():
     """Static guard: the generated nft teardown anchors the comment token.
 
@@ -259,15 +355,23 @@ def test_post_stop_nft_teardown_anchors_comment_match():
 
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "web")
     post_body = script[script.index("post-stop)"):]
-    # Anchored nft match: full quoted token + trailing boundary. The `$` in
-    # the alternation is backslash-escaped in the source heredoc-free string.
-    assert r'comment \"kento:${NAME}\"( |\$)' in post_body, (
-        "nft teardown must anchor the comment match to the full quoted token"
+    # The name is regex-escaped into NAME_RE before the teardown greps so a
+    # name's `.` is a literal dot, not an ERE one-char wildcard (F1).
+    assert (
+        r"""NAME_RE=$(printf '%s' "$NAME" | sed 's/[.[\*^$]/\\&/g')"""
+        in post_body
+    ), "post-stop must regex-escape NAME into NAME_RE before the teardown greps"
+    # Anchored nft match: full quoted token + trailing boundary, over NAME_RE.
+    # The `$` in the alternation is backslash-escaped in the source string.
+    assert r'comment \"kento:${NAME_RE}\"( |\$)' in post_body, (
+        "nft teardown must anchor the comment match to the escaped token"
     )
     # Must NOT use the old unanchored bare-substring grep.
     assert 'grep "kento:${NAME}"' not in post_body
-    # iptables teardown likewise anchored with a trailing boundary (not -F).
-    assert r'kento:${NAME}( |\$)' in post_body
+    # Must NOT interpolate the raw NAME into the teardown greps (unescaped).
+    assert 'grep -E "comment \\"kento:${NAME}\\"' not in post_body
+    # iptables teardown likewise anchored over NAME_RE (not -F).
+    assert r'kento:${NAME_RE}( |\$)' in post_body
     assert 'grep -F "kento:${NAME}"' not in post_body
 
 

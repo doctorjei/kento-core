@@ -337,6 +337,13 @@ case "$HOOK_TYPE" in
         if [ -f "$CONTAINER_DIR/kento-portfwd-backend" ]; then
             BACKEND=$(cat "$CONTAINER_DIR/kento-portfwd-backend" | tr -d '[:space:]')
         fi
+        # NAME is interpolated into an ERE below, where a kento name's `.`
+        # would otherwise act as a one-char wildcard (so `web.api` would also
+        # match a sibling `web1api`'s rule and tear down the wrong instance).
+        # Escape the ERE metacharacters that can appear in or around a name
+        # before using it in the teardown greps. The install side writes
+        # literal comments and is intentionally left untouched.
+        NAME_RE=$(printf '%s' "$NAME" | sed 's/[.[\*^$]/\\&/g')
         if [ "$BACKEND" = iptables ]; then
             # iptables: line numbers shift on every delete, so re-list and
             # delete the first matching rule until none remain.
@@ -344,13 +351,10 @@ case "$HOOK_TYPE" in
                 while :; do
                     # iptables renders the tag as `/* kento:NAME */`
                     # (space-delimited). Anchor to a trailing boundary so
-                    # `kento:web` does NOT match `kento:web2`'s rule; NAME
-                    # is validated [A-Za-z0-9_.-] so no regex escaping is
-                    # needed beyond the `.` it may contain (acceptable as a
-                    # one-char wildcard here — collisions require an
-                    # otherwise-identical name).
+                    # `kento:web` does NOT match `kento:web2`'s rule; NAME is
+                    # regex-escaped (NAME_RE) so a name's `.` is a literal dot.
                     n=$(iptables -t nat -L "$chain" --line-numbers -n 2>/dev/null \
-                        | grep -E "kento:${NAME}( |\$)" | head -1 | awk '{print $1}')
+                        | grep -E "kento:${NAME_RE}( |\$)" | head -1 | awk '{print $1}')
                     [ -n "$n" ] || break
                     iptables -t nat -D "$chain" "$n" 2>/dev/null || break
                 done
@@ -359,9 +363,10 @@ case "$HOOK_TYPE" in
             for chain in prerouting output postrouting; do
                 # nft renders the tag as `comment "kento:NAME"`. Match the
                 # full quoted token so `kento:web` does NOT also delete
-                # `kento:web2`'s rule (prefix collision).
+                # `kento:web2`'s rule (prefix collision); NAME is regex-escaped
+                # (NAME_RE) so a name's `.` is a literal dot, not a wildcard.
                 nft -a list chain ip kento "$chain" 2>/dev/null \
-                    | grep -E "comment \"kento:${NAME}\"( |\$)" | \
+                    | grep -E "comment \"kento:${NAME_RE}\"( |\$)" | \
                     awk '{print $NF}' | while read -r handle; do
                         nft delete rule ip kento "$chain" handle "$handle" 2>/dev/null || true
                     done
