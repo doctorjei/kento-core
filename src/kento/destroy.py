@@ -1,11 +1,14 @@
 """Remove a kento-managed instance."""
 
+import logging
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from kento import is_running, read_mode, require_root, resolve_container
+from kento.errors import StateError
+
+logger = logging.getLogger("kento")
 
 
 def destroy(name: str, force: bool = False, *, container_dir: Path | None = None, mode: str | None = None) -> None:
@@ -27,13 +30,13 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
     running = is_running(container_dir, mode)
 
     if running and not force:
-        print(f"Error: instance {name} is running. "
-              f"Use 'kento lxc destroy -f {name}' or 'kento vm destroy -f {name}' to force removal.",
-              file=sys.stderr)
-        sys.exit(1)
+        raise StateError(
+            f"instance {name} is running. "
+            f"Use 'kento lxc destroy -f {name}' or 'kento vm destroy -f {name}' to force removal."
+        )
 
     if running:
-        print("Stopping...")
+        logger.info("Stopping...")
         try:
             if mode == "vm":
                 from kento.vm import stop_vm
@@ -51,11 +54,10 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
             # a partially-wedged instance can still be removed.
             if isinstance(e, subprocess.CalledProcessError):
                 stderr = (e.stderr or b"").decode("utf-8", "replace").strip()
-                print(f"Warning: stop failed (exit {e.returncode}); proceeding with cleanup: {stderr}",
-                      file=sys.stderr)
+                logger.warning("stop failed (exit %s); proceeding with cleanup: %s",
+                               e.returncode, stderr)
             else:
-                print(f"Warning: stop tool not found ({e.filename}); proceeding with cleanup.",
-                      file=sys.stderr)
+                logger.warning("stop tool not found (%s); proceeding with cleanup.", e.filename)
 
     # Unmount rootfs if still mounted. Use the busy-mount-hardened helper:
     # under -f we want a wedged instance (qm timeout, leaked virtiofsd, etc.)
@@ -66,9 +68,7 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
                       capture_output=True).returncode == 0:
         from kento.vm import _umount_with_retry
         if not _umount_with_retry(rootfs, force=force):
-            print(f"Error: failed to unmount {rootfs}. Is the container still running?",
-                  file=sys.stderr)
-            sys.exit(1)
+            raise StateError(f"failed to unmount {rootfs}. Is the container still running?")
 
     # Release OCI image mount
     from kento.layers import _podman_cmd
@@ -102,16 +102,15 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
                 vmid = int(vmid_str)
             except ValueError:
                 vmid = None
-                print(f"Warning: corrupt kento-vmid ({vmid_str!r}); skipping qm config "
-                      f"cleanup, proceeding with removal.", file=sys.stderr)
+                logger.warning("corrupt kento-vmid (%r); skipping qm config "
+                               "cleanup, proceeding with removal.", vmid_str)
             if vmid is not None:
                 delete_qm_config(vmid)
                 delete_snippets_wrapper(vmid)
     except Exception as e:
         if not force:
             raise
-        print(f"Warning: platform config cleanup failed ({e}); proceeding with removal.",
-              file=sys.stderr)
+        logger.warning("platform config cleanup failed (%s); proceeding with removal.", e)
 
     try:
         from kento.layers import remove_image_hold
@@ -121,8 +120,7 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
     except Exception as e:
         if not force:
             raise
-        print(f"Warning: image-hold removal failed ({e}); proceeding with removal.",
-              file=sys.stderr)
+        logger.warning("image-hold removal failed (%s); proceeding with removal.", e)
 
     # Remove state dir if separate from container_dir
     if state_dir != container_dir and state_dir.is_dir():
@@ -130,4 +128,4 @@ def destroy(name: str, force: bool = False, *, container_dir: Path | None = None
 
     shutil.rmtree(container_dir)
 
-    print(f"Removed: {name}")
+    logger.info("Removed: %s", name)
