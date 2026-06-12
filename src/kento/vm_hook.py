@@ -1,10 +1,10 @@
 """Generate per-VM PVE hookscripts (qm hookscripts)."""
 
 import subprocess
-import sys
 from pathlib import Path
 
 from kento.defaults import VM_CONFIG_FILE, load_config
+from kento.errors import StateError, SubprocessError
 
 _STORAGE_CFG = Path("/etc/pve/storage.cfg")
 
@@ -199,18 +199,17 @@ def find_snippets_dir() -> tuple[Path, str]:
                         first_dir_content = content.strip()
 
         if not storage_name:
-            msg = "Error: no PVE storage has 'snippets' in its content types.\n"
+            msg = "no PVE storage has 'snippets' in its content types."
             if first_dir_storage and first_dir_content:
-                msg += (f"\nEnable snippets on your '{first_dir_storage}' storage:\n"
+                msg += (f"\n\nEnable snippets on your '{first_dir_storage}' storage:\n"
                         f"  pvesm set {first_dir_storage} --content "
-                        f"{first_dir_content},snippets\n")
+                        f"{first_dir_content},snippets")
             else:
-                msg += ("\nEnable snippets on a storage (e.g. 'local'):\n"
-                        "  pvesm set local --content iso,vztmpl,backup,snippets\n")
-            msg += (f"\nOr set a specific storage in /etc/kento/vm.conf:\n"
-                    f"  snippets_storage = <name>\n")
-            print(msg, file=sys.stderr)
-            sys.exit(1)
+                msg += ("\n\nEnable snippets on a storage (e.g. 'local'):\n"
+                        "  pvesm set local --content iso,vztmpl,backup,snippets")
+            msg += (f"\n\nOr set a specific storage in /etc/kento/vm.conf:\n"
+                    f"  snippets_storage = <name>")
+            raise StateError(msg)
 
     # Resolve the filesystem path via pvesm
     result = subprocess.run(
@@ -218,9 +217,12 @@ def find_snippets_dir() -> tuple[Path, str]:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        print(f"Error: failed to resolve snippets path for storage '{storage_name}': "
-              f"{result.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
+        raise SubprocessError(
+            f"failed to resolve snippets path for storage '{storage_name}': "
+            f"{result.stderr.strip()}",
+            cmd=["pvesm", "path", f"{storage_name}:snippets/probe"],
+            returncode=result.returncode,
+        )
 
     # pvesm path returns something like /var/lib/vz/snippets/probe
     # Strip the filename to get the directory
@@ -250,5 +252,5 @@ def delete_snippets_wrapper(vmid: int) -> None:
         snippets_dir, _ = find_snippets_dir()
         wrapper = snippets_dir / f"kento-vm-{vmid}.sh"
         wrapper.unlink(missing_ok=True)
-    except SystemExit:
+    except StateError:
         pass  # No snippets storage = nothing to clean up

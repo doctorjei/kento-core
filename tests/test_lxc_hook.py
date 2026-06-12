@@ -1,5 +1,6 @@
 """Tests for PVE-LXC snippets hookscript wrapper."""
 
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from kento.lxc_hook import (
     write_lxc_snippets_wrapper,
     delete_lxc_snippets_wrapper,
 )
+from kento.errors import StateError
 
 
 class TestGenerateLxcSnippetsWrapper:
@@ -129,20 +131,17 @@ class TestDeleteLxcSnippetsWrapper:
 
     def test_no_snippets_storage_is_noop(self):
         with patch("kento.vm_hook.find_snippets_dir",
-                   side_effect=SystemExit(1)):
+                   side_effect=StateError("no snippets storage")):
             delete_lxc_snippets_wrapper(100)  # should not raise
 
-    def test_no_snippets_storage_warns(self, capsys):
-        """find_snippets_dir() raising SystemExit must surface a stderr
-        WARNING (not a silent ``pass``), so a leaked wrapper that couldn't be
+    def test_no_snippets_storage_warns(self, caplog):
+        """find_snippets_dir() raising StateError must surface a WARNING log
+        (not a silent ``pass``), so a leaked wrapper that couldn't be
         located is not reported as a clean destroy."""
-        with patch("kento.vm_hook.find_snippets_dir",
-                   side_effect=SystemExit(1)):
+        with caplog.at_level(logging.WARNING, logger="kento"), \
+             patch("kento.vm_hook.find_snippets_dir",
+                   side_effect=StateError("no snippets storage")):
             delete_lxc_snippets_wrapper(100)  # should not raise
-        captured = capsys.readouterr()
-        # Warning goes to stderr, mentions the wrapper and manual cleanup.
-        assert "warning" in captured.err.lower()
-        assert "kento-lxc-100.sh" in captured.err
-        assert "manual" in captured.err.lower()
-        # Nothing should leak onto stdout.
-        assert captured.out == ""
+        # Warning mentions the wrapper and manual cleanup.
+        assert "kento-lxc-100.sh" in caplog.text
+        assert "manual" in caplog.text.lower()

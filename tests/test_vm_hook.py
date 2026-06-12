@@ -9,6 +9,7 @@ from kento.vm_hook import (
     generate_vm_hook, generate_snippets_wrapper, write_vm_hook,
     find_snippets_dir, write_snippets_wrapper, delete_snippets_wrapper,
 )
+from kento.errors import StateError, SubprocessError
 
 
 class TestGenerateVmHook:
@@ -174,10 +175,10 @@ class TestFindSnippetsDir:
 
         with patch("kento.vm_hook.VM_CONFIG_FILE", config), \
              patch("kento.vm_hook._STORAGE_CFG", storage_cfg):
-            with pytest.raises(SystemExit):
+            with pytest.raises(StateError):
                 find_snippets_dir()
 
-    def test_no_snippets_error_message_actionable(self, tmp_path, capsys):
+    def test_no_snippets_error_message_actionable(self, tmp_path):
         """Error message includes pvesm set command when dir storage found."""
         config = tmp_path / "vm.conf"
         config.write_text("")
@@ -190,12 +191,14 @@ class TestFindSnippetsDir:
 
         with patch("kento.vm_hook.VM_CONFIG_FILE", config), \
              patch("kento.vm_hook._STORAGE_CFG", storage_cfg):
-            with pytest.raises(SystemExit):
+            with pytest.raises(StateError, match="pvesm set local --content iso,vztmpl,backup,snippets"):
                 find_snippets_dir()
 
-        captured = capsys.readouterr()
-        assert "pvesm set local --content iso,vztmpl,backup,snippets" in captured.err
-        assert "/etc/kento/vm.conf" in captured.err
+        # Also check the vm.conf hint is in the message
+        with patch("kento.vm_hook.VM_CONFIG_FILE", config), \
+             patch("kento.vm_hook._STORAGE_CFG", storage_cfg):
+            with pytest.raises(StateError, match="/etc/kento/vm.conf"):
+                find_snippets_dir()
 
 
 class TestWriteSnippetsWrapper:
@@ -249,5 +252,5 @@ class TestDeleteSnippetsWrapper:
             delete_snippets_wrapper(999)  # should not raise
 
     def test_no_snippets_storage_is_noop(self):
-        with patch("kento.vm_hook.find_snippets_dir", side_effect=SystemExit(1)):
+        with patch("kento.vm_hook.find_snippets_dir", side_effect=StateError("no snippets storage")):
             delete_snippets_wrapper(100)  # should not raise

@@ -1,6 +1,11 @@
 """Generate PVE hookscript snippets for pve-lxc containers."""
 
+import logging
 from pathlib import Path
+
+from kento.errors import StateError
+
+logger = logging.getLogger("kento")
 
 
 def generate_lxc_snippets_wrapper(hook_path: Path) -> str:
@@ -44,15 +49,13 @@ def delete_lxc_snippets_wrapper(vmid: int) -> None:
         snippets_dir, _ = find_snippets_dir()
         wrapper = snippets_dir / f"kento-lxc-{vmid}.sh"
         wrapper.unlink(missing_ok=True)
-    except SystemExit:
+    except StateError:
         # find_snippets_dir() couldn't locate the snippets storage (no longer
         # enabled / unlocatable). We can't compute the wrapper path, so the
         # file (if any) is left behind. Warn rather than silently reporting a
         # clean destroy so a leaked wrapper can be cleaned up manually.
-        import sys
-        print(
-            f"kento: warning: could not locate snippets storage to remove the "
-            f"kento-lxc-{vmid}.sh hookscript wrapper; it may need manual "
-            f"cleanup",
-            file=sys.stderr,
+        logger.warning(
+            "could not locate snippets storage to remove the "
+            "kento-lxc-%s.sh hookscript wrapper; it may need manual cleanup",
+            vmid,
         )
