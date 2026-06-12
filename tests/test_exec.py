@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kento.errors import ModeError, ValidationError
 from kento.exec_cmd import exec_cmd
 
 
@@ -47,47 +48,40 @@ def test_exec_pve_lxc_calls_pct_exec(mock_root, mock_run, tmp_path):
 
 @patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
 @patch("kento.exec_cmd.require_root")
-def test_exec_vm_errors_without_running(mock_root, mock_run, tmp_path, capsys):
+def test_exec_vm_errors_without_running(mock_root, mock_run, tmp_path):
     d = tmp_path / "myvm"
     d.mkdir()
 
     with patch("kento.exec_cmd.resolve_any", return_value=(d, "vm")):
-        rc = exec_cmd("myvm", ["ls"])
+        with pytest.raises(ModeError, match="not supported for VM instances"):
+            exec_cmd("myvm", ["ls"])
 
-    assert rc != 0
     mock_run.assert_not_called()
-    captured = capsys.readouterr()
-    assert "not supported for VM instances" in captured.err
-    assert "SSH" in captured.err
 
 
 @patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
 @patch("kento.exec_cmd.require_root")
-def test_exec_pve_vm_errors(mock_root, mock_run, tmp_path, capsys):
+def test_exec_pve_vm_errors(mock_root, mock_run, tmp_path):
     d = tmp_path / "pvevm"
     d.mkdir()
 
     with patch("kento.exec_cmd.resolve_any", return_value=(d, "pve-vm")):
-        rc = exec_cmd("pvevm", ["ls"])
+        with pytest.raises(ModeError, match="not supported for VM instances"):
+            exec_cmd("pvevm", ["ls"])
 
-    assert rc != 0
     mock_run.assert_not_called()
-    captured = capsys.readouterr()
-    assert "not supported for VM instances" in captured.err
 
 
 @patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
 @patch("kento.exec_cmd.require_root")
-def test_exec_empty_command_errors_rc2(mock_root, mock_run, tmp_path, capsys):
+def test_exec_empty_command_raises_validation_error(mock_root, mock_run, tmp_path):
     # Empty command must error before resolving / running anything.
     with patch("kento.exec_cmd.resolve_any") as mock_resolve:
-        rc = exec_cmd("mybox", [])
+        with pytest.raises(ValidationError, match="requires a command"):
+            exec_cmd("mybox", [])
 
-    assert rc == 2
     mock_run.assert_not_called()
     mock_resolve.assert_not_called()
-    captured = capsys.readouterr()
-    assert "requires a command" in captured.err
 
 
 @patch("kento.exec_cmd.subprocess.run")

@@ -9,11 +9,14 @@ Dispatch per mode:
 The module is named exec_cmd to avoid any confusion with the ``exec`` builtin.
 """
 
+import logging
 import subprocess
-import sys
 from pathlib import Path
 
 from kento import read_mode, require_root, resolve_any
+from kento.errors import ModeError, ValidationError
+
+logger = logging.getLogger("kento")
 
 
 def exec_cmd(name: str, command: list[str],
@@ -22,25 +25,21 @@ def exec_cmd(name: str, command: list[str],
     require_root()
 
     if not command:
-        print(
-            "Error: exec requires a command, e.g. "
-            "'kento exec <name> -- ls -la'",
-            file=sys.stderr,
+        raise ValidationError(
+            "exec requires a command, e.g. "
+            "'kento exec <name> -- ls -la'"
         )
-        return 2
 
     container_dir, mode = resolve_any(name, namespace)
     if mode is None:
         mode = read_mode(container_dir)
 
     if mode in ("vm", "pve-vm"):
-        print(
-            "Error: 'kento exec' is not supported for VM instances "
+        raise ModeError(
+            "'kento exec' is not supported for VM instances "
             "(no in-guest agent). Use SSH, or 'kento attach <name>' for an "
-            "interactive console.",
-            file=sys.stderr,
+            "interactive console."
         )
-        return 1
 
     if mode == "pve":
         # pve-lxc: the instance directory name IS the VMID.
