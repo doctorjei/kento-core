@@ -503,6 +503,110 @@ def test_unprivileged_post_stop_cleans_idmap_binds(hook_fixture, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Unprivileged path — re-entry / idempotency (FIX 2)
+# ---------------------------------------------------------------------------
+
+def test_unprivileged_overlay_guard_exists_in_hook(hook_fixture):
+    """The generated hook must contain the mountpoint-q guard for the
+    unprivileged overlay mount.
+
+    This is a structural assertion (no root needed): it verifies that the
+    overlay mount inside the ``if [ -f ... kento-unprivileged ]`` branch is
+    wrapped with ``if ! mountpoint -q "$ROOTFS"`` so that a re-entry (LXC
+    retry or hook invoked twice after a crash) skips the EBUSY-prone mount.
+    """
+    hook_text = hook_fixture.hook_path.read_text()
+    # The guard must appear in the script. We check for the specific pattern
+    # the fix introduces: the unprivileged block skips the overlay mount when
+    # the rootfs is already a mountpoint.
+    assert 'mountpoint -q "$ROOTFS"' in hook_text, (
+        "Hook must contain 'mountpoint -q \"$ROOTFS\"' guard for unprivileged "
+        "overlay re-entry; the fix is missing."
+    )
+
+
+@pytest.mark.skipif(
+    os.geteuid() != 0,
+    reason="re-entry test requires root (mount --bind + tmpfs to simulate pre-mounted rootfs)",
+)
+def test_unprivileged_overlay_reentry_exits_zero(hook_fixture, tmp_path):
+    """Unprivileged hook is re-entrant: calling it when rootfs is already a
+    mountpoint (simulating an LXC retry or prior crash) must exit 0 without
+    failing EBUSY.
+
+    Sequence:
+    1. Run the hook once (pre-start) → full unprivileged overlay is mounted.
+    2. Run the hook a second time without unmounting → must exit 0 (guard
+       skips the overlay mount) rather than failing on EBUSY.
+    """
+    config_file = tmp_path / "lxc-idmap.conf"
+    config_file.write_text(
+        "lxc.uts.name = test-container\n"
+        "lxc.idmap = u 0 100000 65536\n"
+        "lxc.idmap = g 0 100000 65536\n"
+        "lxc.rootfs.path = /some/path\n"
+    )
+
+    (hook_fixture.container_dir / "kento-unprivileged").write_text("")
+
+    env = dict(hook_fixture.env)
+    env["LXC_HOOK_TYPE"] = "pre-start"
+    env["LXC_CONFIG_FILE"] = str(config_file)
+    env["LIBMOUNT_FORCE_MOUNT2"] = "always"
+
+    rootfs = hook_fixture.rootfs
+    state_dir = hook_fixture.state_dir
+    idmap_dir = state_dir / "idmap"
+    layer_count = len(hook_fixture.layers.split(":"))
+
+    try:
+        # First invocation: sets up the full unprivileged overlay.
+        result1 = subprocess.run(
+            ["sh", str(hook_fixture.hook_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result1.returncode == 0, (
+            f"First hook invocation failed.\nstdout:\n{result1.stdout}\n"
+            f"stderr:\n{result1.stderr}"
+        )
+        assert _is_mountpoint(rootfs), (
+            f"rootfs not a mountpoint after first hook invocation.\n"
+            f"stdout:\n{result1.stdout}\nstderr:\n{result1.stderr}"
+        )
+
+        # Second invocation: rootfs is already mounted — must NOT fail.
+        result2 = subprocess.run(
+            ["sh", str(hook_fixture.hook_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result2.returncode == 0, (
+            f"Second (re-entry) hook invocation must exit 0 but got "
+            f"{result2.returncode}.\nstdout:\n{result2.stdout}\n"
+            f"stderr:\n{result2.stderr}"
+        )
+
+    finally:
+        # Tear down in reverse order: overlay first, then idmap binds.
+        if _is_mountpoint(rootfs):
+            subprocess.run(["umount", str(rootfs)], check=False, capture_output=True)
+        if idmap_dir.exists():
+            for i in range(layer_count - 1, -1, -1):
+                idmap_target = idmap_dir / str(i)
+                if _is_mountpoint(idmap_target):
+                    subprocess.run(
+                        ["umount", str(idmap_target)],
+                        check=False,
+                        capture_output=True,
+                    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

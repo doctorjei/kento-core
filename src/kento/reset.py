@@ -64,6 +64,20 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
         if result.returncode != 0:
             raise StateError(f"failed to unmount {rootfs}. Is the container still running?")
 
+    # Unprivileged cleanup: unmount idmapped bind mounts in reverse order
+    # and remove the $STATE_DIR/idmap directory. This handles stale mounts
+    # left behind by a crashed unprivileged start so that the next start
+    # isn't blocked by the bind idempotency guard finding stale mounts that
+    # point at the wrong (old) overlay configuration.
+    idmap_dir = state_dir / "idmap"
+    if idmap_dir.exists():
+        # Collect subdirectories in sorted order, unmount in reverse.
+        idmap_subdirs = sorted(idmap_dir.iterdir())
+        for d in reversed(idmap_subdirs):
+            if d.is_dir():
+                subprocess.run(["umount", str(d)], capture_output=True)
+        shutil.rmtree(idmap_dir, ignore_errors=True)
+
     # Clear writable layer (crash-safe: rename then rm, not rm then mkdir)
     _safe_clear_dir(state_dir / "upper")
     _safe_clear_dir(state_dir / "work")

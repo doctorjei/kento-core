@@ -324,9 +324,14 @@ case "$HOOK_TYPE" in
             # userxattr: required for overlay-on-idmapped-lowers (kernel 5.19+).
             # index=off,metacopy=off: avoid inode-index and metacopy features
             # that are incompatible with the per-layer idmap path.
-            mount -t overlay overlay \
-                -o "lowerdir=$IDLAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work,userxattr,index=off,metacopy=off" \
-                "$ROOTFS"
+            # Idempotency guard: if rootfs is already a mountpoint (LXC retry
+            # or hook re-entry after a prior crash), skip the overlay mount to
+            # avoid EBUSY aborting the container start.
+            if ! mountpoint -q "$ROOTFS" 2>/dev/null; then
+                mount -t overlay overlay \
+                    -o "lowerdir=$IDLAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work,userxattr,index=off,metacopy=off" \
+                    "$ROOTFS"
+            fi
         else
             # Privileged path — unchanged.
             mount -t overlay overlay \

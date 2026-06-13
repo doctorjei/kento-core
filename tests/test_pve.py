@@ -624,6 +624,46 @@ class TestPveConfigPortForwarding:
                                   port="10022:22")
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
 
+    def test_unprivileged_no_port_emits_post_stop(self):
+        """Unprivileged pve-lxc without port/memory/cores must emit exactly one
+        lxc.hook.post-stop line for idmap cleanup, plus the lxc.hook.mount line.
+
+        Before this fix, unprivileged containers without port/memory/cores got
+        no lxc.hook.post-stop and their $STATE_DIR/idmap dirs were never cleaned.
+        """
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  unprivileged=True)
+        # Must have the mount hook for the per-layer idmap overlay
+        assert "lxc.hook.mount: /var/lib/lxc/100/kento-hook" in cfg
+        # Must have exactly one post-stop for idmap cleanup
+        assert cfg.count("lxc.hook.post-stop:") == 1
+        assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
+        # pre-mount must NOT be present (unprivileged uses mount instead)
+        assert "lxc.hook.pre-mount" not in cfg
+
+    def test_unprivileged_with_port_no_duplicate_post_stop(self):
+        """Unprivileged pve-lxc with port must have exactly one post-stop.
+
+        The port/memory/cores branch already emits lxc.hook.post-stop; the
+        unprivileged guard must not add a second one.
+        """
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  unprivileged=True, port="10022:22")
+        assert cfg.count("lxc.hook.post-stop:") == 1
+        assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
+        # start-host must still be present
+        assert "lxc.hook.start-host: /var/lib/lxc/100/kento-hook" in cfg
+
+    def test_privileged_no_port_no_post_stop(self):
+        """Privileged pve-lxc without port/memory/cores must NOT have post-stop.
+
+        The unprivileged guard must be conditioned on unprivileged=True and must
+        not change privileged container behaviour.
+        """
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  unprivileged=False)
+        assert "lxc.hook.post-stop" not in cfg
+
 
 class TestPveConfigHookscriptRef:
     """Tests for hookscript_ref kwarg — PVE-native snippets replace start-host."""

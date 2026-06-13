@@ -253,10 +253,18 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
     # of "max" (the outer cgroup gets the ceiling but `lxc.cgroup.dir.container.inner`
     # nests the actual namespace one level deeper). Register it whenever any of
     # those features need it.
+    _post_stop_emitted = False
     if hookscript_ref is not None:
         lines.append(f"hookscript: {hookscript_ref}")
     elif port is not None or memory is not None or cores is not None:
         lines.append(f"lxc.hook.start-host: {hook}")
+        lines.append(f"lxc.hook.post-stop: {hook}")
+        _post_stop_emitted = True
+    # Unprivileged containers require post-stop to clean up idmapped bind
+    # mounts ($STATE_DIR/idmap). Register it unconditionally when unprivileged
+    # is True, but only if the port/memory/cores branch hasn't already done so
+    # (avoid a duplicate lxc.hook.post-stop line).
+    if unprivileged and not _post_stop_emitted:
         lines.append(f"lxc.hook.post-stop: {hook}")
     mount_auto = LXC_MOUNT_AUTO_NESTING if nesting else LXC_MOUNT_AUTO
     lines.append(f"lxc.mount.auto: {mount_auto}")

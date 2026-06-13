@@ -852,3 +852,76 @@ def test_reset_sweeps_stale_old_from_prior_crash(mock_root, mock_layers,
     assert (lxc_dir / "upper").is_dir()
     assert list((lxc_dir / "upper").iterdir()) == []
     assert not (lxc_dir / "upper.old").exists()
+
+
+# --- Unprivileged idmap cleanup on scrub (FIX 3) ---
+
+
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_removes_stale_idmap_dir(mock_root, mock_layers, tmp_path):
+    """reset() must remove $STATE_DIR/idmap and unmount its subdirs.
+
+    A crashed unprivileged start can leave $STATE_DIR/idmap/{0,1,...} dirs
+    with stale idmapped bind mounts. Without cleanup, the next start hits the
+    bind idempotency guard (already-mountpoint) but then the overlay mount may
+    use stale IDLAYERS paths. scrub/reset must clean the idmap dir.
+
+    Uses a fake idmap/0 subdir (not actually mounted) and mocks subprocess.run
+    so the test doesn't need root. Asserts that:
+    - umount is attempted for each subdir (in reverse sorted order),
+    - the idmap directory is removed after the umount attempts.
+    """
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-layers").write_text("/old/path\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    # Create a fake idmap directory with two subdirs (simulating a 2-layer
+    # unprivileged container where the start crashed after bind-mounting).
+    idmap_dir = lxc_dir / "idmap"
+    idmap_dir.mkdir()
+    (idmap_dir / "0").mkdir()
+    (idmap_dir / "1").mkdir()
+
+    umount_calls = []
+
+    def _mock_run(args, **kwargs):
+        result = subprocess.CompletedProcess(args, 0)
+        if "lxc-info" in args:
+            result.stdout = "STOPPED"
+        elif "mountpoint" in args:
+            # rootfs not mounted → skip the umount branch
+            result.returncode = 1
+        elif "umount" in args:
+            umount_calls.append(list(args))
+        return result
+
+    with patch("kento.reset.subprocess.run", side_effect=_mock_run), \
+         patch("kento.reset.resolve_container", return_value=lxc_dir):
+        reset("test")
+
+    # idmap directory must be gone after scrub
+    assert not idmap_dir.exists(), (
+        f"$STATE_DIR/idmap should be removed by scrub, but it still exists: {idmap_dir}"
+    )
+
+    # umount should have been attempted for each subdir (order: reverse sorted)
+    umounted_paths = [args[-1] for args in umount_calls]
+    assert str(idmap_dir / "1") in umounted_paths, (
+        f"umount not called for idmap/1; calls: {umount_calls}"
+    )
+    assert str(idmap_dir / "0") in umounted_paths, (
+        f"umount not called for idmap/0; calls: {umount_calls}"
+    )
+    # Reverse order: idmap/1 must be unmounted before idmap/0
+    idx_0 = umounted_paths.index(str(idmap_dir / "0"))
+    idx_1 = umounted_paths.index(str(idmap_dir / "1"))
+    assert idx_1 < idx_0, (
+        f"idmap subdirs must be unmounted in reverse sorted order "
+        f"(idmap/1 before idmap/0); got order: {umounted_paths}"
+    )
