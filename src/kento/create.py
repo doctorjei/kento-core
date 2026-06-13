@@ -41,6 +41,77 @@ def _apparmor_parser_present() -> bool:
     return shutil.which("apparmor_parser") is not None
 
 
+def _overlay_idmap_supported() -> bool:
+    """True iff this kernel can create an idmapped mount over an overlayfs.
+
+    Best-effort runtime probe. Returns False on ANY error or unsupported
+    configuration and NEVER raises. Returns False if not root (mount has no
+    permissions). Returns False on all mainline kernels <= 6.18 (overlayfs
+    lacks FS_ALLOW_IDMAP, so it cannot back an idmapped mount) and on
+    util-linux < 2.40 (no ``X-mount.idmap`` mount option). Forward-compatible:
+    flips to True automatically once both the kernel and util-linux gain
+    overlay-idmap support, with no kento change required.
+
+    NOTE: the True-path correctness (that the emitted ``--unprivileged``
+    config actually yields a readable rootfs) is only validated on a kernel
+    that genuinely supports overlay idmapped mounts; this box returns False.
+
+    Method: build a throwaway overlay (lower/upper/work/merged) in a temp dir,
+    then attempt an idmapped bind of the merged mount via util-linux's
+    ``X-mount.idmap``. Success of that bind is the signal. All mounts are
+    unmounted in a finally; cleanup errors are ignored.
+    """
+    import tempfile
+    tmp = None
+    merged_mounted = False
+    idmap_mounted = False
+    try:
+        tmp = tempfile.mkdtemp(prefix="kento-idmap-probe-")
+        base = Path(tmp)
+        lower = base / "lower"
+        upper = base / "upper"
+        work = base / "work"
+        merged = base / "merged"
+        merged2 = base / "merged2"
+        for d in (lower, upper, work, merged, merged2):
+            d.mkdir()
+        (lower / "probe").write_text("x")
+
+        r = subprocess.run(
+            ["mount", "-t", "overlay", "overlay", "-o",
+             f"lowerdir={lower},upperdir={upper},workdir={work}", str(merged)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return False
+        merged_mounted = True
+
+        r = subprocess.run(
+            ["mount", "--bind", "-o",
+             "X-mount.idmap=u:0:100000:1 g:0:100000:1",
+             str(merged), str(merged2)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return False
+        idmap_mounted = True
+        return True
+    except Exception:  # noqa: BLE001 — probe must never raise
+        return False
+    finally:
+        try:
+            if idmap_mounted:
+                subprocess.run(["umount", str(merged2)],
+                               capture_output=True, text=True)
+            if merged_mounted:
+                subprocess.run(["umount", str(merged)],
+                               capture_output=True, text=True)
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+
+
 def _run_start_or_rollback(cmd: list[str], *, name: str, scope: str) -> None:
     """Run a start command inside create()'s try block.
 
@@ -177,6 +248,7 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                     port: str | None = None,
                     memory: int | None = None,
                     cores: int | None = None,
+                    unprivileged: bool = False,
                     mode: str = "lxc") -> str:
     hook = lxc_dir / "kento-hook"
     lines = [
@@ -276,6 +348,15 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
         lines.append(f"lxc.apparmor.profile = {profile}")
         lines.append("lxc.apparmor.allow_nesting = 1")
         lines.append("lxc.apparmor.allow_incomplete = 1")
+        # Unprivileged plain-LXC: map container UID/GID 0 onto an unprivileged
+        # host range and idmap the rootfs so the mapped owner can read it.
+        # create() has already gated this behind a fail-closed runtime probe
+        # (_overlay_idmap_supported), so on a capable kernel these lines are
+        # safe; on every current mainline kernel create() never reaches here.
+        if unprivileged:
+            lines.append("lxc.idmap = u 0 100000 65536")
+            lines.append("lxc.idmap = g 0 100000 65536")
+            lines.append("lxc.rootfs.options = idmap=container")
     if env:
         for e in env:
             lines.append(f"lxc.environment = {e}")
@@ -404,6 +485,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            pve_args: list[str] | None = None,
            lxc_args: list[str] | None = None,
            net_type: str | None = None,
+           unprivileged: bool = False,
            force: bool = False) -> None:
     require_root()
 
@@ -483,6 +565,33 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             raise ModeError(
                 "--lxc-arg is not applicable to VM modes (no native "
                 "LXC config)."
+            )
+
+    # --unprivileged: validate mode + run the fail-closed overlay-idmap probe
+    # BEFORE any filesystem mutation (mirrors the apparmor pre-flight's
+    # fail-closed placement). `mode` is the PVE-resolved mode here.
+    if unprivileged:
+        if mode in ("vm", "pve-vm"):
+            raise ModeError(
+                "--unprivileged applies to LXC modes only (VMs have their "
+                "own isolation)."
+            )
+        if mode == "pve":
+            raise ModeError(
+                "--unprivileged is not supported on PVE: pct owns storage "
+                "and idmap allocation for unprivileged containers and there "
+                "is no seam for kento's pre-mounted overlay rootfs."
+            )
+        # Plain lxc: only proceed if the kernel can idmap an overlay mount.
+        if not _overlay_idmap_supported():
+            raise StateError(
+                "--unprivileged requires a kernel whose overlayfs supports\n"
+                "idmapped mounts (FS_ALLOW_IDMAP), but this kernel's overlay\n"
+                "cannot be idmapped. kento's rootfs is a podman overlay, so an\n"
+                "unprivileged container would be unable to read its own rootfs.\n"
+                "This needs a kernel with overlay idmapped-mount support (and\n"
+                "util-linux 2.40+); until then create without --unprivileged to\n"
+                "use the default (privileged) mode."
             )
 
     # Pre-validate PVE snippets storage (before any filesystem writes).
@@ -942,6 +1051,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 (container_dir / "kento-cores").write_text(str(cores) + "\n")
             (container_dir / "kento-nesting").write_text(
                 "1\n" if nesting else "0\n")
+            if unprivileged:
+                (container_dir / "kento-unprivileged").write_text("1\n")
 
             # Generate hook (LXC/PVE only) + inject.sh (shared with VM/PVE-VM modes)
             write_hook(container_dir, layers, name, state_dir)
@@ -984,6 +1095,7 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                                     ip=ip, gateway=gateway, env=env,
                                     port=port,
                                     memory=memory, cores=cores,
+                                    unprivileged=unprivileged,
                                     mode=mode)
                 )
                 config_path = f"{container_dir}/config"

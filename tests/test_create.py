@@ -2569,3 +2569,128 @@ class TestDetectCloudinitOnce:
             create("myimage:latest", name="test", mode="lxc")
 
         assert mock_detect.call_count == 1
+
+
+class TestUnprivileged:
+    """--unprivileged flag: mode validation, fail-closed probe gate, config."""
+
+    def test_overlay_idmap_supported_returns_bool_no_raise(self):
+        """The real probe must never raise and returns a bool.
+
+        On this box (kernel <=6.18, overlay lacks FS_ALLOW_IDMAP) it returns
+        False; we only assert the contract, not the specific value.
+        """
+        from kento.create import _overlay_idmap_supported
+        result = _overlay_idmap_supported()
+        assert isinstance(result, bool)
+
+    # --- mode validation (before any filesystem mutation) ---
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_unprivileged_on_vm_errors(self, mock_root, mock_layers,
+                                        mock_run, tmp_path):
+        with patch("kento.create.VM_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(ModeError) as exc:
+                create("myimage:latest", name="test", mode="vm",
+                       unprivileged=True)
+        assert "LXC modes only" in str(exc.value)
+        assert not (tmp_path / "test").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_unprivileged_on_pve_vm_errors(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.create.VM_BASE", tmp_path), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(ModeError) as exc:
+                create("myimage:latest", name="test", mode="vm",
+                       unprivileged=True)
+        assert "LXC modes only" in str(exc.value)
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_unprivileged_on_pve_lxc_errors(self, mock_root, mock_layers,
+                                            mock_run, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"):
+            with pytest.raises(ModeError) as exc:
+                create("myimage:latest", name="test", mode="pve",
+                       unprivileged=True)
+        msg = str(exc.value)
+        assert "PVE" in msg
+        assert "pct" in msg
+
+    # --- plain-lxc fail-closed probe gate ---
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_unprivileged_lxc_probe_false_fails_closed(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create._overlay_idmap_supported", return_value=False), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(StateError) as exc:
+                create("myimage:latest", name="test", mode="lxc",
+                       unprivileged=True)
+        msg = str(exc.value)
+        assert "FS_ALLOW_IDMAP" in msg
+        # Fail-closed: nothing was created before the probe gate raised.
+        assert not (tmp_path / "test").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_unprivileged_lxc_probe_true_emits_idmap_config(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create._overlay_idmap_supported", return_value=True), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc",
+                   unprivileged=True)
+
+        lxc_dir = tmp_path / "test"
+        cfg = (lxc_dir / "config").read_text()
+        assert "lxc.idmap = u 0 100000 65536" in cfg
+        assert "lxc.idmap = g 0 100000 65536" in cfg
+        assert "lxc.rootfs.options = idmap=container" in cfg
+        assert (lxc_dir / "kento-unprivileged").read_text() == "1\n"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_default_no_unprivileged_lines(self, mock_root, mock_layers,
+                                           mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+
+        lxc_dir = tmp_path / "test"
+        cfg = (lxc_dir / "config").read_text()
+        assert "lxc.idmap" not in cfg
+        assert "idmap=container" not in cfg
+        assert not (lxc_dir / "kento-unprivileged").exists()
+
+    # --- generate_config unit-level ---
+
+    def test_generate_config_unprivileged_lines(self, tmp_path):
+        cfg = generate_config("test", tmp_path, mode="lxc", unprivileged=True)
+        assert "lxc.idmap = u 0 100000 65536" in cfg
+        assert "lxc.idmap = g 0 100000 65536" in cfg
+        assert "lxc.rootfs.options = idmap=container" in cfg
+
+    def test_generate_config_default_no_unprivileged_lines(self, tmp_path):
+        cfg = generate_config("test", tmp_path, mode="lxc")
+        assert "lxc.idmap" not in cfg
+        assert "idmap=container" not in cfg
