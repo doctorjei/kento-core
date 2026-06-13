@@ -9,9 +9,10 @@
 #
 # Options:
 #   --mode lxc,pve-lxc,vm,pve-vm   Restrict which modes run (default all four)
-#   --section phase,iso,image,nested
-#                                  Restrict to phases/iso/image/nested sections.
+#   --section phase,iso,image,nested,unpriv
+#                                  Restrict to phases/iso/image/nested/unpriv sections.
 #                                  'nested' runs SECTION D (nested-LXC on PVE).
+#                                  'unpriv' runs SECTION E (unprivileged LXC).
 #   --subgroup NAME                Run only subgroups matching NAME (iso-port,
 #                                    iso-ssh, phase3, ygg, nested-lxc-lifecycle,
 #                                    nested-lxc-hookfire, etc.). Can repeat.
@@ -3051,6 +3052,405 @@ fi
 diag ""
 
 fi  # end section_enabled "nested"
+
+# ==========================================================================
+#  SECTION E: Unprivileged LXC (per-layer idmap, plain-lxc + pve-lxc)
+# ==========================================================================
+#
+# Validates `--unprivileged` for both plain-lxc (--no-pve) and pve-lxc
+# (--pve).  Each mode goes through: create --unprivileged, start, assert
+# init runs at host UID 100000 (THE key per-layer idmap proof), assert
+# rootfs is readable + writable from inside, optional ACL test, stop +
+# destroy, assert clean teardown (no rootfs mountpoint, no idmap dir).
+#
+# Negative guard: kento vm create ... --unprivileged must fail (non-zero)
+# with a message indicating VMs are not supported.
+#
+# NOTE on fail-closed-on-incapable-kernel: bifrost has kernel 6.18 and
+# util-linux 2.41, so the per-layer idmap probe always succeeds here.
+# A future run on a kernel < 5.19 or util-linux < 2.40 should exercise the
+# probe fail-closed path (kento refuses --unprivileged with a clear error).
+# That negative case is not tested here; add a dedicated section or a
+# --subgroup when a sub-5.19 box becomes available.
+#
+# lxc_id for lxc-info / lxc-attach:
+#   plain-lxc : the instance name (container dir = /var/lib/lxc/<name>/)
+#   pve-lxc   : the VMID (container dir = /var/lib/lxc/<vmid>/; kento-name
+#               carries the human name, basename is the VMID)
+
+if section_enabled "unpriv"; then
+
+diag "========================================"
+diag "SECTION E: Unprivileged LXC"
+diag "========================================"
+
+# ---------- E helper: resolve lxc_id from name + mode ----------
+# For plain-lxc the lxc_id IS the name; for pve-lxc it is the VMID
+# (basename of the container directory, which resolve_pve_lxc_dir returns).
+e_lxc_id() {
+    local name="$1"
+    local mode="$2"
+    case "$mode" in
+        lxc)
+            echo "$name"
+            ;;
+        pve-lxc)
+            local d
+            d="$(resolve_pve_lxc_dir "$name")"
+            [ -n "$d" ] && basename "$d" || echo ""
+            ;;
+    esac
+}
+
+# ---------- E helper: force teardown for an unprivileged instance ----------
+e_force_teardown() {
+    local name="$1"
+    local mode="$2"
+    diag "SECTION E: force_teardown $name ($mode)"
+    timeout 20 kento destroy -f "$name" >/dev/null 2>&1 || true
+    force_teardown "$name" "$mode"
+    # Belt-and-suspenders: if idmap bind mounts are still up after force
+    # teardown, unmount them now so the next test isn't blocked by stale binds.
+    local cdir
+    cdir="$(get_container_dir "$name" "$mode" 2>/dev/null)" || true
+    if [ -n "$cdir" ] && [ -d "$cdir" ]; then
+        local state_dir
+        state_dir="$(cat "$cdir/kento-state" 2>/dev/null | tr -d '[:space:]')" || true
+        if [ -n "$state_dir" ] && [ -d "$state_dir/idmap" ]; then
+            umount -l "$state_dir"/idmap/* 2>/dev/null || true
+            rm -rf "$state_dir/idmap" 2>/dev/null || true
+        fi
+    fi
+}
+
+# ---------- E1: per-mode lifecycle (plain-lxc then pve-lxc) ----------
+
+for E_MODE in lxc pve-lxc; do
+
+    E_NAME="e2e-unpriv-${E_MODE}"
+    E_LABEL="unpriv-${E_MODE}"
+
+    case "$E_MODE" in
+        lxc)     E_PVE_FLAG="--no-pve" ;;
+        pve-lxc) E_PVE_FLAG="--pve"    ;;
+    esac
+
+    if ! subgroup_begin "unpriv-${E_MODE}"; then
+        continue
+    fi
+
+    diag "--- E: Unprivileged LXC ($E_MODE) ---"
+    set_last_instance "$E_NAME" "$E_MODE"
+
+    e_ok=1
+
+    # ------------------------------------------------------------------
+    # E.1: create --unprivileged
+    # ------------------------------------------------------------------
+    run_kento "$KTO_CREATE" lxc create "$IMAGE" --name "$E_NAME" \
+        --unprivileged $E_PVE_FLAG
+    if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+        fail "$E_LABEL: create --unprivileged" \
+            "TIMEOUT after ${KTO_CREATE}s" "$RUN_OUTPUT"
+        e_force_teardown "$E_NAME" "$E_MODE"
+        e_ok=0
+    elif [ "$RUN_RC" -eq 0 ]; then
+        pass "$E_LABEL: create --unprivileged"
+    else
+        fail "$E_LABEL: create --unprivileged" \
+            "exit code $RUN_RC" "$RUN_OUTPUT"
+        e_ok=0
+    fi
+
+    # Sentinel file: kento-unprivileged must exist.
+    if [ "$e_ok" -eq 1 ]; then
+        E_CDIR="$(get_container_dir "$E_NAME" "$E_MODE")"
+        if [ -n "$E_CDIR" ] && [ -f "$E_CDIR/kento-unprivileged" ]; then
+            pass "$E_LABEL: kento-unprivileged sentinel exists"
+        else
+            fail "$E_LABEL: kento-unprivileged sentinel exists" \
+                "file not found in $E_CDIR"
+            e_ok=0
+        fi
+    else
+        skip "$E_LABEL: kento-unprivileged sentinel exists" "create failed"
+    fi
+
+    # ------------------------------------------------------------------
+    # E.2: start — assert it reaches running
+    # ------------------------------------------------------------------
+    if [ "$e_ok" -eq 1 ]; then
+        run_kento "$KTO_START_LXC" start "$E_NAME"
+        if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+            fail "$E_LABEL: start succeeds" \
+                "TIMEOUT after ${KTO_START_LXC}s" "$RUN_OUTPUT"
+            e_force_teardown "$E_NAME" "$E_MODE"
+            e_ok=0
+        elif [ "$RUN_RC" -eq 0 ]; then
+            pass "$E_LABEL: start succeeds"
+        else
+            fail "$E_LABEL: start succeeds" \
+                "exit code $RUN_RC" "$RUN_OUTPUT"
+            e_force_teardown "$E_NAME" "$E_MODE"
+            e_ok=0
+        fi
+    else
+        skip "$E_LABEL: start succeeds" "create failed"
+    fi
+
+    if [ "$e_ok" -eq 1 ]; then
+        if wait_running "$E_NAME" "$BOOT_TIMEOUT_LXC"; then
+            pass "$E_LABEL: shows running in list"
+        else
+            fail "$E_LABEL: shows running in list" \
+                "timed out after ${BOOT_TIMEOUT_LXC}s"
+            e_force_teardown "$E_NAME" "$E_MODE"
+            e_ok=0
+        fi
+    else
+        skip "$E_LABEL: shows running in list" "start failed"
+    fi
+
+    # Resolve the lxc_id (name for lxc-info / lxc-attach) now that the
+    # container directory exists (pve-lxc: we need the VMID).
+    E_LXC_ID=""
+    if [ "$e_ok" -eq 1 ]; then
+        E_LXC_ID="$(e_lxc_id "$E_NAME" "$E_MODE")"
+        if [ -z "$E_LXC_ID" ]; then
+            diag "$E_LABEL: could not resolve lxc_id, guest-side tests will skip"
+            e_ok=0
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # E.3: init runs at host UID 100000
+    #
+    # THE key per-layer idmap proof: lxc-info -pH prints the init PID on
+    # the HOST.  Under unprivileged LXC with lxc.idmap u 0 100000 65536,
+    # the container's PID 1 (container-root, uid 0) maps to host UID
+    # 100000.  `ps -o uid= -p <pid>` shows that host-side UID.
+    # ------------------------------------------------------------------
+    if [ "$e_ok" -eq 1 ]; then
+        E_INIT_PID="$(lxc-info -n "$E_LXC_ID" -pH 2>/dev/null | tr -d '[:space:]')"
+        if [ -z "$E_INIT_PID" ]; then
+            fail "$E_LABEL: init PID resolvable (lxc-info -pH)" \
+                "lxc-info returned empty output for lxc_id=$E_LXC_ID"
+            skip "$E_LABEL: init runs at host UID 100000" "init PID not resolvable"
+        else
+            pass "$E_LABEL: init PID resolvable (lxc-info -pH, pid=$E_INIT_PID)"
+            # Check the host-side UID of the init process.
+            E_INIT_UID="$(ps -o uid= -p "$E_INIT_PID" 2>/dev/null | tr -d '[:space:]')"
+            if [ "$E_INIT_UID" = "100000" ]; then
+                pass "$E_LABEL: init runs at host UID 100000 (uid=$E_INIT_UID)"
+            else
+                fail "$E_LABEL: init runs at host UID 100000" \
+                    "expected 100000, got '$E_INIT_UID'" \
+                    "init pid=$E_INIT_PID, lxc_id=$E_LXC_ID"
+            fi
+        fi
+    else
+        skip "$E_LABEL: init PID resolvable (lxc-info -pH)" "not running"
+        skip "$E_LABEL: init runs at host UID 100000" "not running"
+    fi
+
+    # ------------------------------------------------------------------
+    # E.4: rootfs readable inside — id shows uid=0, ls /sbin/init works
+    #
+    # lxc-attach runs commands inside the container's userns, so uid=0
+    # inside maps to host-100000 outside.  Confirming `id` shows uid=0
+    # (root) AND that /sbin/init (or /init) is accessible proves that the
+    # idmapped overlay presents its files as root to container processes.
+    # ------------------------------------------------------------------
+    if [ "$e_ok" -eq 1 ]; then
+        E_ID_OUT="$(lxc-attach -n "$E_LXC_ID" -- id 2>/dev/null)"
+        if echo "$E_ID_OUT" | grep -q "uid=0"; then
+            pass "$E_LABEL: guest id shows uid=0(root) ($E_ID_OUT)"
+        else
+            fail "$E_LABEL: guest id shows uid=0(root)" \
+                "got: $E_ID_OUT"
+        fi
+
+        # Verify the idmapped rootfs is actually readable (a real file must open).
+        E_LS_OUT="$(lxc-attach -n "$E_LXC_ID" -- sh -c \
+            'ls /sbin/init /sbin/init.sysvinit /init 2>/dev/null | head -1' 2>/dev/null)"
+        if [ -n "$E_LS_OUT" ]; then
+            pass "$E_LABEL: rootfs readable inside (found $E_LS_OUT)"
+        else
+            fail "$E_LABEL: rootfs readable inside" \
+                "ls /sbin/init|/init returned empty"
+        fi
+    else
+        skip "$E_LABEL: guest id shows uid=0(root)" "not running"
+        skip "$E_LABEL: rootfs readable inside" "not running"
+    fi
+
+    # ------------------------------------------------------------------
+    # E.5: writable upper — write + read a file in /run (overlay upper)
+    # ------------------------------------------------------------------
+    if [ "$e_ok" -eq 1 ]; then
+        E_WRITE_OUT="$(lxc-attach -n "$E_LXC_ID" -- sh -c \
+            'echo hi > /run/kento-e2e-unpriv && cat /run/kento-e2e-unpriv' 2>/dev/null)"
+        E_WRITE_OUT="$(printf '%s' "$E_WRITE_OUT" | tr -d '[:space:]')"
+        if [ "$E_WRITE_OUT" = "hi" ]; then
+            pass "$E_LABEL: writable upper (/run/kento-e2e-unpriv round-trip)"
+        else
+            fail "$E_LABEL: writable upper (/run/kento-e2e-unpriv round-trip)" \
+                "expected 'hi', got '$E_WRITE_OUT'"
+        fi
+    else
+        skip "$E_LABEL: writable upper (/run/kento-e2e-unpriv round-trip)" \
+            "not running"
+    fi
+
+    # ------------------------------------------------------------------
+    # E.6: ACL — OPTIONAL; skip if setfacl not in guest image
+    #
+    # Runtime ACLs work through the idmapped overlay (spike-proven run 19).
+    # We create a temp file, set an ACL entry on it, and read it back.
+    # The spike used container uid 1 (host-100001) as the ACL subject.
+    # ------------------------------------------------------------------
+    if [ "$e_ok" -eq 1 ]; then
+        E_SETFACL_CHECK="$(lxc-attach -n "$E_LXC_ID" -- sh -c \
+            'command -v setfacl && echo found' 2>/dev/null | tr -d '[:space:]')"
+        if echo "$E_SETFACL_CHECK" | grep -q "found"; then
+            # setfacl is available in the guest; run the real test.
+            E_ACL_OUT="$(lxc-attach -n "$E_LXC_ID" -- sh -c '
+                tmpf=$(mktemp /run/kento-e2e-acl.XXXXXX) || exit 1
+                echo testdata > "$tmpf"
+                setfacl -m u:1:r "$tmpf" || exit 2
+                getfacl -p "$tmpf" 2>/dev/null | grep -c "user:1:r--"
+                rm -f "$tmpf"
+            ' 2>/dev/null | tr -d '[:space:]')"
+            if [ "$E_ACL_OUT" = "1" ]; then
+                pass "$E_LABEL: setfacl + getfacl round-trip in guest"
+            else
+                fail "$E_LABEL: setfacl + getfacl round-trip in guest" \
+                    "expected getfacl to show 'user:1:r--', got: '$E_ACL_OUT'"
+            fi
+        else
+            skip "$E_LABEL: setfacl + getfacl round-trip in guest" \
+                "setfacl not in guest image"
+        fi
+    else
+        skip "$E_LABEL: setfacl + getfacl round-trip in guest" "not running"
+    fi
+
+    # ------------------------------------------------------------------
+    # E.7: stop + destroy → clean teardown
+    #
+    # After destroy:
+    #   (a) rootfs is no longer a mountpoint
+    #   (b) $STATE_DIR/idmap directory is gone (hook cleaned up binds)
+    #   (c) container directory itself is removed
+    # We read the state_dir from kento-state BEFORE destroying.
+    # ------------------------------------------------------------------
+    if [ "$e_ok" -eq 1 ]; then
+        # Capture state_dir path before destroy removes the metadata.
+        E_CDIR="$(get_container_dir "$E_NAME" "$E_MODE")"
+        E_STATE_DIR=""
+        if [ -n "$E_CDIR" ] && [ -f "$E_CDIR/kento-state" ]; then
+            E_STATE_DIR="$(cat "$E_CDIR/kento-state" | tr -d '[:space:]')"
+        fi
+        E_ROOTFS="${E_CDIR}/rootfs"
+
+        run_kento "$KTO_STOP" stop "$E_NAME"
+        if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+            fail "$E_LABEL: stop before destroy" \
+                "TIMEOUT after ${KTO_STOP}s" "$RUN_OUTPUT"
+            e_force_teardown "$E_NAME" "$E_MODE"
+        elif [ "$RUN_RC" -eq 0 ]; then
+            pass "$E_LABEL: stop before destroy"
+        else
+            fail "$E_LABEL: stop before destroy" \
+                "exit code $RUN_RC" "$RUN_OUTPUT"
+            e_force_teardown "$E_NAME" "$E_MODE"
+        fi
+
+        run_kento "$KTO_DESTROY" destroy -f "$E_NAME"
+        if [ "$RUN_TIMED_OUT" -eq 1 ]; then
+            fail "$E_LABEL: destroy" "TIMEOUT after ${KTO_DESTROY}s" "$RUN_OUTPUT"
+            e_force_teardown "$E_NAME" "$E_MODE"
+        elif [ "$RUN_RC" -eq 0 ]; then
+            pass "$E_LABEL: destroy"
+        else
+            fail "$E_LABEL: destroy" "exit code $RUN_RC" "$RUN_OUTPUT"
+            e_force_teardown "$E_NAME" "$E_MODE"
+        fi
+
+        # (a) rootfs is no longer a mountpoint.
+        if mountpoint -q "$E_ROOTFS" 2>/dev/null; then
+            fail "$E_LABEL: rootfs unmounted after destroy" \
+                "$E_ROOTFS is still a mountpoint"
+        else
+            pass "$E_LABEL: rootfs unmounted after destroy"
+        fi
+
+        # (b) idmap directory gone — hook cleaned up the per-layer binds.
+        if [ -n "$E_STATE_DIR" ] && [ -d "$E_STATE_DIR/idmap" ]; then
+            fail "$E_LABEL: idmap dir removed after destroy" \
+                "$E_STATE_DIR/idmap still exists"
+        else
+            pass "$E_LABEL: idmap dir removed after destroy"
+        fi
+
+        # (c) container directory removed.
+        if [ -n "$E_CDIR" ] && [ -d "$E_CDIR" ]; then
+            fail "$E_LABEL: container dir removed after destroy" \
+                "$E_CDIR still exists"
+        else
+            pass "$E_LABEL: container dir removed after destroy"
+        fi
+    else
+        skip "$E_LABEL: stop before destroy" "lifecycle failed"
+        skip "$E_LABEL: destroy" "lifecycle failed"
+        skip "$E_LABEL: rootfs unmounted after destroy" "lifecycle failed"
+        skip "$E_LABEL: idmap dir removed after destroy" "lifecycle failed"
+        skip "$E_LABEL: container dir removed after destroy" "lifecycle failed"
+    fi
+
+    subgroup_end
+
+done  # for E_MODE in lxc pve-lxc
+
+# ---------- E8: negative — vm/pve-vm rejects --unprivileged ----------
+
+if subgroup_begin "unpriv-vm-reject"; then
+diag "--- E8: Negative — vm rejects --unprivileged ---"
+
+E_VM_REJECT="e2e-unpriv-vm-reject"
+set_last_instance "$E_VM_REJECT" "vm"
+
+# Plain-vm reject: `kento vm create ... --unprivileged --no-pve`
+run_kento "$KTO_CREATE" vm create "$IMAGE" --name "$E_VM_REJECT" \
+    --unprivileged --no-pve
+if [ "$RUN_RC" -eq 0 ]; then
+    fail "unpriv-vm-reject: vm create --unprivileged fails (non-zero)" \
+        "Expected failure but got rc=0" "$RUN_OUTPUT"
+    # If it somehow succeeded, clean up.
+    kento destroy -f "$E_VM_REJECT" >/dev/null 2>&1 || true
+else
+    # Non-zero exit, as expected.  Check the output carries a useful message.
+    if echo "$RUN_OUTPUT" | grep -qi "vm\|virtual\|not supported\|lxc\|unprivileged"; then
+        pass "unpriv-vm-reject: vm create --unprivileged fails with clear message"
+    else
+        # Still count as a pass for the reject; just flag the message quality.
+        pass "unpriv-vm-reject: vm create --unprivileged fails (non-zero, rc=$RUN_RC)"
+        diag "unpriv-vm-reject: rejection message did not mention vm/unprivileged: $RUN_OUTPUT"
+    fi
+fi
+
+# Brief diag for future maintainers about the fail-closed kernel check.
+diag "unpriv-vm-reject: NOTE — fail-closed on incapable kernel (< 5.19 / util-linux < 2.40)"
+diag "  cannot be exercised here: bifrost kernel 6.18 + util-linux 2.41 always pass the probe."
+diag "  To test that path, add a subgroup on a sub-5.19 box that asserts"
+diag "  'kento lxc create --unprivileged --no-pve' exits non-zero with the probe error."
+
+subgroup_end
+fi
+
+diag ""
+
+fi  # end section_enabled "unpriv"
 
 # TAP plan (at end, since test count varies with skips)
 echo "1..$TEST_NUM"
