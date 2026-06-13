@@ -86,8 +86,8 @@ def _get_ssh_host_key_fingerprints(
 
 
 def info(name: str, *, container_dir: Path, mode: str,
-         as_json: bool = False, verbose: bool = False) -> None:
-    """Display container information."""
+         as_json: bool = False, verbose: bool = False) -> str:
+    """Return container information as a rendered string."""
 
     # Gather metadata
     data = {}
@@ -189,85 +189,86 @@ def info(name: str, *, container_dir: Path, mode: str,
 
     # Output
     if as_json:
-        print(json.dumps(data, indent=2))
-    else:
-        _print_human(data, verbose,
-                     ssh_keygen_missing=_ssh_keygen_missing)
+        return json.dumps(data, indent=2)
+    return _format_human(data, verbose, ssh_keygen_missing=_ssh_keygen_missing)
 
 
-def _print_human(data: dict, verbose: bool, *,
-                 ssh_keygen_missing: bool = False) -> None:
-    """Print container info in human-readable format."""
-    print(f"Name:       {data['name']}")
-    print(f"Image:      {data['image']}")
-    print(f"Mode:       {data['mode']} ({data['type']})")
-    print(f"Status:     {data['status']}")
-    print(f"Created:    {data['created']}")
-    print(f"Directory:  {data['directory']}")
-    print(f"State:      {data['state_directory']}")
+def _format_human(data: dict, verbose: bool, *,
+                  ssh_keygen_missing: bool = False) -> str:
+    """Return container info as a human-readable string."""
+    lines = []
+    lines.append(f"Name:       {data['name']}")
+    lines.append(f"Image:      {data['image']}")
+    lines.append(f"Mode:       {data['mode']} ({data['type']})")
+    lines.append(f"Status:     {data['status']}")
+    lines.append(f"Created:    {data['created']}")
+    lines.append(f"Directory:  {data['directory']}")
+    lines.append(f"State:      {data['state_directory']}")
 
     if "config_mode" in data:
-        print(f"Config:     {data['config_mode']}")
+        lines.append(f"Config:     {data['config_mode']}")
 
     if "vmid" in data:
-        print(f"VMID:       {data['vmid']}")
+        lines.append(f"VMID:       {data['vmid']}")
     if "port" in data:
-        print(f"Port:       {data['port']}")
+        lines.append(f"Port:       {data['port']}")
     if "network" in data:
-        print(f"Network:    {data['network']}")
+        lines.append(f"Network:    {data['network']}")
     if "mac" in data:
-        print(f"MAC:        {data['mac']}")
+        lines.append(f"MAC:        {data['mac']}")
     if "nesting" in data:
-        print(f"Nesting:    {'allowed' if data['nesting'] else 'disabled'}")
+        lines.append(f"Nesting:    {'allowed' if data['nesting'] else 'disabled'}")
     if "timezone" in data:
-        print(f"Timezone:   {data['timezone']}")
+        lines.append(f"Timezone:   {data['timezone']}")
     if data.get("ssh_user", "root") != "root":
-        print(f"SSH user:   {data['ssh_user']}")
+        lines.append(f"SSH user:   {data['ssh_user']}")
     if "environment" in data:
-        print(f"Env:        {', '.join(data['environment'])}")
+        lines.append(f"Env:        {', '.join(data['environment'])}")
 
-    print(f"Layers:     {data['layer_count']}")
+    lines.append(f"Layers:     {data['layer_count']}")
 
     fp = data.get("ssh_host_key_fingerprints", {})
     if fp:
-        print("SSH host key fingerprints:")
+        lines.append("SSH host key fingerprints:")
         # Display order: rsa, ecdsa, ed25519, then any others alphabetically
         order = ["rsa", "ecdsa", "ed25519"]
         ordered_keys = [k for k in order if k in fp]
         ordered_keys += sorted(k for k in fp if k not in order)
         for kt in ordered_keys:
             label = kt.upper()
-            print(f"  {label + ':':<10} {fp[kt]}")
+            lines.append(f"  {label + ':':<10} {fp[kt]}")
     elif ssh_keygen_missing:
-        print("SSH host key fingerprints:")
-        print("  ssh-keygen not found, cannot display fingerprints")
+        lines.append("SSH host key fingerprints:")
+        lines.append("  ssh-keygen not found, cannot display fingerprints")
 
     if verbose:
         if "upper_size" in data:
-            print(f"Upper size: {data['upper_size']}")
+            lines.append(f"Upper size: {data['upper_size']}")
         if "layers" in data:
-            print("Layer paths:")
+            lines.append("Layer paths:")
             layer_sizes = data.get("layer_sizes", [])
             for i, lp in enumerate(data["layers"]):
                 size = layer_sizes[i] if i < len(layer_sizes) else None
                 if size is None:
                     size = "missing"
-                print(f"  [{i}] {lp} ({size})")
+                lines.append(f"  [{i}] {lp} ({size})")
 
         qemu_args = data.get("qemu_args", [])
         pve_args = data.get("pve_args", [])
         lxc_args = data.get("lxc_args", [])
         if qemu_args or pve_args or lxc_args:
-            print("Pass-through flags:")
+            lines.append("Pass-through flags:")
             if qemu_args:
-                print("  --qemu-arg:")
+                lines.append("  --qemu-arg:")
                 for line in qemu_args:
-                    print(f"    {line}")
+                    lines.append(f"    {line}")
             if pve_args:
-                print("  --pve-arg:")
+                lines.append("  --pve-arg:")
                 for line in pve_args:
-                    print(f"    {line}")
+                    lines.append(f"    {line}")
             if lxc_args:
-                print("  --lxc-arg:")
+                lines.append("  --lxc-arg:")
                 for line in lxc_args:
-                    print(f"    {line}")
+                    lines.append(f"    {line}")
+
+    return "\n".join(lines)

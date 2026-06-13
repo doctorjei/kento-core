@@ -803,7 +803,7 @@ def test_list_json_includes_optional_fields_when_present(mock_run, tmp_path):
 @patch("kento.info.is_running", return_value=False)
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
 def test_list_json_keys_consistent_with_inspect_json(mock_run, mock_running,
-                                                     tmp_path, capsys):
+                                                     tmp_path):
     """Key parity: every key emitted by list --json is also emitted by
     inspect --json for the same instance, with matching values."""
     from kento.info import info
@@ -826,9 +826,7 @@ def test_list_json_keys_consistent_with_inspect_json(mock_run, mock_running,
         list_entry = json.loads(list_containers(as_json=True))
     list_entry = list_entry[0]
 
-    # info() still prints (not yet converted); capture via capsys
-    info("mybox", container_dir=lxc_dir, mode="pve-lxc", as_json=True)
-    inspect_data = json.loads(capsys.readouterr().out)
+    inspect_data = json.loads(info("mybox", container_dir=lxc_dir, mode="pve-lxc", as_json=True))
 
     # Every list key is present in inspect output with the same value.
     for key, value in list_entry.items():
