@@ -18,7 +18,7 @@ def _mock_run(args, **kwargs):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_shows_containers(mock_run, tmp_path, capsys):
+def test_list_shows_containers(mock_run, tmp_path):
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
@@ -28,16 +28,15 @@ def test_list_shows_containers(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "mybox" in output
-    assert "myimage:latest" in output
-    assert "running" in output
+    assert "mybox" in result
+    assert "myimage:latest" in result
+    assert "running" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_with_separate_state_dir(mock_run, tmp_path, capsys):
+def test_list_with_separate_state_dir(mock_run, tmp_path):
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
     state = tmp_path / "user-state" / "mybox"
@@ -49,25 +48,23 @@ def test_list_with_separate_state_dir(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "mybox" in output
+    assert "mybox" in result
 
 
 @patch("kento.list.subprocess.run")
-def test_list_empty(mock_run, tmp_path, capsys):
+def test_list_empty(mock_run, tmp_path):
     vm = tmp_path / "vm"
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "no instances found" in output
+    assert "no instances found" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_skips_unreadable_entry(mock_run, tmp_path, capsys):
+def test_list_skips_unreadable_entry(mock_run, tmp_path):
     """One instance dir that raises OSError on read (e.g. a concurrent
     `kento destroy` rmtree racing between glob and read) must be skipped,
     not abort the whole listing and hide the healthy instances."""
@@ -98,14 +95,13 @@ def test_list_skips_unreadable_entry(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm), \
          patch.object(Path, "read_text", flaky_read_text):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
     # Healthy instance still listed.
-    assert "goodbox" in output
-    assert "good-image:latest" in output
+    assert "goodbox" in result
+    assert "good-image:latest" in result
     # Bad instance skipped, not crashing the listing.
-    assert "badbox" not in output
+    assert "badbox" not in result
 
 
 # --- PVE mode tests ---
@@ -134,7 +130,7 @@ def _mock_mixed_run(args, **kwargs):
 @patch("kento.pve_config_exists", return_value=True)
 @patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_list_pve_container(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
+def test_list_pve_container(mock_run, mock_cfg, mock_cfg2, tmp_path):
     lxc_dir = tmp_path / "100"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
@@ -146,17 +142,16 @@ def test_list_pve_container(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "webbox" in output
-    assert "pve-lxc" in output
-    assert "running" in output
+    assert "webbox" in result
+    assert "pve-lxc" in result
+    assert "running" in result
 
 
 @patch("kento.list.pve_config_exists", return_value=False)
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_list_pve_orphan(mock_run, mock_cfg, tmp_path, capsys):
+def test_list_pve_orphan(mock_run, mock_cfg, tmp_path):
     """A pve instance whose PVE config is gone shows as 'orphan'."""
     lxc_dir = tmp_path / "100"
     lxc_dir.mkdir()
@@ -169,11 +164,10 @@ def test_list_pve_orphan(mock_run, mock_cfg, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "webbox" in output
-    assert "orphan" in output
+    assert "webbox" in result
+    assert "orphan" in result
     # We must NOT have shelled out to pct status for an orphan.
     for call in mock_run.call_args_list:
         argv = call.args[0] if call.args else call.kwargs.get("args", [])
@@ -183,7 +177,7 @@ def test_list_pve_orphan(mock_run, mock_cfg, tmp_path, capsys):
 @patch("kento.pve_config_exists", return_value=True)
 @patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_run)
-def test_list_mixed_lxc_and_pve(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
+def test_list_mixed_lxc_and_pve(mock_run, mock_cfg, mock_cfg2, tmp_path):
     # LXC container
     lxc = tmp_path / "mybox"
     lxc.mkdir()
@@ -204,18 +198,17 @@ def test_list_mixed_lxc_and_pve(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys)
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "mybox" in output
-    assert "webbox" in output
+    assert "mybox" in result
+    assert "webbox" in result
     # lxc mode shows as "lxc", pve mode shows as "pve-lxc"
-    assert "lxc" in output
-    assert "pve-lxc" in output
+    assert "lxc" in result
+    assert "pve-lxc" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_shows_type_column(mock_run, tmp_path, capsys):
+def test_list_shows_type_column(mock_run, tmp_path):
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
@@ -225,12 +218,11 @@ def test_list_shows_type_column(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "TYPE" in output
-    assert "NAME" in output
-    assert "MODE" not in output
+    assert "TYPE" in result
+    assert "NAME" in result
+    assert "MODE" not in result
 
 
 # --- VM mode tests ---
@@ -244,7 +236,7 @@ def _mock_vm_du_run(args, **kwargs):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
-def test_list_vm_container(mock_run, tmp_path, capsys):
+def test_list_vm_container(mock_run, tmp_path):
     lxc = tmp_path / "lxc"
     lxc.mkdir()
     vm = tmp_path / "vm"
@@ -260,16 +252,15 @@ def test_list_vm_container(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "testvm" in output
-    assert "vm" in output
-    assert "stopped" in output
+    assert "testvm" in result
+    assert "vm" in result
+    assert "stopped" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
-def test_list_vm_running(mock_run, tmp_path, capsys):
+def test_list_vm_running(mock_run, tmp_path):
     lxc = tmp_path / "lxc"
     lxc.mkdir()
     vm = tmp_path / "vm"
@@ -285,11 +276,10 @@ def test_list_vm_running(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=True):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "testvm" in output
-    assert "running" in output
+    assert "testvm" in result
+    assert "running" in result
 
 
 def _mock_mixed_all_run(args, **kwargs):
@@ -302,7 +292,7 @@ def _mock_mixed_all_run(args, **kwargs):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
-def test_list_mixed_lxc_pve_vm(mock_run, tmp_path, capsys):
+def test_list_mixed_lxc_pve_vm(mock_run, tmp_path):
     lxc = tmp_path / "lxc"
     lxc.mkdir()
     vm = tmp_path / "vm"
@@ -328,20 +318,19 @@ def test_list_mixed_lxc_pve_vm(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "mybox" in output
-    assert "lxc" in output
-    assert "testvm" in output
-    assert "vm" in output
+    assert "mybox" in result
+    assert "lxc" in result
+    assert "testvm" in result
+    assert "vm" in result
 
 
 # --- TYPE column tests ---
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
+def test_lxc_mode_shows_type_lxc(mock_run, tmp_path):
     """Containers with mode 'lxc' should display TYPE 'lxc'."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -353,10 +342,9 @@ def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    lines = output.strip().split("\n")
+    lines = result.splitlines()
     # Data line (skip header + separator)
     data_line = lines[2]
     assert "lxc" in data_line
@@ -365,7 +353,7 @@ def test_lxc_mode_shows_type_lxc(mock_run, tmp_path, capsys):
 @patch("kento.pve_config_exists", return_value=True)
 @patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_pve_mode_shows_type_pve_lxc(mock_run, mock_cfg, mock_cfg2, tmp_path, capsys):
+def test_pve_mode_shows_type_pve_lxc(mock_run, mock_cfg, mock_cfg2, tmp_path):
     """Containers with mode 'pve' should display TYPE 'pve-lxc'."""
     lxc_dir = tmp_path / "100"
     lxc_dir.mkdir()
@@ -378,17 +366,16 @@ def test_pve_mode_shows_type_pve_lxc(mock_run, mock_cfg, mock_cfg2, tmp_path, ca
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    lines = output.strip().split("\n")
+    lines = result.splitlines()
     data_line = lines[2]
     assert "pve-lxc" in data_line
     assert "pve-vm" not in data_line
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
-def test_vm_mode_shows_type_vm(mock_run, tmp_path, capsys):
+def test_vm_mode_shows_type_vm(mock_run, tmp_path):
     """Containers with mode 'vm' should display TYPE 'vm'."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
@@ -405,10 +392,9 @@ def test_vm_mode_shows_type_vm(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    lines = output.strip().split("\n")
+    lines = result.splitlines()
     data_line = lines[2]
     assert "vm" in data_line
 
@@ -417,7 +403,7 @@ def test_vm_mode_shows_type_vm(mock_run, tmp_path, capsys):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
-def test_scope_none_shows_all(mock_run, tmp_path, capsys):
+def test_scope_none_shows_all(mock_run, tmp_path):
     """scope=None should show both LXC and VM entries."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
@@ -442,15 +428,14 @@ def test_scope_none_shows_all(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers(scope=None)
+        result = list_containers(scope=None)
 
-    output = capsys.readouterr().out
-    assert "mybox" in output
-    assert "testvm" in output
+    assert "mybox" in result
+    assert "testvm" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
-def test_scope_lxc_shows_only_lxc(mock_run, tmp_path, capsys):
+def test_scope_lxc_shows_only_lxc(mock_run, tmp_path):
     """scope='lxc' should show only LXC/PVE entries, not VMs."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
@@ -475,11 +460,10 @@ def test_scope_lxc_shows_only_lxc(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers(scope="lxc")
+        result = list_containers(scope="lxc")
 
-    output = capsys.readouterr().out
-    assert "mybox" in output
-    assert "testvm" not in output
+    assert "mybox" in result
+    assert "testvm" not in result
 
 
 # --- PVE-VM mode tests ---
@@ -488,7 +472,7 @@ def test_scope_lxc_shows_only_lxc(mock_run, tmp_path, capsys):
 class TestListPveVm:
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
     @patch("kento.list.is_running", return_value=False)
-    def test_pve_vm_shows_as_vm_type(self, mock_is_running, mock_run, tmp_path, capsys):
+    def test_pve_vm_shows_as_vm_type(self, mock_is_running, mock_run, tmp_path):
         """Containers with mode 'pve-vm' should display TYPE 'pve-vm'."""
         lxc = tmp_path / "lxc"
         vm = tmp_path / "vm"
@@ -505,17 +489,16 @@ class TestListPveVm:
 
         with patch("kento.list.LXC_BASE", lxc), \
              patch("kento.list.VM_BASE", vm):
-            list_containers()
+            result = list_containers()
 
-        output = capsys.readouterr().out
-        assert "test" in output
-        lines = output.strip().split("\n")
+        assert "test" in result
+        lines = result.splitlines()
         data_line = lines[2]
         assert "pve-vm" in data_line
 
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
     @patch("kento.list.is_running", return_value=False)
-    def test_pve_vm_included_in_vm_scope(self, mock_is_running, mock_run, tmp_path, capsys):
+    def test_pve_vm_included_in_vm_scope(self, mock_is_running, mock_run, tmp_path):
         """Containers with mode 'pve-vm' should appear with scope='vm'."""
         lxc = tmp_path / "lxc"
         vm = tmp_path / "vm"
@@ -532,14 +515,13 @@ class TestListPveVm:
 
         with patch("kento.list.LXC_BASE", lxc), \
              patch("kento.list.VM_BASE", vm):
-            list_containers(scope="vm")
+            result = list_containers(scope="vm")
 
-        output = capsys.readouterr().out
-        assert "test" in output
+        assert "test" in result
 
     @patch("kento.list.pve_config_exists", return_value=False)
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
-    def test_pve_vm_orphan(self, mock_run, mock_cfg, tmp_path, capsys):
+    def test_pve_vm_orphan(self, mock_run, mock_cfg, tmp_path):
         """A pve-vm whose PVE config is gone shows as 'orphan' (vmid read
         from kento-vmid; qm status never invoked)."""
         lxc = tmp_path / "lxc"
@@ -557,15 +539,14 @@ class TestListPveVm:
 
         with patch("kento.list.LXC_BASE", lxc), \
              patch("kento.list.VM_BASE", vm):
-            list_containers()
+            result = list_containers()
 
-        output = capsys.readouterr().out
-        assert "test" in output
-        assert "orphan" in output
+        assert "test" in result
+        assert "orphan" in result
         mock_cfg.assert_called_once_with("100", "pve-vm")
 
     @patch("kento.list.subprocess.run", side_effect=_mock_vm_du_run)
-    def test_pve_vm_excluded_from_lxc_scope(self, mock_run, tmp_path, capsys):
+    def test_pve_vm_excluded_from_lxc_scope(self, mock_run, tmp_path):
         """Containers with mode 'pve-vm' should NOT appear with scope='lxc'."""
         lxc = tmp_path / "lxc"
         vm = tmp_path / "vm"
@@ -581,14 +562,13 @@ class TestListPveVm:
 
         with patch("kento.list.LXC_BASE", lxc), \
              patch("kento.list.VM_BASE", vm):
-            list_containers(scope="lxc")
+            result = list_containers(scope="lxc")
 
-        output = capsys.readouterr().out
-        assert "test" not in output or "no instances found" in output
+        assert "test" not in result or "no instances found" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_mixed_all_run)
-def test_scope_vm_shows_only_vm(mock_run, tmp_path, capsys):
+def test_scope_vm_shows_only_vm(mock_run, tmp_path):
     """scope='vm' should show only VM entries, not LXC/PVE."""
     lxc = tmp_path / "lxc"
     lxc.mkdir()
@@ -613,18 +593,17 @@ def test_scope_vm_shows_only_vm(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers(scope="vm")
+        result = list_containers(scope="vm")
 
-    output = capsys.readouterr().out
-    assert "testvm" in output
-    assert "mybox" not in output
+    assert "testvm" in result
+    assert "mybox" not in result
 
 
 # --- show_size opt-in tests (v1.2.1) ---
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_default_omits_upper_size_column(mock_run, tmp_path, capsys):
+def test_list_default_omits_upper_size_column(mock_run, tmp_path):
     """By default the UPPER SIZE column is absent from the header and rows."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -635,16 +614,15 @@ def test_list_default_omits_upper_size_column(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    assert "UPPER SIZE" not in output
-    assert "mybox" in output
-    assert "STATUS" in output
+    assert "UPPER SIZE" not in result
+    assert "mybox" in result
+    assert "STATUS" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_show_size_true_includes_upper_size_column(mock_run, tmp_path, capsys):
+def test_list_show_size_true_includes_upper_size_column(mock_run, tmp_path):
     """show_size=True restores the UPPER SIZE column."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -655,15 +633,14 @@ def test_list_show_size_true_includes_upper_size_column(mock_run, tmp_path, caps
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers(show_size=True)
+        result = list_containers(show_size=True)
 
-    output = capsys.readouterr().out
-    assert "UPPER SIZE" in output
-    assert "16K" in output
+    assert "UPPER SIZE" in result
+    assert "16K" in result
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_default_does_not_invoke_du(mock_run, tmp_path, capsys):
+def test_list_default_does_not_invoke_du(mock_run, tmp_path):
     """Without show_size, subprocess.run is never called with 'du'."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -682,7 +659,7 @@ def test_list_default_does_not_invoke_du(mock_run, tmp_path, capsys):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_show_size_invokes_du_per_row(mock_run, tmp_path, capsys):
+def test_list_show_size_invokes_du_per_row(mock_run, tmp_path):
     """With show_size=True, du -sh is called once per instance row."""
     for name in ("alpha", "bravo"):
         d = tmp_path / name
@@ -705,7 +682,7 @@ def test_list_show_size_invokes_du_per_row(mock_run, tmp_path, capsys):
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_default_columns_widths_align_without_size(mock_run, tmp_path, capsys):
+def test_list_default_columns_widths_align_without_size(mock_run, tmp_path):
     """Default output's four columns line up without UPPER SIZE."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -716,10 +693,9 @@ def test_list_default_columns_widths_align_without_size(mock_run, tmp_path, caps
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers()
+        result = list_containers()
 
-    output = capsys.readouterr().out
-    lines = output.strip().split("\n")
+    lines = result.splitlines()
     # header + separator + 1 data row
     assert len(lines) == 3
     # Separator is dashes split by "  " into 4 groups (4 columns)
@@ -732,7 +708,7 @@ def test_list_default_columns_widths_align_without_size(mock_run, tmp_path, caps
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_json_emits_array_with_expected_keys(mock_run, tmp_path, capsys):
+def test_list_json_emits_array_with_expected_keys(mock_run, tmp_path):
     """--json emits a JSON array; each object carries the inspect --json keys."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -745,9 +721,8 @@ def test_list_json_emits_array_with_expected_keys(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers(as_json=True)
+        data = json.loads(list_containers(as_json=True))
 
-    data = json.loads(capsys.readouterr().out)
     assert isinstance(data, list)
     assert len(data) == 1
     entry = data[0]
@@ -759,23 +734,21 @@ def test_list_json_emits_array_with_expected_keys(mock_run, tmp_path, capsys):
 
 
 @patch("kento.list.subprocess.run")
-def test_list_json_empty_is_array(mock_run, tmp_path, capsys):
+def test_list_json_empty_is_array(mock_run, tmp_path):
     """Zero instances → '[]', NOT the human '(no instances found)' string."""
     vm = tmp_path / "vm"
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers(as_json=True)
+        result = list_containers(as_json=True)
 
-    output = capsys.readouterr().out
-    assert "no instances found" not in output
-    assert json.loads(output) == []
+    assert "no instances found" not in result
+    assert json.loads(result) == []
 
 
 @patch("kento.pve_config_exists", return_value=True)
 @patch("kento.list.pve_config_exists", return_value=True)
 @patch("kento.list.subprocess.run", side_effect=_mock_pve_run)
-def test_list_json_pve_mode_normalized(mock_run, mock_cfg, mock_cfg2,
-                                       tmp_path, capsys):
+def test_list_json_pve_mode_normalized(mock_run, mock_cfg, mock_cfg2, tmp_path):
     """A pve-lxc instance reports mode == 'pve-lxc' (normalized) in --json,
     matching inspect --json."""
     lxc_dir = tmp_path / "100"
@@ -789,17 +762,15 @@ def test_list_json_pve_mode_normalized(mock_run, mock_cfg, mock_cfg2,
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers(as_json=True)
+        data = json.loads(list_containers(as_json=True))
 
-    data = json.loads(capsys.readouterr().out)
     assert len(data) == 1
     assert data[0]["mode"] == "pve-lxc"
     assert data[0]["type"] == "LXC"
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_json_includes_optional_fields_when_present(mock_run, tmp_path,
-                                                         capsys):
+def test_list_json_includes_optional_fields_when_present(mock_run, tmp_path):
     """vmid / mac / environment surface in the JSON object when present."""
     vm = tmp_path / "vm"
     vm.mkdir()
@@ -818,9 +789,8 @@ def test_list_json_includes_optional_fields_when_present(mock_run, tmp_path,
     with patch("kento.list.LXC_BASE", lxc), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.vm.is_vm_running", return_value=False):
-        list_containers(as_json=True)
+        data = json.loads(list_containers(as_json=True))
 
-    data = json.loads(capsys.readouterr().out)
     assert len(data) == 1
     entry = data[0]
     assert entry["type"] == "VM"
@@ -853,9 +823,10 @@ def test_list_json_keys_consistent_with_inspect_json(mock_run, mock_running,
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm), \
          patch("kento.list.pve_config_exists", return_value=True):
-        list_containers(as_json=True)
-    list_entry = json.loads(capsys.readouterr().out)[0]
+        list_entry = json.loads(list_containers(as_json=True))
+    list_entry = list_entry[0]
 
+    # info() still prints (not yet converted); capture via capsys
     info("mybox", container_dir=lxc_dir, mode="pve-lxc", as_json=True)
     inspect_data = json.loads(capsys.readouterr().out)
 
@@ -868,7 +839,7 @@ def test_list_json_keys_consistent_with_inspect_json(mock_run, mock_running,
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_json_skips_unreadable_entry(mock_run, tmp_path, capsys):
+def test_list_json_skips_unreadable_entry(mock_run, tmp_path):
     """A racing destroy drops that instance from the array, never aborts."""
     good = tmp_path / "goodbox"
     good.mkdir()
@@ -896,16 +867,15 @@ def test_list_json_skips_unreadable_entry(mock_run, tmp_path, capsys):
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm), \
          patch.object(Path, "read_text", flaky_read_text):
-        list_containers(as_json=True)
+        data = json.loads(list_containers(as_json=True))
 
-    data = json.loads(capsys.readouterr().out)
     names = [e["name"] for e in data]
     assert "goodbox" in names
     assert "badbox" not in names
 
 
 @patch("kento.list.subprocess.run", side_effect=_mock_run)
-def test_list_json_size_includes_upper_size(mock_run, tmp_path, capsys):
+def test_list_json_size_includes_upper_size(mock_run, tmp_path):
     """show_size=True includes upper_size in the JSON object; omitted otherwise."""
     lxc_dir = tmp_path / "mybox"
     lxc_dir.mkdir()
@@ -918,12 +888,10 @@ def test_list_json_size_includes_upper_size(mock_run, tmp_path, capsys):
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers(as_json=True)
-    no_size = json.loads(capsys.readouterr().out)[0]
-    assert "upper_size" not in no_size
+        no_size = json.loads(list_containers(as_json=True))
+    assert "upper_size" not in no_size[0]
 
     with patch("kento.list.LXC_BASE", tmp_path), \
          patch("kento.list.VM_BASE", vm):
-        list_containers(as_json=True, show_size=True)
-    with_size = json.loads(capsys.readouterr().out)[0]
-    assert with_size["upper_size"] == "16K"
+        with_size = json.loads(list_containers(as_json=True, show_size=True))
+    assert with_size[0]["upper_size"] == "16K"

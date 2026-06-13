@@ -9,7 +9,13 @@ from kento.info import _get_ssh_host_key_fingerprints
 
 
 def list_containers(scope: str | None = None, show_size: bool = False,
-                    as_json: bool = False) -> None:
+                    as_json: bool = False) -> str:
+    """List kento-managed instances.
+
+    Returns the rendered text (either a JSON string, the human-readable columnar
+    table, or '(no instances found)'). The caller is responsible for printing the
+    returned string; this function does not print anything.
+    """
     instances = []
 
     image_files = []
@@ -114,30 +120,27 @@ def list_containers(scope: str | None = None, show_size: bool = False,
             continue
 
     if as_json:
-        print(json.dumps(instances, indent=2))
-        return
+        return json.dumps(instances, indent=2)
 
     if not instances:
-        print("(no instances found)")
-        return
+        return "(no instances found)"
 
     if show_size:
         rows = [(e["name"], e["mode"], e["image"], e["status"], e["upper_size"])
                 for e in instances]
+        headers = ("NAME", "TYPE", "IMAGE", "STATUS", "UPPER SIZE")
     else:
         rows = [(e["name"], e["mode"], e["image"], e["status"])
                 for e in instances]
-
-    if show_size:
-        headers = ("NAME", "TYPE", "IMAGE", "STATUS", "UPPER SIZE")
-    else:
         headers = ("NAME", "TYPE", "IMAGE", "STATUS")
+
     widths = []
     for i, header in enumerate(headers):
         col_max = max((len(row[i]) for row in rows), default=0)
         widths.append(max(len(header), col_max))
 
-    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
+    lines = ["  ".join(h.ljust(w) for h, w in zip(headers, widths)),
+             "  ".join("-" * w for w in widths)]
     for row in rows:
-        print("  ".join(val.ljust(w) for val, w in zip(row, widths)))
+        lines.append("  ".join(val.ljust(w) for val, w in zip(row, widths)))
+    return "\n".join(lines)
