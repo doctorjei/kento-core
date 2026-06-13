@@ -46,7 +46,7 @@ or `--no-pve` to disable it.
 - Python 3.11+
 - Podman
 - LXC (for LXC/PVE modes)
-- util-linux 2.39+ (for `LIBMOUNT_FORCE_MOUNT2` support)
+- util-linux 2.39+ (for `LIBMOUNT_FORCE_MOUNT2` support; `--unprivileged` additionally requires 2.40+ for `X-mount.idmap`)
 - QEMU + virtiofsd (for VM mode)
 - nftables (for `--port` with LXC/PVE modes)
 
@@ -106,7 +106,7 @@ Options:
 | `--ssh-key-user NAME` | root | User for SSH key injection |
 | `--ssh-host-keys` | off | Auto-generate SSH host keys at create time |
 | `--config-mode MODE` | auto | Config delivery: `injection`, `cloudinit`, or `auto` |
-| `--unprivileged` | off | Run as an unprivileged plain-LXC container (idmap-based). Plain `lxc` only; kernel-gated and fail-closed — see below |
+| `--unprivileged` | off | Run as an unprivileged container via per-layer idmapped mounts (lxc and pve-lxc). Requires kernel >= 5.19 and util-linux >= 2.40; fails closed on incapable hosts — see below |
 | `--mac XX:XX:...` | auto | Override MAC address (VM modes only) |
 | `--qemu-arg ARG` | none | Extra verbatim QEMU argument (VM modes only, repeatable; last occurrence wins) |
 | `--pve-arg "KEY: VALUE"` | none | Extra verbatim line appended to the PVE config (PVE modes only, repeatable) |
@@ -121,25 +121,30 @@ Structural keys kento owns (`lxc.rootfs.path`, `lxc.hook.*`, `lxc.net.*`,
 `lxc.cgroup2.memory.max` / `lxc.cgroup2.cpu.max` lines `set` manages) are
 rejected; everything else passes through verbatim.
 
-#### `--unprivileged` (plain LXC)
+#### `--unprivileged` (lxc and pve-lxc)
 
-Instances are **privileged by default**. `--unprivileged` opts a plain-`lxc`
-container into an idmap-based unprivileged config (`lxc.idmap` +
-`lxc.rootfs.options=idmap=container`).
+Instances are **privileged by default**. `--unprivileged` opts an LXC container
+into an unprivileged configuration where container root (UID/GID 0) maps to an
+unprivileged host UID/GID range (default 100000:65536).
 
-This is **kernel-gated and currently unavailable on mainline kernels.** Kento's
-rootfs is a podman overlay whose shared layers are owned by host root; an
-unprivileged container needs that rootfs idmapped, but overlayfs cannot be
-idmapped on current mainline kernels (including 6.18 — overlayfs lacks
-`FS_ALLOW_IDMAP`). So `--unprivileged` runs a runtime probe and, when the kernel
-cannot idmap an overlay, **fails closed** with a clear error rather than
-producing a broken container. It starts working automatically once a kernel ships
-overlay idmapped-mount support — no kento change required.
+Kento implements this via **per-layer idmapped bind mounts**: each OCI lower
+layer is idmapped individually (`X-mount.idmap`), then overlayfs is stacked over
+the idmapped lowers with `userxattr`. For plain-lxc, kento emits `lxc.idmap`
+lines and its pre-start hook builds the overlay. For pve-lxc, kento sets
+`unprivileged: 1` so PVE manages the user namespace, and the mount hook reads
+PVE's generated idmap range.
 
-`--unprivileged` is plain-`lxc` only. It is rejected for VM modes, and for
-`pve-lxc` (`pct` owns storage and idmap for unprivileged containers, leaving no
-seam for kento's pre-mounted overlay rootfs). See
-[Modes — Privilege level](docs/modes.md#privilege-level).
+**Requirements:** kernel >= 5.19 (idmapped overlay lower mounts) and util-linux
+>= 2.40 (`X-mount.idmap`). Kento probes both at create time and **fails closed**
+with a clear error on incapable systems. The default privileged path still
+requires only util-linux >= 2.39.
+
+**ACL note:** POSIX ACLs baked into read-only image layers are not honored in
+unprivileged mode. Runtime ACLs on writable files (e.g. journald, application
+data) work normally. Standard OCI images do not ship read-only-layer ACLs.
+
+Not supported for `vm` / `pve-vm` (VM guests are hardware-isolated; idmap is an
+LXC concept). See [Modes — Privilege level](docs/modes.md#privilege-level).
 
 ### Run (create + start)
 

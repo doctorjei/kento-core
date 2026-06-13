@@ -50,7 +50,8 @@ mount -t overlay overlay -o "lowerdir=...,upperdir=...,workdir=..." "$rootfs"
 `LIBMOUNT_FORCE_MOUNT2=always` forces the old `mount(2)` syscall path,
 which supports long option strings. This is scoped per-process via
 `getenv()` — no system-wide side effects. Requires util-linux 2.39+
-(May 2023).
+(May 2023). The `--unprivileged` per-layer idmap path additionally
+requires util-linux 2.40+ for `X-mount.idmap` support.
 
 The old `mount(2)` syscall has a 4096-byte option string limit (vs
 256-byte per-option in the new API), which is actually better for long

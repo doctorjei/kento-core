@@ -23,16 +23,23 @@ of the monolith. The public API is unstable until finalized (`.devN`).
   `category` / `severity` / `scope` / `message` / `remediation`, plus a
   `problem_count`. Degrades gracefully without root (privileged checks are
   skipped).
-- **`kento create --unprivileged` for plain LXC** — opt-in idmap-based
-  unprivileged container (emits `lxc.idmap` +
-  `lxc.rootfs.options=idmap=container`). **Kernel-gated and fail-closed:** kento's
-  rootfs is a podman overlay whose shared layers are owned by host root and must
-  be idmapped for an unprivileged container, but overlayfs cannot be idmapped on
-  current mainline kernels (including 6.18 — no `FS_ALLOW_IDMAP`). The flag runs a
-  runtime probe and fails closed with a clear error when the kernel cannot idmap
-  an overlay; it becomes usable automatically once a kernel ships overlay
-  idmapped-mount support. Plain `lxc` only — rejected for VM modes and for
-  `pve-lxc` (`pct` owns storage/idmap for unprivileged containers). The default
+- **`kento create --unprivileged` for lxc and pve-lxc** — opt-in unprivileged
+  containers via per-layer idmapped bind mounts. Container root (UID/GID 0) maps
+  to an unprivileged host range (default 100000:65536). Mechanism: kento idmaps
+  each OCI lower layer individually with `X-mount.idmap`, then stacks overlayfs
+  over the idmapped lowers with `userxattr` — no layer copying or rewriting.
+  Plain-lxc: kento emits `lxc.idmap u/g 0 100000 65536` and its `pre-start` hook
+  builds the per-layer overlay. Pve-lxc: kento sets `unprivileged: 1` (PVE
+  manages the userns + honest accounting + AppArmor profile); kento's
+  `lxc.hook.mount` reads PVE's generated idmap range and builds the per-layer
+  overlay — PVE does not own the rootfs storage so there is no double-idmap.
+  **Requires kernel >= 5.19** (idmapped overlay lower mounts, mainline) **and
+  util-linux >= 2.40** (`X-mount.idmap`); kento probes both at create time and
+  **fails closed** with a clear error on incapable hosts — no silent fallback to
+  privileged. The privileged path continues to require only util-linux >= 2.39.
+  **ACL caveat:** POSIX ACLs baked into read-only image layers are not honored;
+  runtime ACLs on writable files (journald, application data) work normally.
+  Rejected for `vm`/`pve-vm` (VM guests are hardware-isolated). The default
   remains privileged.
 - **Network identity is persisted at create** — `kento-net-type`
   (`bridge`/`usermode`/`host`/`none`) and `kento-bridge` sidecar metadata, so the

@@ -394,13 +394,55 @@ ls /var/lib/kento/vm/<name>/rootfs/usr/sbin/sshd
 This usually means util-linux is too old. Kento requires version 2.39+
 for the `LIBMOUNT_FORCE_MOUNT2` environment variable, which forces the
 old `mount(2)` syscall that supports colon-separated multi-path
-`lowerdir` for overlayfs.
+`lowerdir` for overlayfs. If you are using `--unprivileged`, util-linux
+2.40+ is also required for `X-mount.idmap` support (see below).
 
 Check your version:
 
 ```
 mount --version
 ```
+
+### "Error: --unprivileged requires kernel >= 5.19 and util-linux >= 2.40"
+
+`--unprivileged` uses per-layer idmapped bind mounts (`X-mount.idmap`) to
+remap the shared read-only OCI layers, then overlays over them with
+`userxattr`. Two requirements apply:
+
+- **kernel >= 5.19** — idmapped overlay lower mounts landed in mainline at
+  5.19. Earlier kernels cannot mount an overlayfs whose lowerdirs are
+  idmapped, so kento fails closed.
+- **util-linux >= 2.40** — `X-mount.idmap` in `mount(8)` was added in
+  util-linux 2.40. The 2.39 floor is sufficient for the default privileged
+  path (`LIBMOUNT_FORCE_MOUNT2`), but `--unprivileged` needs the higher
+  version.
+
+Check what you have:
+
+```
+uname -r         # kernel version
+mount --version  # util-linux version
+```
+
+If either requirement is not met, kento refuses to create the instance. The
+default privileged mode continues to work on kernel >= 5.12 and
+util-linux >= 2.39.
+
+### `--unprivileged`: ACLs from read-only image layers are not honored
+
+In unprivileged mode kento idmaps each OCI lower layer via a per-layer
+idmapped bind mount. POSIX ACLs baked into those read-only image layers are
+not propagated through the idmapped bind; they do not appear in the merged
+rootfs.
+
+ACLs created at *runtime* — on files in the container's writable upper layer
+— work normally. This includes application-set ACLs and the default ACLs that
+systemd-journald sets on `/var/log/journal`. Standard OCI images do not ship
+ACLs in their read-only layers, so this limitation does not arise for normal
+images.
+
+If you are consuming an image that ships read-only-layer ACLs and they are
+required, `--unprivileged` is not suitable for that image.
 
 ### Layer paths gone stale
 

@@ -7,7 +7,7 @@ Kento requires a Linux host with:
 - **Python 3.11+**
 - **Podman** (any recent version) — for OCI image storage
 - **LXC** (for LXC and PVE modes)
-- **util-linux 2.39+** — for `LIBMOUNT_FORCE_MOUNT2` support (see [Troubleshooting](troubleshooting.md) if mount fails)
+- **util-linux 2.39+** — for `LIBMOUNT_FORCE_MOUNT2` support (see [Troubleshooting](troubleshooting.md) if mount fails); `--unprivileged` additionally requires util-linux 2.40+ for `X-mount.idmap` support
 
 **VM mode** additionally requires:
 
