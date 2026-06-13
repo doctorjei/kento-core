@@ -1,17 +1,25 @@
-# Tag-driven rc-then-promote release pipeline for the `kento` PyPI package.
+# Tag-driven release pipeline for the `kento-core` PyPI package (the importable
+# library; package name `kento-core`, import name `kento`).
 #
-# Flow (matches the gemet/kanibako/droste ecosystem shape, simplified for a
-# single PyPI package with NO container images):
+# This repo ships UNSTABLE pre-release versions on the PEP440 `.devN` line
+# (e.g. 1.6.0.dev1) until the library API is finalized. There are TWO release
+# shapes:
 #
-#   1. Cut a release-candidate tag  v<ver>-rcN  -> `build` job runs: validates
-#      the tag shape, runs the unit + integration test tiers, builds sdist+wheel,
-#      twine-checks them, uploads them as an artifact, and creates a DRAFT
-#      GitHub *prerelease* for the rc tag.
-#   2. Verify the rc run is green.
-#   3. Cut the final tag  v<ver>  -> `build` runs again (gate), then `publish`
-#      rebuilds at the final version and OIDC-publishes to PyPI + publishes the
-#      GitHub release. `publish` HARD-FAILS unless a matching v<ver>-rc* tag
-#      exists (the rc-then-promote guarantee).
+#   A. `.devN` PRE-RELEASE (current line)  tag  v<ver>.devN  (e.g. v1.6.0.dev1)
+#      -> `build` runs (tag-shape + version guard + tests + build + twine), then
+#      `publish` OIDC-publishes to PyPI and creates a GitHub *prerelease*.
+#      A `.dev` version IS itself a pre-release, so it does NOT go through the
+#      rc-then-promote gate: there is no separate rc, the `.devN` tag publishes
+#      directly. (Re-publishing requires a fresh .devN, since PyPI filenames are
+#      immutable.)
+#
+#   B. STABLE rc-then-promote (when the library reaches a stable X.Y.Z):
+#      1. Cut  v<ver>-rcN  -> `build` validates, tests, builds, and creates a
+#         DRAFT GitHub prerelease for the rc tag.
+#      2. Verify the rc run is green.
+#      3. Cut  v<ver>  -> `build` runs again (gate), then `publish` rebuilds and
+#         OIDC-publishes to PyPI + publishes the GitHub release. `publish`
+#         HARD-FAILS unless a matching v<ver>-rc* tag exists.
 #
 # `workflow_dispatch` runs `build` only (no release object, no publish): the
 # "never tag without a green dispatch run on the same commit" pre-flight rule.
@@ -56,26 +64,38 @@ jobs:
 
       - name: Validate release tag shape
         # Only enforce on tag pushes; workflow_dispatch has no tag.
+        # Accepts THREE shapes for kento-core:
+        #   v1.6.0          stable release
+        #   v1.6.0-rc1      stable release candidate
+        #   v1.6.0.dev1     PEP440 dev pre-release (the current unstable line)
+        # The `.devN` suffix uses a DOT (PEP440), unlike `-rcN` which uses a dash
+        # to keep the rc-then-promote string matching (`-rc*`) unambiguous.
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF_NAME}"
-          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$'; then
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+|\.dev[0-9]+)?$'; then
             echo "::error::Invalid release tag '$tag'." \
-              "Tags must match ^v[0-9]+.[0-9]+.[0-9]+(-rcN)?$ (e.g. v1.3.0 or v1.3.0-rc1)."
+              "Tags must match ^v[0-9]+.[0-9]+.[0-9]+(-rcN|.devN)?$" \
+              "(e.g. v1.6.0, v1.6.0-rc1, or v1.6.0.dev1)."
             exit 1
           fi
           echo "Tag '$tag' is a valid release tag."
 
       - name: Verify pyproject version matches the tag
         # The package version is the static `version` in pyproject.toml, NOT the
-        # tag, so `python -m build` produces kento-<pyproject-version>.*. Guard
-        # against tagging v1.3.0 while pyproject still says 1.2.0: require the
-        # pyproject version to equal the tag's base (tag minus leading 'v' and
-        # any -rcN suffix). tomllib is stdlib on the 3.11 floor.
+        # tag, so `python -m build` produces kento_core-<pyproject-version>.*.
+        # Guard against tagging v1.6.0 while pyproject still says 1.5.0: require
+        # the pyproject version to equal the tag's base (tag minus leading 'v'
+        # and any -rcN suffix). tomllib is stdlib on the 3.11 floor.
+        #
+        # The `.devN` PEP440 suffix is PART of the package version, so it must
+        # NOT be stripped: a `v1.6.0.dev1` tag maps to base `1.6.0.dev1`, which
+        # is exactly what pyproject declares. Only the `-rcN` *tag* suffix (a
+        # dash, not part of the PEP440 version) is stripped here.
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF_NAME#v}"   # strip leading 'v'
-          base="${tag%-rc*}"           # strip -rcN if present
+          base="${tag%-rc*}"           # strip -rcN (dash) if present; .devN is kept
           proj="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
           if [ "$proj" != "$base" ]; then
             echo "::error::pyproject version ($proj) does not match tag base ($base)." \
@@ -140,9 +160,13 @@ jobs:
           fetch-depth: 0
 
       - name: Guard - require a matching rc tag (rc-then-promote)
-        # A release tag may only ship if its version was first cut and tested
-        # as an rc. PyPI filenames embed the version, so we rebuild at the final
-        # version rather than byte-copying the rc artifact.
+        # A STABLE release tag may only ship if its version was first cut and
+        # tested as an rc. PyPI filenames embed the version, so we rebuild at the
+        # final version rather than byte-copying the rc artifact.
+        #
+        # A `.devN` tag is itself a pre-release: it has no separate rc and
+        # publishes directly, so the rc gate is BYPASSED for `.dev` versions.
+        if: ${{ !contains(github.ref_name, '.dev') }}
         run: |
           ver="${GITHUB_REF_NAME}"
           rc_tags="$(git tag -l "${ver}-rc*")"
@@ -177,18 +201,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ver="${GITHUB_REF_NAME}"
-          # Create a published (non-draft, non-prerelease) release for v<ver>
-          # with the freshly built artifacts. If one already exists for this
-          # exact tag, flip it to published and refresh its assets.
+          # A `.devN` tag publishes a GitHub *prerelease* (the PyPI artifact is a
+          # PEP440 pre-release too); a stable v<ver> publishes a full release.
+          case "$ver" in
+            *.dev*) pre=true  ;;
+            *)      pre=false ;;
+          esac
+          # Create the release for v<ver> with the freshly built artifacts. If
+          # one already exists for this exact tag, flip its flags and refresh
+          # its assets.
           if gh release view "$ver" >/dev/null 2>&1; then
-            gh release edit "$ver" --draft=false --prerelease=false --title "$ver"
+            gh release edit "$ver" --draft=false --prerelease="$pre" --title "$ver"
             gh release upload "$ver" dist/* --clobber
+          elif [ "$pre" = true ]; then
+            gh release create "$ver" dist/* \
+              --prerelease \
+              --title "$ver" \
+              --notes "Pre-release $ver (PEP440 .dev). Published to PyPI by CI via OIDC trusted publishing."
           else
             gh release create "$ver" dist/* \
               --title "$ver" \
               --notes "Release $ver. Published to PyPI by CI via OIDC trusted publishing."
           fi
           # Best-effort cleanup of the rc draft prerelease(s); never fail on this.
+          # (.dev releases have no rc tags; the loop is simply a no-op for them.)
           for rc in $(git tag -l "${ver}-rc*"); do
             gh release delete "$rc" --yes --cleanup-tag=false 2>/dev/null || true
           done

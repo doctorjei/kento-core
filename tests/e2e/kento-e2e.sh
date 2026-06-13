@@ -2282,13 +2282,15 @@ fi  # end section_enabled "image"
 # Prerequisites on the PVE host:
 #   - ghcr.io/doctorjei/droste-hair:latest available in root's podman store
 #     (or pullable). If missing, SECTION D is skipped cleanly.
-#   - Kento source tree at /home/droste/kento-src/ (git checkout of main),
-#     used to build a wheel and push into the outer so the nested inner
-#     gets the same version being tested. If missing, SECTION D is skipped.
+#   - Kento source trees at /home/droste/kento-core-src/ and
+#     /home/droste/kento-cli-src/ (git checkouts), used to build both sdists
+#     (kento-core + kento) and push them into the outer so the nested inner
+#     gets the same versions being tested. If either is missing, SECTION D is
+#     skipped.
 #   - Running script has NOPASSWD sudo and `pct` / `podman` on PATH.
 #
 # Inner image: localhost/kento-test-minimal:latest (Tier 2 busybox-init
-# fixture, built by /home/droste/kento-src/tests/fixtures/build.sh). If the
+# fixture, built by /home/droste/kento-core-src/tests/fixtures/build.sh). If the
 # host build fails, falls back to docker.io/library/alpine:latest.
 #
 # Runs --section nested; subgroups nested-lxc-lifecycle, nested-lxc-hookfire.
@@ -2304,8 +2306,10 @@ D_OUTER_IMAGE="ghcr.io/doctorjei/droste-hair:latest"
 D_INNER_IMAGE_PRIMARY="localhost/kento-test-minimal:latest"
 D_INNER_IMAGE_FALLBACK="docker.io/library/alpine:latest"
 D_INNER_IMAGE=""   # resolved during preamble
-D_KENTO_SRC="/home/droste/kento-src"
-D_SDIST=""         # path to built sdist on host
+D_KENTO_CORE_SRC="/home/droste/kento-core-src"
+D_KENTO_CLI_SRC="/home/droste/kento-cli-src"
+D_SDIST_CORE=""    # path to built kento-core sdist on host
+D_SDIST_CLI=""     # path to built kento-cli sdist on host
 D_FIXTURE_TAR=""   # path to saved fixture tarball on host
 D_TMPDIR=""        # scratch for build artifacts
 D_STATE_DIR="/tmp/kento-state"
@@ -2409,38 +2413,54 @@ if [ $d_preamble_ok -eq 1 ]; then
     fi
 fi
 
-# Guard 3: kento source tree present on host.
+# Guard 3: both kento source trees present on host.
 if [ $d_preamble_ok -eq 1 ]; then
-    if [ ! -d "$D_KENTO_SRC" ] || [ ! -f "$D_KENTO_SRC/pyproject.toml" ]; then
-        diag "SECTION D: kento source tree not at $D_KENTO_SRC, skipping"
+    if [ ! -d "$D_KENTO_CORE_SRC" ] || [ ! -f "$D_KENTO_CORE_SRC/pyproject.toml" ]; then
+        diag "SECTION D: kento-core source tree not at $D_KENTO_CORE_SRC, skipping"
+        d_preamble_ok=0
+    elif [ ! -d "$D_KENTO_CLI_SRC" ] || [ ! -f "$D_KENTO_CLI_SRC/pyproject.toml" ]; then
+        diag "SECTION D: kento-cli source tree not at $D_KENTO_CLI_SRC, skipping"
         d_preamble_ok=0
     fi
 fi
 
-# Guard 4: build kento sdist and fixture tarball in a scratch dir.
+# Guard 4: build both kento sdists and fixture tarball in a scratch dir.
 if [ $d_preamble_ok -eq 1 ]; then
     D_TMPDIR="$(mktemp -d /tmp/kento-e2e-d.XXXXXX)"
     diag "SECTION D: building artefacts in $D_TMPDIR"
 
-    # Build sdist. We prefer sdist over wheel because pipx's python may not
+    # Build sdists. We prefer sdist over wheel because pipx's python may not
     # have the right build backend for wheels; pip install of a .tar.gz is
-    # universally supported.
-    if ! (cd "$D_KENTO_SRC" && timeout 120 python3 -m build --sdist \
-            --outdir "$D_TMPDIR" >/dev/null 2>&1); then
-        # Fallback: just tar the source tree and pip-install from that.
-        diag "SECTION D: python3 -m build failed, falling back to source tar"
-        if ! (cd "$D_KENTO_SRC" && tar --exclude=.git --exclude=vault \
-                --exclude='__pycache__' --exclude='*.egg-info' \
-                -czf "$D_TMPDIR/kento-src.tar.gz" .); then
-            diag "SECTION D: source tar failed, skipping"
-            d_preamble_ok=0
-        else
-            D_SDIST="$D_TMPDIR/kento-src.tar.gz"
-        fi
+    # universally supported. The library split means we build BOTH packages
+    # (kento-core then kento), each into its OWN output dir so the *.tar.gz
+    # glob that picks up the produced file is unambiguous.
+    D_CORE_DIST="$D_TMPDIR/core-dist"
+    D_CLI_DIST="$D_TMPDIR/cli-dist"
+    mkdir -p "$D_CORE_DIST" "$D_CLI_DIST"
+
+    if ! (cd "$D_KENTO_CORE_SRC" && timeout 120 sh -c \
+            "uv build --sdist --out-dir '$D_CORE_DIST' >/dev/null 2>&1 || \
+             python3 -m build --sdist --outdir '$D_CORE_DIST' >/dev/null 2>&1"); then
+        diag "SECTION D: sdist build (kento-core) failed, skipping"
+        d_preamble_ok=0
     else
-        D_SDIST="$(ls "$D_TMPDIR"/kento-*.tar.gz 2>/dev/null | head -1)"
-        if [ -z "$D_SDIST" ] || [ ! -f "$D_SDIST" ]; then
-            diag "SECTION D: sdist build produced no file, skipping"
+        D_SDIST_CORE="$(ls "$D_CORE_DIST"/*.tar.gz 2>/dev/null | head -1)"
+        if [ -z "$D_SDIST_CORE" ] || [ ! -f "$D_SDIST_CORE" ]; then
+            diag "SECTION D: kento-core sdist build produced no file, skipping"
+            d_preamble_ok=0
+        fi
+    fi
+fi
+if [ $d_preamble_ok -eq 1 ]; then
+    if ! (cd "$D_KENTO_CLI_SRC" && timeout 120 sh -c \
+            "uv build --sdist --out-dir '$D_CLI_DIST' >/dev/null 2>&1 || \
+             python3 -m build --sdist --outdir '$D_CLI_DIST' >/dev/null 2>&1"); then
+        diag "SECTION D: sdist build (kento-cli) failed, skipping"
+        d_preamble_ok=0
+    else
+        D_SDIST_CLI="$(ls "$D_CLI_DIST"/*.tar.gz 2>/dev/null | head -1)"
+        if [ -z "$D_SDIST_CLI" ] || [ ! -f "$D_SDIST_CLI" ]; then
+            diag "SECTION D: kento-cli sdist build produced no file, skipping"
             d_preamble_ok=0
         fi
     fi
@@ -2450,9 +2470,9 @@ fi
 if [ $d_preamble_ok -eq 1 ]; then
     D_INNER_IMAGE="$D_INNER_IMAGE_PRIMARY"
     if ! podman image exists "$D_INNER_IMAGE" 2>/dev/null; then
-        if [ -x "$D_KENTO_SRC/tests/fixtures/build.sh" ]; then
+        if [ -x "$D_KENTO_CORE_SRC/tests/fixtures/build.sh" ]; then
             diag "SECTION D: building fixture $D_INNER_IMAGE via build.sh"
-            if ! timeout 180 "$D_KENTO_SRC/tests/fixtures/build.sh" >/dev/null 2>&1; then
+            if ! timeout 180 "$D_KENTO_CORE_SRC/tests/fixtures/build.sh" >/dev/null 2>&1; then
                 diag "SECTION D: fixture build failed, falling back to alpine"
                 D_INNER_IMAGE="$D_INNER_IMAGE_FALLBACK"
             fi
@@ -2583,12 +2603,20 @@ if [ $d_preamble_ok -eq 1 ] && subgroup_begin "nested-lxc-lifecycle"; then
     # D1.4: install kento-from-main into outer
     if [ $d1_ok -eq 1 ]; then
         d1_push_rc=0
-        timeout 30 pct push "$D_VMID" "$D_SDIST" /tmp/kento-src.tar.gz \
+        timeout 30 pct push "$D_VMID" "$D_SDIST_CORE" /tmp/kento_core.tar.gz \
+            >/dev/null 2>&1 || d1_push_rc=$?
+        timeout 30 pct push "$D_VMID" "$D_SDIST_CLI" /tmp/kento_cli.tar.gz \
             >/dev/null 2>&1 || d1_push_rc=$?
         if [ $d1_push_rc -eq 0 ]; then
-            d1_inst_out="$(timeout -k 5 180 pct exec "$D_VMID" -- \
-                /opt/pipx/venvs/kento/bin/python -m pip install --upgrade \
-                    /tmp/kento-src.tar.gz 2>&1)"
+            # The image pre-bakes the MONOLITH `kento` dist (which owns the
+            # `kento` import dir). Post-split, `kento` is provided by the
+            # kento-core dist; since dist names differ, --upgrade won't replace
+            # it and the two collide (import kento -> namespace, "unknown
+            # location"). Uninstall the monolith first for a clean split install.
+            d1_inst_out="$(timeout -k 5 180 pct exec "$D_VMID" -- sh -c \
+                '/opt/pipx/venvs/kento/bin/python -m pip uninstall -y kento kento-core >/dev/null 2>&1; \
+                 /opt/pipx/venvs/kento/bin/python -m pip install --upgrade \
+                    /tmp/kento_core.tar.gz /tmp/kento_cli.tar.gz' 2>&1)"
             d1_inst_rc=$?
             if [ $d1_inst_rc -eq 0 ]; then
                 d1_ver_out="$(timeout -k 5 10 pct exec "$D_VMID" -- \
@@ -2804,10 +2832,14 @@ if [ $d_preamble_ok -eq 1 ] && subgroup_begin "nested-lxc-hookfire"; then
             # Override the dangling /etc/resolv.conf symlink with a real file pointing at a working resolver.
             d_pct_exec "$D_VMID" 10 'rm -f /etc/resolv.conf; printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" > /etc/resolv.conf' \
                 >/dev/null 2>&1 || true
-            timeout 30 pct push "$D_VMID" "$D_SDIST" /tmp/kento-src.tar.gz >/dev/null 2>&1 || d2_ok=0
-            timeout 180 pct exec "$D_VMID" -- \
-                /opt/pipx/venvs/kento/bin/python -m pip install --upgrade \
-                    /tmp/kento-src.tar.gz >/dev/null 2>&1 || d2_ok=0
+            timeout 30 pct push "$D_VMID" "$D_SDIST_CORE" /tmp/kento_core.tar.gz >/dev/null 2>&1 || d2_ok=0
+            timeout 30 pct push "$D_VMID" "$D_SDIST_CLI" /tmp/kento_cli.tar.gz >/dev/null 2>&1 || d2_ok=0
+            # Uninstall the image's pre-baked monolith `kento` first (see D1.4
+            # comment) so the split pair installs cleanly.
+            timeout 180 pct exec "$D_VMID" -- sh -c \
+                '/opt/pipx/venvs/kento/bin/python -m pip uninstall -y kento kento-core >/dev/null 2>&1; \
+                 /opt/pipx/venvs/kento/bin/python -m pip install --upgrade \
+                    /tmp/kento_core.tar.gz /tmp/kento_cli.tar.gz >/dev/null 2>&1' || d2_ok=0
             timeout 60 pct push "$D_VMID" "$D_FIXTURE_TAR" /tmp/kento-test-minimal.tar >/dev/null 2>&1 || d2_ok=0
             timeout 90 pct exec "$D_VMID" -- podman load -i /tmp/kento-test-minimal.tar >/dev/null 2>&1 || d2_ok=0
             d_pct_exec "$D_VMID" 10 "mkdir -p $D_STATE_DIR" >/dev/null 2>&1 || true
