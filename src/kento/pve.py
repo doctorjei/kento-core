@@ -192,7 +192,8 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
                         port: str | None = None,
                         memory: int | None = None,
                         cores: int | None = None,
-                        hookscript_ref: str | None = None) -> str:
+                        hookscript_ref: str | None = None,
+                        unprivileged: bool = False) -> str:
     """Generate a PVE-format LXC config for /etc/pve/lxc/<VMID>.conf."""
     hook = container_dir / "kento-hook"
     lines = [
@@ -201,6 +202,8 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         f"hostname: {name}",
         f"rootfs: {container_dir}/rootfs",
     ]
+    if unprivileged:
+        lines.append("unprivileged: 1")
     # Network config based on net_type
     if net_type == "bridge" and bridge:
         lines.append(
@@ -233,7 +236,17 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append("lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional 0 0")
         lines.append("lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
-    lines.append(f"lxc.hook.pre-mount: {hook}")
+    # For privileged containers, use pre-mount (runs before rootfs setup).
+    # For unprivileged containers, use mount instead: pre-mount runs in the
+    # mapped userns where the host-0 hook script is not executable, causing a
+    # sync_wait abort on container start. The mount hook runs as real root
+    # AFTER rootfs setup and works correctly in both privileged and unprivileged
+    # unprivileged containers. LXC_CONFIG_FILE and LXC_ROOTFS_PATH are
+    # available in both contexts. (Spike result, Phase 0, run 19.)
+    if unprivileged:
+        lines.append(f"lxc.hook.mount: {hook}")
+    else:
+        lines.append(f"lxc.hook.pre-mount: {hook}")
     # start-host runs on the host after the container is running. We use it for
     # (a) nftables DNAT port-forwarding, and (b) propagating memory/cores into
     # the inner `ns` cgroup on PVE-LXC so the guest sees its own limit instead

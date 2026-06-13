@@ -44,7 +44,9 @@ def test_generate_hook_validates_layers():
 
 def test_generate_hook_has_pre_start_pre_mount_and_post_stop():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a", "test")
-    assert "pre-start|pre-mount)" in script
+    # pre-start|pre-mount|mount) — mount is needed for pve-lxc unprivileged
+    # (where pre-mount is disallowed in the mapped userns)
+    assert "pre-start|pre-mount|mount)" in script
     assert "post-stop)" in script
 
 

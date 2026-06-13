@@ -345,10 +345,41 @@ class TestGeneratePveConfig:
         assert "lxc.rootfs.path" not in cfg
 
     def test_no_pre_start_hook(self):
-        """PVE mode uses pre-mount, not pre-start."""
+        """PVE mode uses pre-mount (privileged), not pre-start."""
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "lxc.hook.pre-start" not in cfg
-        assert "lxc.hook.pre-mount" in cfg
+        assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.mount" not in cfg
+
+    def test_unprivileged_emits_unprivileged_line(self):
+        """unprivileged=True adds 'unprivileged: 1' to the PVE config."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  unprivileged=True)
+        assert "unprivileged: 1" in cfg
+
+    def test_privileged_omits_unprivileged_line(self):
+        """Default (privileged) config must NOT contain 'unprivileged:' line."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "unprivileged:" not in cfg
+
+    def test_unprivileged_uses_hook_mount_not_pre_mount(self):
+        """Unprivileged pve-lxc must use lxc.hook.mount, not lxc.hook.pre-mount.
+
+        pre-mount runs in the mapped userns where the host-0 hook script is not
+        executable; mount runs as real root after rootfs setup (spike result,
+        Phase 0, run 19).
+        """
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  unprivileged=True)
+        assert "lxc.hook.mount: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.pre-mount" not in cfg
+
+    def test_privileged_uses_hook_pre_mount_not_mount(self):
+        """Privileged pve-lxc keeps lxc.hook.pre-mount (unchanged from before)."""
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  unprivileged=False)
+        assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.mount:" not in cfg
 
     def test_arch_arm64(self):
         with patch("kento.pve.platform.machine", return_value="aarch64"):

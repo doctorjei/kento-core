@@ -220,7 +220,7 @@ WORKER_EOF
 }
 
 case "$HOOK_TYPE" in
-    pre-start|pre-mount)
+    pre-start|pre-mount|mount)
         # Validate layer paths still exist (image may have changed)
         IFS=:
         for dir in $LAYERS; do
@@ -232,16 +232,107 @@ case "$HOOK_TYPE" in
         done
         unset IFS
 
-        # pre-mount (PVE): mount at lxc.rootfs.path source so LXC picks it up
+        # pre-mount (PVE privileged): mount at lxc.rootfs.path source so LXC picks it up
+        # mount (PVE unprivileged): same — LXC_ROOTFS_PATH is set at the mount hook point
         # pre-start (plain LXC): mount at $CONTAINER_DIR/rootfs directly
-        # Both use $LXC_ROOTFS_PATH when available, else $CONTAINER_DIR/rootfs
+        # All three use $LXC_ROOTFS_PATH when available, else $CONTAINER_DIR/rootfs
         ROOTFS="${LXC_ROOTFS_PATH:-$CONTAINER_DIR/rootfs}"
 
         mkdir -p "$STATE_DIR/upper" "$STATE_DIR/work" "$ROOTFS"
         export LIBMOUNT_FORCE_MOUNT2=always
-        mount -t overlay overlay \
-            -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \
-            "$ROOTFS"
+
+        if [ -f "$CONTAINER_DIR/kento-unprivileged" ]; then
+            # ---------------------------------------------------------------------------
+            # Unprivileged (per-layer idmap) path — mainline kernel 5.19+, util-linux 2.40+
+            #
+            # For each lowerdir Lᵢ, create an idmapped bind mount so the
+            # on-disk uid/gid 0 appears as <BASE> (the container's host uid/gid
+            # base) through the overlay. The overlay is then mounted over the
+            # idmapped lowers with userxattr,index=off,metacopy=off so
+            # container-root (host-<BASE>) can read/write the rootfs.
+            #
+            # The idmap range is read from $LXC_CONFIG_FILE, which LXC has
+            # fully parsed and written before invoking any hook (race-free).
+            # Plain-lxc: kento emits `lxc.idmap = u 0 <BASE> <COUNT>` lines.
+            # pve-lxc: PVE generates them and writes them to the container config.
+            # ---------------------------------------------------------------------------
+
+            # Fail closed if LXC_CONFIG_FILE is not set or not readable.
+            if [ -z "${LXC_CONFIG_FILE:-}" ] || [ ! -r "$LXC_CONFIG_FILE" ]; then
+                echo "kento-hook: error: unprivileged mode requires LXC_CONFIG_FILE to be set and readable" >&2
+                echo "kento-hook: LXC_CONFIG_FILE='${LXC_CONFIG_FILE:-<unset>}'" >&2
+                exit 1
+            fi
+
+            # Parse the first `lxc.idmap = u 0 <BASE> <COUNT>` line.
+            # Format is exactly: lxc.idmap = u 0 BASE COUNT
+            _idmap_line=$(grep -m1 '^[[:space:]]*lxc\.idmap[[:space:]]*=[[:space:]]*u[[:space:]]' "$LXC_CONFIG_FILE" 2>/dev/null || true)
+            if [ -z "$_idmap_line" ]; then
+                echo "kento-hook: error: unprivileged mode requires lxc.idmap u ... lines in $LXC_CONFIG_FILE" >&2
+                echo "kento-hook: no 'lxc.idmap = u ...' line found in $LXC_CONFIG_FILE" >&2
+                exit 1
+            fi
+
+            # Extract BASE and COUNT: strip to the last two whitespace-separated tokens
+            # after the `u 0` prefix. Line format: `lxc.idmap = u 0 BASE COUNT`
+            _idmap_rest=$(printf '%s' "$_idmap_line" | sed 's/^[[:space:]]*lxc\.idmap[[:space:]]*=[[:space:]]*u[[:space:]]*//')
+            # _idmap_rest is now: "0 BASE COUNT" — skip the container-side id (0)
+            BASE=$(printf '%s' "$_idmap_rest" | awk '{print $2}')
+            COUNT=$(printf '%s' "$_idmap_rest" | awk '{print $3}')
+
+            if [ -z "$BASE" ] || [ -z "$COUNT" ]; then
+                echo "kento-hook: error: could not parse BASE and COUNT from lxc.idmap line: $_idmap_line" >&2
+                exit 1
+            fi
+
+            # Validate BASE and COUNT are integers
+            case "$BASE" in
+                ''|*[!0-9]*) echo "kento-hook: error: idmap BASE is not a non-negative integer: '$BASE'" >&2; exit 1 ;;
+            esac
+            case "$COUNT" in
+                ''|*[!0-9]*) echo "kento-hook: error: idmap COUNT is not a non-negative integer: '$COUNT'" >&2; exit 1 ;;
+            esac
+
+            # Create idmapped bind mounts for each lowerdir, preserving order.
+            # $STATE_DIR/idmap/0, /1, /2, ... correspond to $LAYERS order.
+            mkdir -p "$STATE_DIR/idmap"
+            IDLAYERS=""
+            _idx=0
+            IFS=:
+            for _layer in $LAYERS; do
+                _idmap_target="$STATE_DIR/idmap/$_idx"
+                mkdir -p "$_idmap_target"
+                # Idempotent: skip re-binding if already a mountpoint.
+                if ! mountpoint -q "$_idmap_target" 2>/dev/null; then
+                    mount --bind \
+                        -o "X-mount.idmap=u:0:${BASE}:${COUNT} g:0:${BASE}:${COUNT}" \
+                        "$_layer" "$_idmap_target"
+                fi
+                if [ -z "$IDLAYERS" ]; then
+                    IDLAYERS="$_idmap_target"
+                else
+                    IDLAYERS="$IDLAYERS:$_idmap_target"
+                fi
+                _idx=$((_idx + 1))
+            done
+            unset IFS
+
+            # chown upper and work so container-root (host-$BASE) can write them.
+            chown "${BASE}:${BASE}" "$STATE_DIR/upper" "$STATE_DIR/work"
+
+            # Mount the overlay over the idmapped lowers.
+            # userxattr: required for overlay-on-idmapped-lowers (kernel 5.19+).
+            # index=off,metacopy=off: avoid inode-index and metacopy features
+            # that are incompatible with the per-layer idmap path.
+            mount -t overlay overlay \
+                -o "lowerdir=$IDLAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work,userxattr,index=off,metacopy=off" \
+                "$ROOTFS"
+        else
+            # Privileged path — unchanged.
+            mount -t overlay overlay \
+                -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \
+                "$ROOTFS"
+        fi
 
         # Guest config injection — shared with VM / PVE-VM modes.
         sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"
@@ -381,5 +472,28 @@ case "$HOOK_TYPE" in
             "$CONTAINER_DIR/kento-portfwd-worker.sh" 2>/dev/null || true
         # Unmount overlayfs
         mountpoint -q "$CONTAINER_DIR/rootfs" 2>/dev/null && umount "$CONTAINER_DIR/rootfs" || true
+
+        # Unprivileged cleanup: unmount idmapped bind mounts in reverse order
+        # and remove the idmap directory. Idempotent and quiet — if the
+        # idmap mounts were never created (privileged path) this is a no-op.
+        if [ -d "$STATE_DIR/idmap" ]; then
+            # Collect mounted targets in forward order, then umount in reverse
+            # so overlapping mount namespaces are handled safely.
+            _idmap_mounts=""
+            for _d in "$STATE_DIR"/idmap/*; do
+                [ -d "$_d" ] || continue
+                _idmap_mounts="$_idmap_mounts $_d"
+            done
+            # Reverse the list and unmount
+            _idmap_rev=""
+            for _d in $_idmap_mounts; do
+                _idmap_rev="$_d $_idmap_rev"
+            done
+            for _d in $_idmap_rev; do
+                [ -z "$_d" ] && continue
+                mountpoint -q "$_d" 2>/dev/null && umount "$_d" 2>/dev/null || true
+            done
+            rm -rf "$STATE_DIR/idmap" 2>/dev/null || true
+        fi
         ;;
 esac
