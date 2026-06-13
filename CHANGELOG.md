@@ -5,6 +5,53 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - kento-core 1.6.0.dev1
+
+First release of `kento-core` as a standalone library (`import kento`), split out
+of the monolith. The public API is unstable until finalized (`.devN`).
+
+### Added
+
+- **`kento diagnose` diagnostics module** — a read-only host/instance health and
+  triage scan. Detects problems across eight categories: orphaned instances (PVE
+  state present but the `.conf` is gone), the AppArmor pre-flight (`generated`
+  profile with `apparmor_parser` missing on an apparmor-active kernel),
+  port-forward state (from the hook's marker files), stale image holds, networkd
+  static / nested-veth `.network` drop-ins, the cloud-init root-ssh footgun,
+  leaked overlay/virtiofsd mounts, and PVE vmid-allocation health
+  (reserved-but-orphaned VMIDs). Produces a structured report — findings carry
+  `category` / `severity` / `scope` / `message` / `remediation`, plus a
+  `problem_count`. Degrades gracefully without root (privileged checks are
+  skipped).
+- **`kento create --unprivileged` for plain LXC** — opt-in idmap-based
+  unprivileged container (emits `lxc.idmap` +
+  `lxc.rootfs.options=idmap=container`). **Kernel-gated and fail-closed:** kento's
+  rootfs is a podman overlay whose shared layers are owned by host root and must
+  be idmapped for an unprivileged container, but overlayfs cannot be idmapped on
+  current mainline kernels (including 6.18 — no `FS_ALLOW_IDMAP`). The flag runs a
+  runtime probe and fails closed with a clear error when the kernel cannot idmap
+  an overlay; it becomes usable automatically once a kernel ships overlay
+  idmapped-mount support. Plain `lxc` only — rejected for VM modes and for
+  `pve-lxc` (`pct` owns storage/idmap for unprivileged containers). The default
+  remains privileged.
+- **Network identity is persisted at create** — `kento-net-type`
+  (`bridge`/`usermode`/`host`/`none`) and `kento-bridge` sidecar metadata, so the
+  network config can be re-emitted later by `set`.
+
+### Changed
+
+- **`set` now rewrites networking** (additive; existing `set` behavior unchanged).
+  In addition to `--memory` / `--cores` / `--mac` / `--qemu-arg` / `--pve-arg` /
+  `--lxc-arg`, `set` accepts `--network bridge[=<name>]|usermode|host|none`,
+  `--ip CIDR|dhcp`, `--gateway`, `--dns`, `--hostname`, and `--port HOST:GUEST`
+  (repeatable; empty value clears). It reads the instance's persisted network
+  identity, applies the delta, and re-emits the config exactly as `create` would,
+  so the reconfigured instance boots identically. As with all of `set`, the
+  instance must be stopped and the change takes effect on the next start.
+  Per-mode validity: bridge = `lxc`/`pve-lxc`/`pve-vm` (not plain `vm`); usermode
+  = `vm`/`pve-vm`; host = `lxc` modes; none = all; `--ip`/`--gateway` require
+  bridge networking; `--port` is invalid on host/none.
+
 ## [1.5.3] - 2026-06-12
 
 Patch release: one machine-readability feature plus two robustness fixes, each

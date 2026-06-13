@@ -116,10 +116,33 @@ cgroups apply in both modes. The trade-off is that container root is uid 0 on
 the host, so a kernel-level container escape lands as host root. Run untrusted
 or multi-tenant workloads in `vm`/`pve-vm` mode instead.
 
-> An explicit `--unprivileged` opt-in (idmap-based) is planned -- see the task
-> board. Today the only privilege control is the `--pve-arg`/`--lxc-arg`
-> pass-throughs (e.g. `--pve-arg 'unprivileged: 1'` on PVE), which kento does
-> not validate against the overlayfs ownership caveat above.
+#### `--unprivileged` (plain LXC, kernel-gated)
+
+`kento create --unprivileged` opts a plain-`lxc` container into an idmap-based
+unprivileged config: kento emits `lxc.idmap` plus
+`lxc.rootfs.options=idmap=container` so container root no longer maps to host
+root.
+
+**It is currently unavailable on mainline kernels, by design.** The blocker is
+exactly the overlayfs caveat above: kento's rootfs is a podman overlay whose
+shared lower layers are owned by host root, so an unprivileged container needs
+that rootfs *idmapped at mount time*. Overlayfs does not support idmapped mounts
+on current mainline kernels (including 6.18 -- the overlay filesystem does not
+set `FS_ALLOW_IDMAP`). Rather than emit a config that yields a broken or
+silently-privileged container, `--unprivileged` runs a runtime probe and **fails
+closed** with a clear error when the kernel cannot idmap an overlay. The moment a
+kernel ships overlay idmapped-mount support, the probe passes and the flag works
+with no kento change.
+
+Scope: `--unprivileged` is **plain `lxc` only.** It is rejected for `vm` /
+`pve-vm` (no LXC config) and for `pve-lxc`: there, `pct` owns the container's
+storage and idmap for unprivileged mode, leaving no seam for kento's pre-mounted
+overlay rootfs. The default in every mode remains **privileged**.
+
+> The other privilege control is the `--pve-arg`/`--lxc-arg` pass-throughs
+> (e.g. `--pve-arg 'unprivileged: 1'` on PVE), which kento does not validate
+> against the overlayfs ownership caveat above -- prefer `--unprivileged`, which
+> does.
 
 ### Port forwarding
 

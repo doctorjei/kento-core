@@ -1,5 +1,22 @@
 # Troubleshooting
 
+## Start here: `kento diagnose`
+
+Before chasing a specific error, run the read-only triage scan:
+
+```
+sudo kento diagnose          # scan the whole host
+sudo kento diagnose <name>   # scope to one instance
+sudo kento diagnose --json   # structured report for tooling
+```
+
+It checks eight categories — orphaned instances (PVE state present but `.conf`
+gone), the AppArmor `generated`/`apparmor_parser` pre-flight, port-forward
+marker state, stale image holds, networkd drop-ins, the cloud-init root-ssh
+footgun, leaked overlay/virtiofsd mounts, and PVE vmid allocation — and prints
+a finding with a remediation for each problem. It exits `1` if anything needs
+attention, else `0`, and degrades gracefully when run without root.
+
 ## Error messages
 
 ### "Error: must run as root"

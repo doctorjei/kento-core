@@ -176,12 +176,22 @@ Each instance directory contains metadata files:
 | `kento-state` | Path to the upper/work directory | `/home/user/.local/share/kento/my-ct` |
 | `kento-mode` | Mode used at create time | `lxc`, `pve-lxc`, `vm`, or `pve-vm` |
 | `kento-name` | Human-readable instance name | `my-ct` |
+| `kento-net-type` | Network type chosen at create | `bridge`, `usermode`, `host`, or `none` |
+| `kento-bridge` | Bridge name (bridge networking) | `lxcbr0`, `vmbr0` |
 | `kento-port` | Host:guest port mapping (VM only) | `10022:22` |
 | `kento-qemu-pid` | QEMU process ID (VM, when running) | `12345` |
 | `kento-virtiofsd-pid` | virtiofsd process ID (VM, when running) | `12344` |
 
 These files are managed by kento. You shouldn't need to edit them, but
 they're plain text if you need to inspect them.
+
+`kento set` uses the persisted network identity to rewrite networking on a
+stopped instance. `create` records `kento-net-type` and `kento-bridge`
+alongside the other metadata; `set` reads the instance's current identity,
+applies the requested delta (`--network` / `--ip` / `--gateway` / `--dns` /
+`--hostname` / `--port`), and re-emits the config exactly as `create` would —
+so the reconfigured instance boots identically to one created with those
+settings. The change takes effect on the next start.
 
 ## Instance directories
 

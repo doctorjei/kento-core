@@ -106,6 +106,7 @@ Options:
 | `--ssh-key-user NAME` | root | User for SSH key injection |
 | `--ssh-host-keys` | off | Auto-generate SSH host keys at create time |
 | `--config-mode MODE` | auto | Config delivery: `injection`, `cloudinit`, or `auto` |
+| `--unprivileged` | off | Run as an unprivileged plain-LXC container (idmap-based). Plain `lxc` only; kernel-gated and fail-closed — see below |
 | `--mac XX:XX:...` | auto | Override MAC address (VM modes only) |
 | `--qemu-arg ARG` | none | Extra verbatim QEMU argument (VM modes only, repeatable; last occurrence wins) |
 | `--pve-arg "KEY: VALUE"` | none | Extra verbatim line appended to the PVE config (PVE modes only, repeatable) |
@@ -119,6 +120,26 @@ Structural keys kento owns (`lxc.rootfs.path`, `lxc.hook.*`, `lxc.net.*`,
 `lxc.apparmor.*`, `lxc.mount.auto`, `lxc.tty.max`, `lxc.uts.name`, and the
 `lxc.cgroup2.memory.max` / `lxc.cgroup2.cpu.max` lines `set` manages) are
 rejected; everything else passes through verbatim.
+
+#### `--unprivileged` (plain LXC)
+
+Instances are **privileged by default**. `--unprivileged` opts a plain-`lxc`
+container into an idmap-based unprivileged config (`lxc.idmap` +
+`lxc.rootfs.options=idmap=container`).
+
+This is **kernel-gated and currently unavailable on mainline kernels.** Kento's
+rootfs is a podman overlay whose shared layers are owned by host root; an
+unprivileged container needs that rootfs idmapped, but overlayfs cannot be
+idmapped on current mainline kernels (including 6.18 — overlayfs lacks
+`FS_ALLOW_IDMAP`). So `--unprivileged` runs a runtime probe and, when the kernel
+cannot idmap an overlay, **fails closed** with a clear error rather than
+producing a broken container. It starts working automatically once a kernel ships
+overlay idmapped-mount support — no kento change required.
+
+`--unprivileged` is plain-`lxc` only. It is rejected for VM modes, and for
+`pve-lxc` (`pct` owns storage and idmap for unprivileged containers, leaving no
+seam for kento's pre-mounted overlay rootfs). See
+[Modes — Privilege level](docs/modes.md#privilege-level).
 
 ### Run (create + start)
 
@@ -227,12 +248,34 @@ effect on the instance's next start. Errors if the instance is running
 | `--qemu-arg ARG` | vm, pve-vm | QEMU pass-through list (repeatable) |
 | `--pve-arg "KEY: VALUE"` | pve-lxc, pve-vm | PVE config pass-through list (repeatable) |
 | `--lxc-arg "KEY = VALUE"` | lxc | Plain-LXC native config pass-through list (repeatable) |
+| `--network MODE` | see below | `bridge`, `bridge=<name>`, `usermode`, `host`, or `none` |
+| `--ip CIDR\|dhcp` | bridge nets | Static IP (`192.168.1.10/24`) or `dhcp` |
+| `--gateway IP` | bridge nets | Default gateway |
+| `--dns IP` | bridge nets | DNS server |
+| `--hostname NAME` | all | Guest hostname |
+| `--port H:G` | bridge/usermode | Port forward (repeatable; empty value clears) |
 
 Passing a flag for the wrong mode errors before anything is changed.
 For the list flags (`--qemu-arg` / `--pve-arg` / `--lxc-arg`): passing
 the flag with non-empty values REPLACES the stored list, passing it with
 an empty value (`--qemu-arg ''`) CLEARS it, and omitting it leaves the
 list untouched. An empty `set` (no flags) is a usage error.
+
+`set` also rewrites networking, mirroring what `create` accepts so the
+reconfigured instance boots identically. Per-mode validity:
+
+- `--network bridge[=<name>]` — `lxc`, `pve-lxc`, `pve-vm` (not plain `vm`).
+- `--network usermode` — `vm`, `pve-vm`.
+- `--network host` — `lxc` modes.
+- `--network none` — all modes.
+- `--ip` / `--gateway` require bridge networking.
+- `--port` is invalid on `host` and `none`.
+
+```
+sudo kento set web --network bridge=vmbr1 --ip 192.168.1.10/24 --gateway 192.168.1.1
+sudo kento set web --port 8080:80 --port 4430:443
+sudo kento set web --port ''                 # clear all port forwards
+```
 
 ### List
 
@@ -274,6 +317,35 @@ config, layer count, and more. `inspect` is an alias for `info`.
 
 For PVE-LXC instances, the `--json` `mode` reads `pve-lxc` (normalized to agree
 with `list --json`); the `type` field is the `LXC` / `VM` family.
+
+### Diagnose
+
+```
+sudo kento diagnose
+sudo kento diagnose <name>
+sudo kento diagnose --json
+```
+
+Read-only health and triage scan. With no argument it scans the whole host;
+given a NAME it scopes to one instance. It reports problems across eight
+categories:
+
+- **orphaned instances** — PVE state present but the `.conf` is gone
+- **AppArmor pre-flight** — `generated` profile with `apparmor_parser` missing
+  on an apparmor-active kernel
+- **port-forward state** — drawn from the hook's marker files
+- **stale image holds**
+- **networkd drop-ins** — static / nested-veth `.network` files
+- **cloud-init root-ssh footgun**
+- **leaked mounts** — overlay / virtiofsd left behind
+- **PVE vmid allocation** — reserved-but-orphaned VMIDs
+
+`--json` emits a structured report: an array of findings, each with
+`category`, `severity`, `scope`, `message`, and `remediation`, plus a
+top-level `problem_count`. The exit code is `1` if any `warn`/`error`
+finding is present, otherwise `0`. The command degrades gracefully without
+root (checks needing privilege are skipped). It is top-level only — there
+is no `kento lxc diagnose` / `kento vm diagnose`.
 
 ### Scrub an instance
 
