@@ -32,7 +32,7 @@ def _holds_mock(holds):
 # --- list_images ---------------------------------------------------------
 
 
-def test_list_in_use_and_orphaned(tmp_path, capsys):
+def test_list_in_use_and_orphaned(tmp_path):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -44,22 +44,21 @@ def test_list_in_use_and_orphaned(tmp_path, capsys):
     with patch("kento.images.LXC_BASE", lxc), \
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_holds_mock(holds)):
-        list_images()
+        result = list_images()
 
-    out = capsys.readouterr().out
-    assert "imageA:latest" in out
-    assert "imageB:latest" in out
-    assert "in-use" in out
-    assert "orphaned" in out
+    assert "imageA:latest" in result
+    assert "imageB:latest" in result
+    assert "in-use" in result
+    assert "orphaned" in result
     # A has a hold and a guest; B is orphaned.
-    lines = out.strip().split("\n")
+    lines = result.splitlines()
     a_line = next(l for l in lines if "imageA" in l)
     b_line = next(l for l in lines if "imageB" in l)
     assert "in-use" in a_line and "yes" in a_line and "box" in a_line
     assert "orphaned" in b_line and "yes" in b_line
 
 
-def test_list_in_use_filter_hides_orphaned(tmp_path, capsys):
+def test_list_in_use_filter_hides_orphaned(tmp_path):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -70,14 +69,13 @@ def test_list_in_use_filter_hides_orphaned(tmp_path, capsys):
     with patch("kento.images.LXC_BASE", lxc), \
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_holds_mock(holds)):
-        list_images(in_use_only=True)
+        result = list_images(in_use_only=True)
 
-    out = capsys.readouterr().out
-    assert "imageA:latest" in out
-    assert "imageB:latest" not in out
+    assert "imageA:latest" in result
+    assert "imageB:latest" not in result
 
 
-def test_list_no_managed_images(tmp_path, capsys):
+def test_list_no_managed_images(tmp_path):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -86,13 +84,12 @@ def test_list_no_managed_images(tmp_path, capsys):
     with patch("kento.images.LXC_BASE", lxc), \
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_holds_mock([])):
-        list_images()
+        result = list_images()
 
-    out = capsys.readouterr().out
-    assert "No kento-managed images." in out
+    assert "No kento-managed images." in result
 
 
-def test_list_image_referenced_no_hold(tmp_path, capsys):
+def test_list_image_referenced_no_hold(tmp_path):
     """A guest-referenced image with no hold still shows, HOLD=no, in-use."""
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
@@ -103,17 +100,16 @@ def test_list_image_referenced_no_hold(tmp_path, capsys):
     with patch("kento.images.LXC_BASE", lxc), \
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_holds_mock([])):
-        list_images()
+        result = list_images()
 
-    out = capsys.readouterr().out
-    line = next(l for l in out.strip().split("\n") if "imageA" in l)
+    line = next(l for l in result.splitlines() if "imageA" in l)
     assert "no" in line and "in-use" in line
 
 
 # --- prune dry-run -------------------------------------------------------
 
 
-def test_prune_dry_run_makes_no_destructive_calls(tmp_path, capsys):
+def test_prune_dry_run_makes_no_destructive_calls(tmp_path):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -126,12 +122,11 @@ def test_prune_dry_run_makes_no_destructive_calls(tmp_path, capsys):
          patch("kento.images.subprocess.run",
                side_effect=_holds_mock(holds)) as mock_run, \
          patch("kento.images.remove_image_hold") as mock_rm:
-        prune()
+        result = prune()
 
-    out = capsys.readouterr().out
-    assert "kento-hold.ghost" in out
-    assert "imageB:latest" in out
-    assert "kento prune --yes" in out
+    assert "kento-hold.ghost" in result
+    assert "imageB:latest" in result
+    assert "kento prune --yes" in result
     # No removal helper, no rm / image rm subprocess calls.
     mock_rm.assert_not_called()
     for call in mock_run.call_args_list:
@@ -142,7 +137,7 @@ def test_prune_dry_run_makes_no_destructive_calls(tmp_path, capsys):
 # --- prune --yes ---------------------------------------------------------
 
 
-def test_prune_yes_removes_orphaned_only(tmp_path, capsys):
+def test_prune_yes_removes_orphaned_only(tmp_path):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -161,9 +156,8 @@ def test_prune_yes_removes_orphaned_only(tmp_path, capsys):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_run) as mock_run, \
          patch("kento.images.remove_image_hold") as mock_rm:
-        prune(yes=True)
+        result = prune(yes=True)
 
-    out = capsys.readouterr().out
     # Only the orphaned hold removed.
     mock_rm.assert_called_once_with("ghost")
     # imageB freed (no guest, no surviving hold) -> image rm attempted.
@@ -173,10 +167,10 @@ def test_prune_yes_removes_orphaned_only(tmp_path, capsys):
     ]
     assert len(img_rm_calls) == 1
     assert "imageB:latest" in img_rm_calls[0].args[0]
-    assert "Removed 1 orphaned hold(s), 1 image(s)." in out
+    assert "Removed 1 orphaned hold(s), 1 image(s)." in result
 
 
-def test_prune_yes_tolerates_image_rm_failure(tmp_path, capsys):
+def test_prune_yes_tolerates_image_rm_failure(tmp_path, caplog):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -196,14 +190,13 @@ def test_prune_yes_tolerates_image_rm_failure(tmp_path, capsys):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_run), \
          patch("kento.images.remove_image_hold"):
-        prune(yes=True)
+        result = prune(yes=True)
 
-    out = capsys.readouterr().out
     # Hold removed (1), image refused (0).
-    assert "Removed 1 orphaned hold(s), 0 image(s)." in out
+    assert "Removed 1 orphaned hold(s), 0 image(s)." in result
 
 
-def test_prune_image_pinned_by_surviving_hold_not_removed(tmp_path, capsys):
+def test_prune_image_pinned_by_surviving_hold_not_removed(tmp_path):
     """An orphaned hold's image is NOT removed if another hold (surviving) pins it."""
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
@@ -223,19 +216,18 @@ def test_prune_image_pinned_by_surviving_hold_not_removed(tmp_path, capsys):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_run) as mock_run, \
          patch("kento.images.remove_image_hold") as mock_rm:
-        prune(yes=True)
+        result = prune(yes=True)
 
-    out = capsys.readouterr().out
     mock_rm.assert_called_once_with("ghost")
     img_rm_calls = [
         c for c in mock_run.call_args_list
         if (c.args and "image" in c.args[0] and "rm" in c.args[0])
     ]
     assert img_rm_calls == []
-    assert "Removed 1 orphaned hold(s), 0 image(s)." in out
+    assert "Removed 1 orphaned hold(s), 0 image(s)." in result
 
 
-def test_prune_nothing_to_do(tmp_path, capsys):
+def test_prune_nothing_to_do(tmp_path):
     lxc = tmp_path / "lxc"
     vm = tmp_path / "vm"
     lxc.mkdir()
@@ -247,8 +239,7 @@ def test_prune_nothing_to_do(tmp_path, capsys):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_holds_mock(holds)), \
          patch("kento.images.remove_image_hold") as mock_rm:
-        prune(yes=True)
+        result = prune(yes=True)
 
-    out = capsys.readouterr().out
-    assert "Nothing to prune." in out
+    assert "Nothing to prune." in result
     mock_rm.assert_not_called()

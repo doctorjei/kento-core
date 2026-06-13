@@ -97,12 +97,14 @@ def _holds() -> list[tuple[str, str]]:
     return holds
 
 
-def list_images(in_use_only: bool = False) -> None:
+def list_images(in_use_only: bool = False) -> str:
     """List kento-managed images (read-only).
 
     A managed image is any image referenced by a guest or pinned by a
     hold container. Each row reports the image, the referencing guests,
     whether a hold pins it, and an in-use/orphaned status.
+
+    Returns the rendered table as a string (no trailing newline).
     """
     refs = _guest_image_refs()
     holds = _holds()
@@ -111,8 +113,7 @@ def list_images(in_use_only: bool = False) -> None:
 
     managed = set(refs) | held_images
     if not managed:
-        print("No kento-managed images.")
-        return
+        return "No kento-managed images."
 
     rows = []
     for image in sorted(managed):
@@ -125,8 +126,7 @@ def list_images(in_use_only: bool = False) -> None:
         rows.append((image, guests_cell, hold_cell, status))
 
     if not rows:
-        print("No kento-managed images.")
-        return
+        return "No kento-managed images."
 
     headers = ("IMAGE", "GUESTS", "HOLD", "STATUS")
     widths = []
@@ -134,19 +134,23 @@ def list_images(in_use_only: bool = False) -> None:
         col_max = max((len(row[i]) for row in rows), default=0)
         widths.append(max(len(header), col_max))
 
-    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)))
-    print("  ".join("-" * w for w in widths))
+    lines = []
+    lines.append("  ".join(h.ljust(w) for h, w in zip(headers, widths)))
+    lines.append("  ".join("-" * w for w in widths))
     for row in rows:
-        print("  ".join(val.ljust(w) for val, w in zip(row, widths)))
+        lines.append("  ".join(val.ljust(w) for val, w in zip(row, widths)))
+    return "\n".join(lines)
 
 
-def prune(yes: bool = False) -> None:
+def prune(yes: bool = False) -> str:
     """Safe GC of orphaned kento hold containers and the images they freed.
 
     DRY-RUN by default. Removes only holds whose guest no longer exists,
     then images pinned solely by those orphaned holds and referenced by
     no surviving guest. Never removes a hold whose guest exists; never
     prunes all images.
+
+    Returns the user-facing plan/summary text as a string (no trailing newline).
     """
     guest_names = _guest_names()
     refs = _guest_image_refs()  # image -> guests still present
@@ -158,8 +162,7 @@ def prune(yes: bool = False) -> None:
                  if name in guest_names]
 
     if not orphaned:
-        print("Nothing to prune.")
-        return
+        return "Nothing to prune."
 
     # Images still pinned by a surviving (non-orphaned) hold must not be
     # removed. Likewise, images referenced by any guest must not be removed.
@@ -171,18 +174,19 @@ def prune(yes: bool = False) -> None:
     )
 
     if not yes:
-        print("Dry run — nothing removed. The following would be removed:")
-        print("  Orphaned hold containers:")
+        lines = []
+        lines.append("Dry run — nothing removed. The following would be removed:")
+        lines.append("  Orphaned hold containers:")
         for name, image in orphaned:
-            print(f"    kento-hold.{name}  (pinned {image or '?'})")
+            lines.append(f"    kento-hold.{name}  (pinned {image or '?'})")
         if candidate_images:
-            print("  Images then eligible for removal:")
+            lines.append("  Images then eligible for removal:")
             for image in candidate_images:
-                print(f"    {image}")
+                lines.append(f"    {image}")
         else:
-            print("  Images then eligible for removal: (none)")
-        print("Run 'kento prune --yes' to remove them.")
-        return
+            lines.append("  Images then eligible for removal: (none)")
+        lines.append("Run 'kento prune --yes' to remove them.")
+        return "\n".join(lines)
 
     removed_holds = 0
     for name, _image in orphaned:
@@ -203,4 +207,4 @@ def prune(yes: bool = False) -> None:
             msg = (result.stderr or result.stdout or "").strip()
             logger.warning("skipped image %s: %s", image, msg)
 
-    print(f"Removed {removed_holds} orphaned hold(s), {removed_images} image(s).")
+    return f"Removed {removed_holds} orphaned hold(s), {removed_images} image(s)."
