@@ -584,6 +584,103 @@ class TestNestingPersistence:
         assert (vm_dir / "kento-nesting").read_text().strip() == "1"
 
 
+class TestNetworkIdentityPersistence:
+    """kento-net-type (always) + kento-bridge (bridge modes only) written
+    at create time for all modes, so a future `kento set` net-rewrite can
+    faithfully re-emit network config."""
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_bridge_persists_type_and_bridge(self, mock_root, mock_layers,
+                                                 mock_run, tmp_path):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="lxc",
+                   net_type="bridge", bridge="lxcbr0")
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-net-type").read_text() == "bridge\n"
+        assert (lxc_dir / "kento-bridge").read_text() == "lxcbr0\n"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_none_persists_type_no_bridge(self, mock_root, mock_layers,
+                                              mock_run, tmp_path):
+        # No bridge detected and net_type none → type=none, no kento-bridge.
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc", net_type="none")
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-net-type").read_text() == "none\n"
+        assert not (lxc_dir / "kento-bridge").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_vm_usermode_persists_type_no_bridge(self, mock_root, mock_layers,
+                                                 mock_run, tmp_path):
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        with patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or vm_base) / n):
+            create("myimage:latest", name="test", mode="vm")
+        vm_dir = vm_base / "test"
+        # Plain VM default network is usermode → type persisted, no bridge.
+        assert (vm_dir / "kento-net-type").read_text() == "usermode\n"
+        assert not (vm_dir / "kento-bridge").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_bridge_persists_type_and_bridge(self, mock_root, mock_layers,
+                                                 mock_run, tmp_path):
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento._bridge_exists", return_value=True), \
+             patch("kento.pve.write_pve_config",
+                   return_value=Path("/etc/pve/lxc/100.conf")):
+            create("myimage:latest", name="test", mode="pve", vmid=100,
+                   net_type="bridge", bridge="vmbr0")
+        pve_dir = tmp_path / "100"
+        assert (pve_dir / "kento-net-type").read_text() == "bridge\n"
+        assert (pve_dir / "kento-bridge").read_text() == "vmbr0\n"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_pve_vm_usermode_persists_type_no_bridge(self, mock_root,
+                                                     mock_layers, mock_run,
+                                                     tmp_path):
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text(json.dumps({"ids": {}}))
+        snippets = tmp_path / "snippets"
+        snippets.mkdir()
+
+        with patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base", return_value=vm_base / "test"), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.vm_hook.find_snippets_dir", return_value=(snippets, "local")), \
+             patch("kento.pve.write_qm_config",
+                   return_value=Path("/etc/pve/qemu-server/100.conf")):
+            # mode="vm" + PVE host (patched PVE_DIR) auto-promotes to pve-vm.
+            create("myimage:latest", name="test", mode="vm", vmid=100,
+                   net_type="usermode")
+        vm_dir = vm_base / "test"
+        assert (vm_dir / "kento-net-type").read_text() == "usermode\n"
+        assert not (vm_dir / "kento-bridge").exists()
+
+
 class TestStaticIp:
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")

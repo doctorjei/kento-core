@@ -698,6 +698,17 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-mode").write_text(mode + "\n")
         (container_dir / "kento-name").write_text(name + "\n")
 
+        # Persist the resolved network identity so a future `kento set`
+        # net-rewrite can faithfully re-emit network config without
+        # re-deriving the type/bridge. Common to all four modes — every
+        # instance has a resolved type (bridge/host/usermode/none). The
+        # bridge name only exists for bridge modes, so write kento-bridge
+        # only when present (consumers tolerate absence). Preserved verbatim
+        # across scrub (reset.py never deletes unknown kento-* files).
+        (container_dir / "kento-net-type").write_text(network["type"] + "\n")
+        if network["bridge"] is not None:
+            (container_dir / "kento-bridge").write_text(network["bridge"] + "\n")
+
         # Persist pass-through flags (v1.2.0 Phase B). Consumed by:
         #   - vm.py start_vm() : appends kento-qemu-args to QEMU argv (B2)
         #   - pve.py write_*_config() : appends kento-pve-args lines (B3)
