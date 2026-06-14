@@ -221,18 +221,21 @@ def test_mount_hook_type_reaches_overlay_case(hook_fixture):
 # ---------------------------------------------------------------------------
 
 def test_unprivileged_no_config_file_exits_nonzero(hook_fixture):
-    """Unprivileged: exit 1 when LXC_CONFIG_FILE is not set.
+    """Unprivileged: exit 1 when no idmap range source is available.
 
-    The hook must fail closed when the sentinel exists but
-    ``LXC_CONFIG_FILE`` is absent — without it there is no source for
-    the idmap range.
+    The hook resolves the idmap range from two sources in precedence
+    order: ``lxc.idmap`` in ``LXC_CONFIG_FILE``, else the
+    ``kento-idmap-range`` state file. With the sentinel present but
+    NEITHER source available (no ``LXC_CONFIG_FILE``, no state file), the
+    hook must fail closed.
     """
     # Create the sentinel
     (hook_fixture.container_dir / "kento-unprivileged").write_text("")
 
     env = dict(hook_fixture.env)
     env["LXC_HOOK_TYPE"] = "pre-start"
-    # Deliberately do NOT set LXC_CONFIG_FILE
+    # Deliberately do NOT set LXC_CONFIG_FILE, and do not write the
+    # kento-idmap-range state file — neither source is available.
 
     result = subprocess.run(
         ["sh", str(hook_fixture.hook_path)],
@@ -243,11 +246,12 @@ def test_unprivileged_no_config_file_exits_nonzero(hook_fixture):
     )
 
     assert result.returncode == 1, (
-        f"hook should exit 1 when LXC_CONFIG_FILE is absent, "
+        f"hook should exit 1 when no idmap range source is available, "
         f"got {result.returncode}.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    assert "LXC_CONFIG_FILE" in result.stderr, (
-        f"error should mention LXC_CONFIG_FILE; got:\n{result.stderr}"
+    assert "could not determine the idmap range" in result.stderr, (
+        f"error should report the idmap range could not be determined; "
+        f"got:\n{result.stderr}"
     )
 
 
@@ -507,21 +511,27 @@ def test_unprivileged_post_stop_cleans_idmap_binds(hook_fixture, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_unprivileged_overlay_guard_exists_in_hook(hook_fixture):
-    """The generated hook must contain the mountpoint-q guard for the
-    unprivileged overlay mount.
+    """The generated hook must guard the unprivileged overlay mount on the
+    rootfs FSTYPE, not a bare mountpoint check.
 
-    This is a structural assertion (no root needed): it verifies that the
-    overlay mount inside the ``if [ -f ... kento-unprivileged ]`` branch is
-    wrapped with ``if ! mountpoint -q "$ROOTFS"`` so that a re-entry (LXC
-    retry or hook invoked twice after a crash) skips the EBUSY-prone mount.
+    This is a structural assertion (no root needed). A plain
+    ``mountpoint -q "$ROOTFS"`` guard is WRONG under PVE: its
+    ``lxc-pve-prestart-hook`` bind-mounts the dir rootfs before our hook
+    runs, so ``$ROOTFS`` is already a (non-overlay) mountpoint and a
+    mountpoint guard would skip our overlay, leaving an empty rootfs. The
+    guard must instead skip ONLY when ``$ROOTFS`` is already OUR overlay
+    (``findmnt`` FSTYPE == overlay), so genuine LXC retries are still
+    idempotent while PVE's bind mount does not suppress the overlay.
     """
     hook_text = hook_fixture.hook_path.read_text()
-    # The guard must appear in the script. We check for the specific pattern
-    # the fix introduces: the unprivileged block skips the overlay mount when
-    # the rootfs is already a mountpoint.
-    assert 'mountpoint -q "$ROOTFS"' in hook_text, (
-        "Hook must contain 'mountpoint -q \"$ROOTFS\"' guard for unprivileged "
-        "overlay re-entry; the fix is missing."
+    assert 'findmnt -fno FSTYPE "$ROOTFS"' in hook_text, (
+        "Hook must read the rootfs FSTYPE with "
+        "'findmnt -fno FSTYPE \"$ROOTFS\"' to guard the unprivileged overlay "
+        "mount; the fix is missing."
+    )
+    assert '!= "overlay"' in hook_text, (
+        "Hook must mount the overlay unless $ROOTFS is already an overlay "
+        "(skip only on FSTYPE == overlay); the fix is missing."
     )
 
 
