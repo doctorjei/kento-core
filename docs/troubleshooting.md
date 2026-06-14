@@ -328,7 +328,32 @@ create half-failed — leaving kento's state directory behind with nothing to
 manage. `kento list` marks such an instance **`orphan`** (rather than `running`
 or `stopped`). `kento stop` on an orphan no-ops; an orphan cannot be started.
 
-Clear the orphaned state with a forced destroy:
+You have two opposite ways to resolve an orphan. The PVE `.conf` is a *derived*
+artifact and kento's state directory is closer to source-of-truth, so kento can
+either rebuild the config from state (**heal**) or throw the state away
+(**discard**). Which one is right depends on intent — was the instance
+deliberately killed, or did a glitch take its config? — and kento cannot know
+that, so it never picks for you.
+
+**Heal it** — regenerate the missing config from surviving state and bring the
+instance back:
+
+```
+kento adopt <name>
+kento start <name>
+```
+
+`adopt` rebuilds the derived PVE artifacts (snippets wrapper + hook + `.conf`)
+from kento's on-disk metadata, byte-compatible with what `create` originally
+wrote; it does not auto-start or re-mount the rootfs, so run `kento start`
+afterwards. It is per-instance only (resurrecting a deliberately-killed instance
+is the costly wrong guess, so there is no "adopt all"), and it fails closed —
+refusing when the target is not actually an orphan, when its vmid is now occupied
+by a different instance, when the mode is non-PVE, or when required network
+metadata is missing (a pre-1.6.0 instance whose config is not faithfully
+recoverable).
+
+**Discard it** — when the state is cruft, clear it with a forced destroy:
 
 ```
 kento destroy -f <name>
@@ -336,7 +361,9 @@ kento destroy -f <name>
 
 This tolerates the missing PVE config (the stop step is skipped) and removes
 kento's leftover state directory and image hold. It does **not** touch any other
-instance.
+instance. To discard *several* orphans at once, use `kento prune --orphans`
+(dry-run by default; add `--yes` to act) — discard may be batched, but heal
+(`adopt`) is per-instance only.
 
 ## VM boot issues
 
@@ -477,10 +504,15 @@ Two safeguards:
   still backing a live instance.
 
 ```
-kento images            # see in-use vs orphaned kento-managed images
-kento prune             # dry-run: show what would be reclaimed
-sudo kento prune --yes  # actually reclaim orphaned holds + freed images
+kento images                  # see in-use vs orphaned kento-managed images
+kento prune                   # dry-run: show what would be reclaimed
+sudo kento prune --yes        # actually reclaim orphaned holds + freed images
+sudo kento prune --orphans --yes  # also discard orphaned PVE instance state
 ```
+
+`prune --orphans` adds a separately sectioned pass that discards orphaned
+*instances* (state dir survives but the PVE `.conf` is gone) — see the orphan
+section above; it is dry-run by default and acts only under `--yes`.
 
 ## SSH access
 

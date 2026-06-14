@@ -131,7 +131,10 @@ def test_orphan_pve_lxc_detected_warn(tmp_path):
     assert orphan, "expected an orphan finding"
     assert orphan[0]["severity"] == "warn"
     assert orphan[0]["scope"] == "ghost"
-    assert "destroy -f" in (orphan[0]["remediation"] or "")
+    # The remediation offers both the heal (adopt) and the discard (destroy -f).
+    remediation = orphan[0]["remediation"] or ""
+    assert "destroy -f" in remediation
+    assert "adopt" in remediation
     assert report["problem_count"] >= 1
 
 
@@ -507,6 +510,10 @@ def test_vmid_health_warns_on_reserved_orphans(tmp_path):
 
     vh = [f for f in report["checks"] if f["category"] == "vmid"]
     assert vh and vh[0]["severity"] == "warn"
+    # The remediation offers both the heal (adopt) and the discard (destroy -f).
+    vh_remediation = vh[0]["remediation"] or ""
+    assert "adopt" in vh_remediation
+    assert "destroy -f" in vh_remediation
 
 
 def test_no_vmid_check_on_non_pve(tmp_path):

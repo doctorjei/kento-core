@@ -5,6 +5,66 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0.dev2] - 2026-06-14
+
+Bug fix: the durable orphan-vmid reconcile. An **orphan** is a kento-managed
+pve-lxc / pve-vm instance whose state dir survives but whose PVE `.conf` was
+destroyed out-of-band (a direct `pct`/`qm destroy`, a pmxcfs glitch, or a crash
+mid-operation). The interim guard shipped in 1.5.3 stopped an orphan's vmid from
+being *reassigned* (collision safety) and 1.6.0's `diagnose` *detects* orphans;
+this release supplies the missing remediation — a way to reclaim orphans in batch
+and a way to heal one back to life — closing the long-open orphan gap. Stays on
+the unstable `1.6.0` library line (`.devN`).
+
+### Added
+
+- **`find_orphans(scope=None)`** — single-sources the orphan gone-check that was
+  previously duplicated inline across `list.list_containers`,
+  `diagnose._check_orphan`, and `diagnose._check_vmid_health`; those call sites
+  now delegate to it (DRY; their behavior/output is unchanged). Enumerates
+  kento `pve`/`pve-vm` instances whose PVE config is *definitively* gone,
+  returning `{"name", "vmid", "mode", "container_dir", "image"}` per orphan.
+  Plain `lxc`/`vm` can never orphan and are never returned. Read-only and
+  best-effort: missing base dirs, non-integer dir names, missing metadata, and
+  per-instance `OSError` are all tolerated, never fatal.
+- **`reap_orphans(reap=False, scope=None)`** — discards orphaned instance state.
+  `reap=False` (default) is a dry-run that only enumerates; `reap=True` calls
+  `destroy(force=True)` on each orphan. Acts ONLY on what `find_orphans` returns
+  (so the "never reap a healthy or indeterminate instance" invariant lives in one
+  place), and isolates per-orphan failure (an exception from one `destroy` is
+  recorded in `error` and reaping continues; it never raises for a single
+  failure). Paired with `format_reap` for the CLI to render.
+- **`emit_pve_config(container_dir, mode)`** — regenerates the *derived* PVE
+  artifacts (snippets wrapper + hook + `.conf`) for one already-prepared state
+  dir from surviving on-disk metadata, byte-compatible with what `create`
+  originally wrote. Factored out of the create path so adopt can reuse it. Does
+  not mount the rootfs or start the instance.
+- **`adopt(name, ...)`** — heals one orphan by regenerating its missing PVE
+  `.conf` from surviving state, bringing the instance back as a known instance
+  (run `kento start` afterwards; adopt never auto-starts or re-mounts the
+  rootfs). Per-instance only — resurrecting a deliberately-killed instance is the
+  costly wrong guess, so there is deliberately no "adopt all".
+
+### Fixed
+
+- **Durable orphan-vmid reconcile** (the long-open gap; interim guard shipped
+  1.5.3, this is the durable fix). The new functions above resolve it under a set
+  of safety invariants: detection acts only on *definitively*-orphaned instances
+  (an indeterminate `pve_config_exists` probe — `PermissionError`/`OSError`, e.g.
+  needs-root — is NEVER classified as an orphan and is never reaped/adopted);
+  `adopt` **fails closed**, refusing when the target is not an orphan (its PVE
+  config already exists), when the vmid is now occupied by a *different* instance
+  in *either* config namespace (a collision), when the mode is non-PVE, or when
+  required network metadata is missing (a pre-1.6.0 instance whose config is not
+  faithfully recoverable); and `adopt` holds the same `kento_lock` `create` holds
+  across the whole check→validate→write critical section, so a concurrent
+  `create` cannot write a fresh config at the vmid between the orphan check and
+  the config emission (TOCTOU-safe).
+- **`diagnose` orphan remediation hints** now offer the heal path
+  (`kento adopt <name>`) alongside the discard path (`kento destroy -f <name>`)
+  in both the per-instance orphan finding and the host-level reserved-vmid
+  finding.
+
 ## [1.6.0.dev1] - 2026-06-14
 
 First release of `kento-core` as a standalone library (`import kento`), split out

@@ -9,10 +9,12 @@
 #
 # Options:
 #   --mode lxc,pve-lxc,vm,pve-vm   Restrict which modes run (default all four)
-#   --section phase,iso,image,nested,unpriv
-#                                  Restrict to phases/iso/image/nested/unpriv sections.
+#   --section phase,iso,image,nested,unpriv,orphan
+#                                  Restrict to phases/iso/image/nested/unpriv/orphan sections.
 #                                  'nested' runs SECTION D (nested-LXC on PVE).
 #                                  'unpriv' runs SECTION E (unprivileged LXC).
+#                                  'orphan' runs SECTION F (orphan reconcile:
+#                                  adopt + prune --orphans).
 #   --subgroup NAME                Run only subgroups matching NAME (iso-port,
 #                                    iso-ssh, phase3, ygg, nested-lxc-lifecycle,
 #                                    nested-lxc-hookfire, etc.). Can repeat.
@@ -3451,6 +3453,467 @@ fi
 diag ""
 
 fi  # end section_enabled "unpriv"
+
+# ==========================================================================
+#  SECTION F: Orphan reconcile — adopt (heal) + prune --orphans (discard)
+# ==========================================================================
+#
+# An ORPHAN is a kento-managed PVE instance whose state dir under /var/lib/lxc
+# (pve-lxc) or /var/lib/kento/vm (pve-vm) survives but whose PVE .conf was
+# destroyed out-of-band. We SIMULATE one by deleting ONLY the PVE .conf
+# directly (rm of /etc/pve/nodes/<node>/.../<vmid>.conf) — NOT `pct/qm destroy`,
+# which would also tear down kento's rootfs/state and so would not be an orphan.
+#
+# F1 (pve-lxc, full lifecycle):
+#   create+start -> orphan it (rm .conf, assert state dir survives)
+#   -> kento list shows status 'orphan' + diagnose warns
+#   -> kento adopt regenerates the .conf -> kento start boots it (SSH-reachable)
+#   -> stop -> re-orphan -> prune --orphans (dry-run) lists but does NOT reap
+#   -> prune --orphans --yes reaps (state dir gone, vmid freed)
+# F2 (negatives):
+#   adopt on a HEALTHY instance fails ("not an orphan")
+#   adopt on a plain-lxc (--no-pve) instance fails ("only applies to PVE")
+# F3 (pve-vm, lighter): create -> orphan (rm qm .conf) -> adopt regenerates the
+#   qm .conf -> start boots it (best-effort; a full VM boot can be heavy — at
+#   minimum the .conf regeneration is asserted, boot is non-fatal-on-skip).
+#
+# Runs --section orphan; subgroups orphan-adopt-pve-lxc, orphan-prune-pve-lxc,
+# orphan-negatives, orphan-adopt-pve-vm.
+
+if section_enabled "orphan"; then
+
+diag "========================================"
+diag "SECTION F: Orphan reconcile (adopt + prune --orphans)"
+diag "========================================"
+
+# ---------- F helpers ----------
+
+# Echo the STATUS column (last whitespace field) of a `kento list` row for the
+# named instance, or "" if absent. We must read the STATUS column specifically
+# and NOT grep the whole line for "orphan": the SECTION F instance names
+# themselves contain the substring "orphan" (e2e-orphan-pve-lxc), so a naive
+# line-grep for orphan would always match regardless of real status.
+f_list_status() {
+    local name="$1"
+    kento list 2>/dev/null \
+        | awk -v n="$name" '$1 == n {print $NF}' \
+        | head -1
+}
+
+# Resolve the node-local PVE config path for a vmid/mode. Echoes the path
+# (may not exist). pve-lxc -> lxc/<vmid>.conf ; pve-vm -> qemu-server/<vmid>.conf
+f_conf_path() {
+    local vmid="$1"
+    local mode="$2"
+    local sub="lxc"
+    [ "$mode" = "pve-vm" ] && sub="qemu-server"
+    # Resolve the single node dir (there is exactly one on bifrost). Glob and
+    # take the first match so we tolerate whatever the node is named.
+    local nodedir
+    for nodedir in /etc/pve/nodes/*/; do
+        [ -d "$nodedir" ] || continue
+        echo "${nodedir}${sub}/${vmid}.conf"
+        return 0
+    done
+    echo ""
+}
+
+# Force teardown for a SECTION F instance — destroy via kento, then belt-and-
+# suspenders the PVE config + state dir + processes via the generic helper.
+f_force_teardown() {
+    local name="$1"
+    local mode="$2"
+    diag "SECTION F: force_teardown $name ($mode)"
+    timeout 20 kento destroy -f "$name" >/dev/null 2>&1 || true
+    force_teardown "$name" "$mode"
+}
+
+# ---------- F1: pve-lxc adopt + prune lifecycle ----------
+
+F1_NAME="e2e-orphan-pve-lxc"
+F1_OK=0      # set to 1 once create+start succeed (gates the rest)
+F1_VMID=""
+F1_CDIR=""
+
+if subgroup_begin "orphan-adopt-pve-lxc"; then
+    diag "--- F1: orphan adopt (pve-lxc) ---"
+    set_last_instance "$F1_NAME" "pve-lxc"
+
+    # F1.1: create + start a standard pve-lxc instance.
+    F1_CREATE_CMD="kento lxc create $IMAGE --name $F1_NAME \
+        --network bridge=$BRIDGE --ip $PVE_LXC_IP --gateway $PVE_LXC_GW \
+        --ssh-key ${SSH_KEY}.pub --ssh-host-keys \
+        --memory 256 --cores 2 --port 10231:22 --pve"
+    f1_out="$(timeout -k 5 "$KTO_CREATE" bash -c "$F1_CREATE_CMD" 2>&1)"
+    f1_rc=$?
+    if [ $f1_rc -eq 0 ]; then
+        pass "orphan-adopt-pve-lxc: create"
+    else
+        fail "orphan-adopt-pve-lxc: create" "exit code $f1_rc" "$f1_out"
+    fi
+
+    if [ $f1_rc -eq 0 ]; then
+        F1_CDIR="$(resolve_pve_lxc_dir "$F1_NAME")"
+        F1_VMID="$(basename "$F1_CDIR" 2>/dev/null)"
+    fi
+
+    if [ -n "$F1_VMID" ] && [ -d "$F1_CDIR" ]; then
+        run_kento "$KTO_START_LXC" start "$F1_NAME"
+        if [ "$RUN_RC" -eq 0 ] && wait_running "$F1_NAME" "$BOOT_TIMEOUT_LXC"; then
+            pass "orphan-adopt-pve-lxc: initial start (vmid=$F1_VMID)"
+            F1_OK=1
+        else
+            fail "orphan-adopt-pve-lxc: initial start (vmid=$F1_VMID)" \
+                "start rc=$RUN_RC" "$RUN_OUTPUT"
+            f_force_teardown "$F1_NAME" "pve-lxc"
+        fi
+    else
+        fail "orphan-adopt-pve-lxc: initial start" \
+            "could not resolve vmid/cdir (vmid='$F1_VMID' cdir='$F1_CDIR')"
+    fi
+
+    if [ "$F1_OK" -eq 1 ]; then
+        # Stop before orphaning so the instance isn't running with no config
+        # (adopt + start later re-validates a clean boot from the regenerated
+        # config; we don't want a half-running ghost).
+        run_kento "$KTO_STOP" stop "$F1_NAME" >/dev/null 2>&1 || true
+
+        F1_CONF="$(f_conf_path "$F1_VMID" pve-lxc)"
+
+        # F1.2: simulate the orphan — delete ONLY the PVE .conf.
+        if [ -n "$F1_CONF" ] && [ -f "$F1_CONF" ]; then
+            rm -f "$F1_CONF"
+            if [ ! -f "$F1_CONF" ]; then
+                pass "orphan-adopt-pve-lxc: PVE .conf removed (orphan simulated)"
+            else
+                fail "orphan-adopt-pve-lxc: PVE .conf removed (orphan simulated)" \
+                    "still present: $F1_CONF"
+            fi
+        else
+            fail "orphan-adopt-pve-lxc: PVE .conf removed (orphan simulated)" \
+                "conf not found pre-delete: $F1_CONF"
+        fi
+
+        # F1.3: kento state dir under /var/lib/lxc/<vmid> must SURVIVE.
+        if [ -d "$F1_CDIR" ] && [ -f "$F1_CDIR/kento-name" ]; then
+            pass "orphan-adopt-pve-lxc: kento state dir survives orphaning"
+        else
+            fail "orphan-adopt-pve-lxc: kento state dir survives orphaning" \
+                "state dir/metadata missing: $F1_CDIR"
+        fi
+
+        # F1.4: kento list shows the instance with status 'orphan'. Check the
+        # STATUS column specifically (the name contains "orphan").
+        f1_status="$(f_list_status "$F1_NAME")"
+        if [ "$f1_status" = "orphan" ]; then
+            pass "orphan-adopt-pve-lxc: list shows status orphan"
+        else
+            fail "orphan-adopt-pve-lxc: list shows status orphan" \
+                "STATUS column='$f1_status' (expected orphan)"
+        fi
+
+        # F1.5: kento diagnose emits an orphan WARNING (non-zero exit expected
+        # because diagnose exits 1 when it finds a problem; we assert on output,
+        # not exit code). Match the '[WARN] orphan:' marker — not a bare
+        # 'orphan' substring, which the instance name would also satisfy.
+        f1_diag="$(timeout 30 kento diagnose 2>&1)"
+        if echo "$f1_diag" | grep -qiE "\[WARN\] orphan|orphaned kento state"; then
+            pass "orphan-adopt-pve-lxc: diagnose warns about orphan"
+        else
+            fail "orphan-adopt-pve-lxc: diagnose warns about orphan" \
+                "diagnose output had no orphan WARN marker"
+        fi
+
+        # F1.6: kento adopt regenerates the .conf (exit 0 + file back).
+        run_kento 30 adopt "$F1_NAME"
+        if [ "$RUN_RC" -eq 0 ]; then
+            pass "orphan-adopt-pve-lxc: adopt exits 0"
+        else
+            fail "orphan-adopt-pve-lxc: adopt exits 0" \
+                "exit code $RUN_RC" "$RUN_OUTPUT"
+        fi
+        if [ -n "$F1_CONF" ] && [ -f "$F1_CONF" ]; then
+            pass "orphan-adopt-pve-lxc: PVE .conf regenerated by adopt"
+        else
+            fail "orphan-adopt-pve-lxc: PVE .conf regenerated by adopt" \
+                "conf still missing after adopt: $F1_CONF"
+        fi
+
+        # After adopt, the STATUS column should no longer read 'orphan'. Poll a
+        # few seconds to absorb any pmxcfs (/etc/pve FUSE) propagation lag (the
+        # .conf-present check above already proved the write landed on disk).
+        f1_deorphan=0
+        f1_deadline=$((SECONDS + 10))
+        f1_status2=""
+        while [ $SECONDS -lt $f1_deadline ]; do
+            f1_status2="$(f_list_status "$F1_NAME")"
+            if [ "$f1_status2" != "orphan" ]; then
+                f1_deorphan=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$f1_deorphan" -eq 1 ]; then
+            pass "orphan-adopt-pve-lxc: status no longer orphan after adopt (now $f1_status2)"
+        else
+            fail "orphan-adopt-pve-lxc: status no longer orphan after adopt" \
+                "STATUS still 'orphan' after 10s"
+        fi
+
+        # F1.7: kento start boots the adopted instance + SSH reachable.
+        run_kento "$KTO_START_LXC" start "$F1_NAME"
+        if [ "$RUN_RC" -eq 0 ] && wait_running "$F1_NAME" "$BOOT_TIMEOUT_LXC"; then
+            pass "orphan-adopt-pve-lxc: start after adopt -> running"
+        else
+            fail "orphan-adopt-pve-lxc: start after adopt -> running" \
+                "start rc=$RUN_RC" "$RUN_OUTPUT"
+        fi
+
+        # SSH reachability (mirrors Section A/Phase 3 for pve-lxc on 10.0.3.201).
+        if wait_ssh "10.0.3.201" 22 "$SSH_KEY" "$SSH_TIMEOUT"; then
+            pass "orphan-adopt-pve-lxc: adopted instance SSH-reachable (10.0.3.201:22)"
+        else
+            fail "orphan-adopt-pve-lxc: adopted instance SSH-reachable (10.0.3.201:22)" \
+                "timed out after ${SSH_TIMEOUT}s"
+        fi
+    else
+        # F1 lifecycle failed at create/start — skip the rest of F1.
+        for t in "PVE .conf removed (orphan simulated)" \
+                 "kento state dir survives orphaning" \
+                 "list shows status orphan" \
+                 "diagnose warns about orphan" \
+                 "adopt exits 0" \
+                 "PVE .conf regenerated by adopt" \
+                 "status no longer orphan after adopt" \
+                 "start after adopt -> running" \
+                 "adopted instance SSH-reachable (10.0.3.201:22)"; do
+            skip "orphan-adopt-pve-lxc: $t" "create/start failed"
+        done
+    fi
+
+    subgroup_end
+fi
+
+# ---------- F1b: re-orphan + prune --orphans (dry-run then --yes) ----------
+
+if subgroup_begin "orphan-prune-pve-lxc"; then
+    diag "--- F1b: prune --orphans (pve-lxc) ---"
+    set_last_instance "$F1_NAME" "pve-lxc"
+
+    if [ "$F1_OK" -eq 1 ] && [ -n "$F1_VMID" ] && [ -d "$F1_CDIR" ]; then
+        F1_CONF="$(f_conf_path "$F1_VMID" pve-lxc)"
+
+        # Stop, then re-orphan by deleting the .conf again.
+        run_kento "$KTO_STOP" stop "$F1_NAME" >/dev/null 2>&1 || true
+        rm -f "$F1_CONF"
+        if [ ! -f "$F1_CONF" ]; then
+            pass "orphan-prune-pve-lxc: re-orphaned (conf deleted again)"
+        else
+            fail "orphan-prune-pve-lxc: re-orphaned (conf deleted again)" \
+                "conf still present: $F1_CONF"
+        fi
+
+        # F1b.1: prune --orphans (DRY RUN, no --yes) lists the orphan but does
+        # NOT remove its state dir.
+        run_kento 30 prune --orphans
+        if [ "$RUN_RC" -eq 0 ] && echo "$RUN_OUTPUT" | grep -qi "$F1_NAME"; then
+            pass "orphan-prune-pve-lxc: dry-run lists the orphan"
+        else
+            fail "orphan-prune-pve-lxc: dry-run lists the orphan" \
+                "rc=$RUN_RC" "$RUN_OUTPUT"
+        fi
+        if [ -d "$F1_CDIR" ]; then
+            pass "orphan-prune-pve-lxc: dry-run did NOT remove state dir"
+        else
+            fail "orphan-prune-pve-lxc: dry-run did NOT remove state dir" \
+                "state dir gone after dry-run: $F1_CDIR"
+        fi
+
+        # F1b.2: prune --orphans --yes reaps it — state dir gone, vmid freed.
+        run_kento "$KTO_DESTROY" prune --orphans --yes
+        if [ "$RUN_RC" -eq 0 ]; then
+            pass "orphan-prune-pve-lxc: prune --orphans --yes exits 0"
+        else
+            fail "orphan-prune-pve-lxc: prune --orphans --yes exits 0" \
+                "rc=$RUN_RC" "$RUN_OUTPUT"
+        fi
+        if [ ! -d "$F1_CDIR" ]; then
+            pass "orphan-prune-pve-lxc: state dir reaped (vmid $F1_VMID freed)"
+        else
+            fail "orphan-prune-pve-lxc: state dir reaped (vmid $F1_VMID freed)" \
+                "state dir still present: $F1_CDIR"
+            f_force_teardown "$F1_NAME" "pve-lxc"
+        fi
+
+        # Sanity: the orphan no longer appears in kento list at all.
+        f1_list3="$(timeout "$KTO_READ" kento list 2>&1)"
+        if echo "$f1_list3" | grep -qE "(^|\s)${F1_NAME}(\s)"; then
+            fail "orphan-prune-pve-lxc: reaped orphan gone from list" \
+                "still listed: $(echo "$f1_list3" | grep "$F1_NAME")"
+        else
+            pass "orphan-prune-pve-lxc: reaped orphan gone from list"
+        fi
+    else
+        for t in "re-orphaned (conf deleted again)" \
+                 "dry-run lists the orphan" \
+                 "dry-run did NOT remove state dir" \
+                 "prune --orphans --yes exits 0" \
+                 "state dir reaped (vmid $F1_VMID freed)" \
+                 "reaped orphan gone from list"; do
+            skip "orphan-prune-pve-lxc: $t" "F1 lifecycle did not establish an instance"
+        done
+    fi
+
+    subgroup_end
+fi
+
+# ---------- F2: negative checks ----------
+
+if subgroup_begin "orphan-negatives"; then
+    diag "--- F2: adopt negatives ---"
+
+    # F2.1: adopt a HEALTHY pve-lxc instance must fail (not an orphan).
+    F2_NAME="e2e-orphan-neg-healthy"
+    set_last_instance "$F2_NAME" "pve-lxc"
+    F2_CREATE="kento lxc create $IMAGE --name $F2_NAME \
+        --network bridge=$BRIDGE --ip $PVE_LXC_IP --gateway $PVE_LXC_GW \
+        --memory 256 --cores 2 --port 10232:22 --pve"
+    f2_out="$(timeout -k 5 "$KTO_CREATE" bash -c "$F2_CREATE" 2>&1)"
+    f2_rc=$?
+    if [ $f2_rc -eq 0 ]; then
+        run_kento 30 adopt "$F2_NAME"
+        if [ "$RUN_RC" -ne 0 ] && echo "$RUN_OUTPUT" | grep -qi "not an orphan"; then
+            pass "orphan-negatives: adopt healthy pve-lxc fails (not an orphan)"
+        elif [ "$RUN_RC" -ne 0 ]; then
+            pass "orphan-negatives: adopt healthy pve-lxc fails (non-zero, rc=$RUN_RC)"
+            diag "orphan-negatives: message lacked 'not an orphan': $RUN_OUTPUT"
+        else
+            fail "orphan-negatives: adopt healthy pve-lxc fails (not an orphan)" \
+                "adopt unexpectedly succeeded" "$RUN_OUTPUT"
+        fi
+        f_force_teardown "$F2_NAME" "pve-lxc"
+    else
+        fail "orphan-negatives: adopt healthy pve-lxc fails (not an orphan)" \
+            "could not create healthy fixture: rc=$f2_rc" "$f2_out"
+    fi
+
+    # F2.2: adopt a plain-lxc (--no-pve) instance must fail (PVE-only verb).
+    F2L_NAME="e2e-orphan-neg-plainlxc"
+    set_last_instance "$F2L_NAME" "lxc"
+    F2L_CREATE="kento lxc create $IMAGE --name $F2L_NAME \
+        --network bridge=$BRIDGE --ip $LXC_IP --gateway $LXC_GW \
+        --memory 256 --cores 2 --port 10233:22 --no-pve"
+    f2l_out="$(timeout -k 5 "$KTO_CREATE" bash -c "$F2L_CREATE" 2>&1)"
+    f2l_rc=$?
+    if [ $f2l_rc -eq 0 ]; then
+        run_kento 30 adopt "$F2L_NAME"
+        if [ "$RUN_RC" -ne 0 ] && echo "$RUN_OUTPUT" | grep -qiE "pve|plain|only applies"; then
+            pass "orphan-negatives: adopt plain-lxc fails (PVE-only)"
+        elif [ "$RUN_RC" -ne 0 ]; then
+            pass "orphan-negatives: adopt plain-lxc fails (non-zero, rc=$RUN_RC)"
+            diag "orphan-negatives: message lacked pve/plain: $RUN_OUTPUT"
+        else
+            fail "orphan-negatives: adopt plain-lxc fails (PVE-only)" \
+                "adopt unexpectedly succeeded" "$RUN_OUTPUT"
+        fi
+        f_force_teardown "$F2L_NAME" "lxc"
+    else
+        fail "orphan-negatives: adopt plain-lxc fails (PVE-only)" \
+            "could not create plain-lxc fixture: rc=$f2l_rc" "$f2l_out"
+    fi
+
+    subgroup_end
+fi
+
+# ---------- F3: pve-vm adopt (lighter — assert config regen, boot best-effort) ----------
+
+if subgroup_begin "orphan-adopt-pve-vm"; then
+    diag "--- F3: orphan adopt (pve-vm) ---"
+
+    F3_NAME="e2e-orphan-pve-vm"
+    F3_CDIR="$VM_BASE/$F3_NAME"
+    set_last_instance "$F3_NAME" "pve-vm"
+
+    F3_CREATE="kento vm create $IMAGE --name $F3_NAME \
+        --network bridge=$BRIDGE --ip $PVE_VM_IP --gateway $PVE_VM_GW \
+        --ssh-key ${SSH_KEY}.pub --ssh-host-keys \
+        --memory 256 --cores 2 --pve"
+    f3_out="$(timeout -k 5 "$KTO_CREATE" bash -c "$F3_CREATE" 2>&1)"
+    f3_rc=$?
+    if [ $f3_rc -eq 0 ]; then
+        pass "orphan-adopt-pve-vm: create"
+    else
+        fail "orphan-adopt-pve-vm: create" "exit code $f3_rc" "$f3_out"
+    fi
+
+    F3_VMID=""
+    [ -f "$F3_CDIR/kento-vmid" ] && F3_VMID="$(tr -d '[:space:]' < "$F3_CDIR/kento-vmid")"
+
+    if [ $f3_rc -eq 0 ] && [ -n "$F3_VMID" ]; then
+        F3_CONF="$(f_conf_path "$F3_VMID" pve-vm)"
+
+        # Orphan it — delete ONLY the qm .conf.
+        if [ -n "$F3_CONF" ] && [ -f "$F3_CONF" ]; then
+            rm -f "$F3_CONF"
+            if [ ! -f "$F3_CONF" ] && [ -d "$F3_CDIR" ]; then
+                pass "orphan-adopt-pve-vm: qm .conf removed, state dir survives"
+            else
+                fail "orphan-adopt-pve-vm: qm .conf removed, state dir survives" \
+                    "conf=$F3_CONF cdir=$F3_CDIR"
+            fi
+        else
+            fail "orphan-adopt-pve-vm: qm .conf removed, state dir survives" \
+                "qm conf not found pre-delete: $F3_CONF"
+        fi
+
+        # list shows orphan (STATUS column; name contains "orphan").
+        f3_status="$(f_list_status "$F3_NAME")"
+        if [ "$f3_status" = "orphan" ]; then
+            pass "orphan-adopt-pve-vm: list shows status orphan"
+        else
+            fail "orphan-adopt-pve-vm: list shows status orphan" \
+                "STATUS column='$f3_status' (expected orphan)"
+        fi
+
+        # adopt regenerates the qm .conf.
+        run_kento 30 adopt "$F3_NAME"
+        if [ "$RUN_RC" -eq 0 ] && [ -f "$F3_CONF" ]; then
+            pass "orphan-adopt-pve-vm: adopt regenerates qm .conf"
+        else
+            fail "orphan-adopt-pve-vm: adopt regenerates qm .conf" \
+                "rc=$RUN_RC conf_present=$([ -f "$F3_CONF" ] && echo yes || echo no)" \
+                "$RUN_OUTPUT"
+        fi
+
+        # Best-effort boot of the adopted pve-vm. A full VM boot can be heavy;
+        # treat a non-boot as a SKIP (noted) rather than a hard FAIL so F3 does
+        # not flake the suite. The config-regen assertion above is the gate.
+        run_kento "$KTO_START_VM" start "$F3_NAME"
+        if [ "$RUN_RC" -eq 0 ] && wait_running "$F3_NAME" "$BOOT_TIMEOUT_VM"; then
+            pass "orphan-adopt-pve-vm: start after adopt -> running"
+        else
+            skip "orphan-adopt-pve-vm: start after adopt -> running" \
+                "pve-vm boot best-effort (rc=$RUN_RC); config regen is the gate"
+            diag "orphan-adopt-pve-vm: post-adopt start output: $RUN_OUTPUT"
+        fi
+
+        f_force_teardown "$F3_NAME" "pve-vm"
+    else
+        for t in "qm .conf removed, state dir survives" \
+                 "list shows status orphan" \
+                 "adopt regenerates qm .conf" \
+                 "start after adopt -> running"; do
+            skip "orphan-adopt-pve-vm: $t" "create failed or vmid unresolved"
+        done
+        f_force_teardown "$F3_NAME" "pve-vm"
+    fi
+
+    subgroup_end
+fi
+
+diag ""
+
+fi  # end section_enabled "orphan"
 
 # TAP plan (at end, since test count varies with skips)
 echo "1..$TEST_NUM"

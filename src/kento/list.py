@@ -6,6 +6,7 @@ from pathlib import Path
 
 from kento import LXC_BASE, VM_BASE, is_running, pve_config_exists, read_mode
 from kento.info import _get_ssh_host_key_fingerprints
+from kento.reconcile import _is_orphan
 
 
 def list_containers(scope: str | None = None, show_size: bool = False,
@@ -54,10 +55,19 @@ def list_containers(scope: str | None = None, show_size: bool = False,
 
             # For PVE modes, surface an orphaned instance (PVE config gone,
             # destroyed out-of-band) as "orphan" so the user can see it and
-            # clean it up with `destroy -f`.
+            # clean it up with `destroy -f`. Detection is shared with
+            # diagnose via reconcile._is_orphan (pve-lxc uses the dir name as
+            # the vmid; pve-vm reads kento-vmid). Pass list's own (test-
+            # patchable) pve_config_exists binding so the predicate probes
+            # through the same name list already patches.
             if mode in ("pve", "pve-vm"):
-                check_vmid = container_dir.name if mode == "pve" else vmid
-                if check_vmid is None or not pve_config_exists(check_vmid, mode):
+                orphaned = _is_orphan(container_dir, mode, pve_config_exists)
+                if orphaned is None:
+                    # Indeterminate config probe (PermissionError/OSError). The
+                    # prior inline code let that exception propagate to the
+                    # outer `except OSError` and skip the entry; preserve that.
+                    raise OSError("indeterminate PVE config check")
+                if orphaned:
                     status = "orphan"
                 else:
                     status = "running" if is_running(container_dir, mode) else "stopped"

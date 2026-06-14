@@ -9,6 +9,26 @@ Releases are driven entirely by **git tags** via
 `.github/workflows/release.yml`, following the ecosystem's **rc-then-promote**
 shape.
 
+## Release gate (pass ALL before tagging a release)
+
+Both gates below are blocking. Do not cut the final `v<ver>` tag until each
+passes; the maintainer gives the final go/no-go.
+
+- [ ] **E2E gate.** The PVE end-to-end suite (`tests/e2e/kento-e2e.sh`,
+      pve-lxc + pve-vm) is green on the live substrate at the commit being
+      released. No PyPI publish without a green PVE E2E. Scope by release type:
+      a patch may run the regression E2E; a feature or overhaul runs the FULL
+      E2E of everything, including the nested Section D.
+
+- [ ] **Known-issues disclosure.** Before tagging/publishing, **enumerate every
+      open bug or issue** touching the area being released — *no severity
+      filtering*; list them all, low and high alike (board / `tasks.md` /
+      tracker / known-issues notes). For each, the maintainer gives an explicit
+      **go / no-go**. **A known bug in the released area is a blocker by
+      default** — shipping over one requires an explicit, recorded waiver from
+      the maintainer, not silence. If nothing is open in the released area, say
+      so explicitly; an empty list is a deliberate statement, not an omission.
+
 ## Release flow
 
 1. **Pre-flight (recommended).** On the commit you intend to tag, run the

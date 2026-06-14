@@ -29,6 +29,7 @@ from kento.create import _apparmor_active, _apparmor_parser_present
 from kento.images import _guest_names, _holds
 from kento.info import _read_meta
 from kento.pve import _kento_recorded_vmids, is_pve, next_vmid
+from kento.reconcile import _is_orphan, _orphan_vmid
 
 logger = logging.getLogger("kento")
 
@@ -204,7 +205,8 @@ def _check_vmid_health():
             f"{len(reserved_orphans)} recorded vmid(s) are reserved by "
             f"orphaned kento state and will not be reassigned: "
             f"{', '.join(str(v) for v in reserved_orphans)}",
-            "kento destroy -f <name> for the orphan(s), then re-check")]
+            "kento adopt <name> to heal, or kento destroy -f <name> to "
+            "discard, the orphan(s), then re-check")]
     return [_finding("vmid", "info", "host",
                      f"next free vmid is {nxt}; "
                      f"{len(recorded)} vmid(s) recorded by kento", None)]
@@ -216,18 +218,17 @@ def _check_vmid_health():
 def _check_orphan(container_dir, mode, display):
     """Orphan check (pve modes): state present but PVE .conf gone.
 
-    Same logic list.list_containers uses: pve-lxc uses the dir name as the
-    vmid; pve-vm reads kento-vmid.
+    Detection is shared with list.list_containers via reconcile._is_orphan
+    (pve-lxc uses the dir name as the vmid; pve-vm reads kento-vmid). The
+    diagnose-bound pve_config_exists is passed in so the predicate probes
+    through the same name diagnose's tests patch.
     """
     if mode not in ("pve", "pve-vm"):
         return []
-    if mode == "pve":
-        check_vmid = container_dir.name
-    else:
-        check_vmid = _read_meta(container_dir, "kento-vmid")
-    try:
-        gone = check_vmid is None or not pve_config_exists(check_vmid, mode)
-    except (PermissionError, OSError):
+    check_vmid = _orphan_vmid(container_dir, mode)
+    gone = _is_orphan(container_dir, mode, pve_config_exists)
+    if gone is None:
+        # Indeterminate config probe (PermissionError/OSError).
         return [_finding("orphan", "info", display,
                          "could not check PVE config (needs root?)", None)]
     if gone:
@@ -235,7 +236,8 @@ def _check_orphan(container_dir, mode, display):
             "orphan", "warn", display,
             f"instance '{display}' has kento state but its PVE config "
             f"(vmid {check_vmid or '?'}) is gone — orphaned",
-            f"kento destroy -f {display}")]
+            f"kento adopt {display} to heal it, or "
+            f"kento destroy -f {display} to discard it")]
     return [_finding("orphan", "ok", display,
                      f"PVE config present (vmid {check_vmid})", None)]
 
