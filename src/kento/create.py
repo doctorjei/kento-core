@@ -120,6 +120,36 @@ def _perlayer_idmap_supported() -> bool:
             pass
 
 
+# PVE's unprivileged container default idmap range. A fresh unprivileged
+# container maps container uid/gid 0 onto host 100000 for 65536 ids unless the
+# admin configures a custom range. kento doesn't expose custom ranges yet, so
+# this default is the normal case — but _pve_idmap_range() honours a custom
+# `lxc.idmap = u 0 B C` line if one is present (e.g. via --pve-arg) so the state
+# file always records the EFFECTIVE range.
+_PVE_DEFAULT_IDMAP_BASE = 100000
+_PVE_DEFAULT_IDMAP_COUNT = 65536
+
+
+def _pve_idmap_range(pve_conf_text: str) -> tuple[int, int]:
+    """Return (BASE, COUNT) for the unprivileged idmap, following PVE.
+
+    If ``pve_conf_text`` carries a custom ``lxc.idmap = u 0 <B> <C>`` line, use
+    its BASE/COUNT; otherwise fall back to PVE's unprivileged default
+    (100000/65536). Matches the uid (``u``) mapping for container id 0 — the
+    range kento's hook idmaps every lowerdir with.
+
+    The state file written from this lets the hook resolve the range
+    independently of WHEN PVE populates lxc.idmap into the runtime config.
+    """
+    import re
+    pat = re.compile(r"^\s*lxc\.idmap\s*=\s*u\s+0\s+(\d+)\s+(\d+)\s*$")
+    for line in pve_conf_text.splitlines():
+        m = pat.match(line)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return _PVE_DEFAULT_IDMAP_BASE, _PVE_DEFAULT_IDMAP_COUNT
+
+
 def _run_start_or_rollback(cmd: list[str], *, name: str, scope: str) -> None:
     """Run a start command inside create()'s try block.
 
@@ -1078,19 +1108,29 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                     )
                     undos.append(("lxc-snippets-wrapper",
                                   lambda v=vmid: delete_lxc_snippets_wrapper(v)))
-                pve_conf = write_pve_config(
-                    vmid,
-                    generate_pve_config(name, vmid, container_dir, bridge=bridge,
-                                        net_type=network.get("type"),
-                                        nesting=nesting, ip=ip,
-                                        gateway=gateway, nameserver=dns,
-                                        searchdomain=searchdomain,
-                                        timezone=timezone, env=env,
-                                        port=port,
-                                        memory=memory, cores=cores,
-                                        hookscript_ref=hookscript_ref,
-                                        unprivileged=unprivileged)
-                )
+                pve_conf_text = generate_pve_config(
+                    name, vmid, container_dir, bridge=bridge,
+                    net_type=network.get("type"),
+                    nesting=nesting, ip=ip,
+                    gateway=gateway, nameserver=dns,
+                    searchdomain=searchdomain,
+                    timezone=timezone, env=env,
+                    port=port,
+                    memory=memory, cores=cores,
+                    hookscript_ref=hookscript_ref,
+                    unprivileged=unprivileged)
+                # Record the effective idmap range for the unprivileged hook.
+                # At PVE pre-start time the hook idmaps each lowerdir, but PVE
+                # may not have populated lxc.idmap into the runtime config yet
+                # (that timing is PVE-internal). Persisting the range here makes
+                # the hook independent of that ordering. Follow PVE: honour a
+                # custom `lxc.idmap = u 0 B C` line if present, else PVE's
+                # unprivileged default (100000 65536). See _pve_idmap_range().
+                if unprivileged:
+                    base, count = _pve_idmap_range(pve_conf_text)
+                    (container_dir / "kento-idmap-range").write_text(
+                        f"{base} {count}\n")
+                pve_conf = write_pve_config(vmid, pve_conf_text)
                 from kento.pve import delete_pve_config
                 undos.append(("pve-config",
                               lambda v=vmid: delete_pve_config(v)))

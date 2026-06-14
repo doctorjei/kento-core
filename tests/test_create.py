@@ -2644,7 +2644,76 @@ class TestUnprivileged:
 
         cfg = pve_conf.read_text()
         assert "unprivileged: 1" in cfg
+        # pve-lxc unprivileged assembles in pre-start (host initial ns), not
+        # mount/pre-mount (child userns → EPERM on idmapped bind mounts).
+        assert "lxc.hook.pre-start: " in cfg
+        assert "lxc.hook.mount:" not in cfg
+        assert "lxc.hook.pre-mount" not in cfg
         assert (tmp_path / "100" / "kento-unprivileged").read_text() == "1\n"
+        # Idmap range state file: default PVE unprivileged range (no custom
+        # lxc.idmap line in the generated config).
+        assert (tmp_path / "100" / "kento-idmap-range").read_text() == \
+            "100000 65536\n"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_unprivileged_pve_lxc_idmap_range_honours_custom_pve_arg(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """A custom `lxc.idmap = u 0 B C` (via --pve-arg) is recorded verbatim."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text('{"ids": {}}')
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.create._perlayer_idmap_supported", return_value=True), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            create("myimage:latest", name="test", mode="pve",
+                   unprivileged=True,
+                   pve_args=["lxc.idmap = u 0 200000 131072"])
+
+        assert (tmp_path / "100" / "kento-idmap-range").read_text() == \
+            "200000 131072\n"
+
+    def test_pve_idmap_range_default_and_custom(self):
+        """_pve_idmap_range: default fallback + custom-line parse."""
+        from kento.create import _pve_idmap_range
+        assert _pve_idmap_range("arch: amd64\nunprivileged: 1\n") == \
+            (100000, 65536)
+        assert _pve_idmap_range(
+            "arch: amd64\nlxc.idmap = u 0 200000 131072\n") == (200000, 131072)
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_privileged_pve_lxc_no_idmap_range_file(
+            self, mock_root, mock_layers, mock_run, tmp_path):
+        """Privileged pve-lxc must NOT write kento-idmap-range."""
+        pve = tmp_path / "pve"
+        pve.mkdir()
+        (pve / ".vmlist").write_text('{"ids": {}}')
+        pve_conf = tmp_path / "pve-conf" / "100.conf"
+        pve_conf.parent.mkdir()
+
+        def fake_write(vmid, content):
+            pve_conf.write_text(content)
+            return pve_conf
+
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.pve.PVE_DIR", pve), \
+             patch("kento.create.upper_base", return_value=tmp_path / "100"), \
+             patch("kento.pve.write_pve_config", side_effect=fake_write):
+            create("myimage:latest", name="test", mode="pve")
+
+        assert not (tmp_path / "100" / "kento-idmap-range").exists()
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")

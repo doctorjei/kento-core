@@ -236,15 +236,22 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append("lxc.mount.entry: sys dev/.lxc/sys sysfs create=dir,optional 0 0")
         lines.append("lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0")
         lines.append("lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file,optional 0 0")
-    # For privileged containers, use pre-mount (runs before rootfs setup).
-    # For unprivileged containers, use mount instead: pre-mount runs in the
-    # mapped userns where the host-0 hook script is not executable, causing a
-    # sync_wait abort on container start. The mount hook runs as real root
-    # AFTER rootfs setup and works correctly in both privileged and unprivileged
-    # unprivileged containers. LXC_CONFIG_FILE and LXC_ROOTFS_PATH are
-    # available in both contexts. (Spike result, Phase 0, run 19.)
+    # Hook point for the overlay assembly (per-layer idmap for unprivileged).
+    # Privileged: pre-mount. The container has no userns, so pre-mount runs in
+    # the host initial namespace as real root — exactly where the overlay mount
+    # belongs. (In the green privileged regression.)
+    # Unprivileged: pre-start, which is the ONLY hook that runs in the host
+    # INITIAL namespace as real root. pre-mount and mount both run in the
+    # container's CHILD userns (mapped uid 100000), where creating an idmapped
+    # bind mount fails with EPERM — so the per-layer idmap assembly cannot
+    # happen there. Verified empirically on bifrost (run 19: pre-start has
+    # uid_map `0 0 4294967295` + full caps and assembles cleanly; pre-mount/
+    # mount run with uid_map `0 100000 65536` and hit EPERM) and corroborated by
+    # deep-research (pre-start is the sole host-ns hook). The earlier spike's
+    # pre-mount->mount switch rested on the false belief that mount runs as real
+    # root; it does not.
     if unprivileged:
-        lines.append(f"lxc.hook.mount: {hook}")
+        lines.append(f"lxc.hook.pre-start: {hook}")
     else:
         lines.append(f"lxc.hook.pre-mount: {hook}")
     # start-host runs on the host after the container is running. We use it for

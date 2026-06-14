@@ -233,9 +233,11 @@ case "$HOOK_TYPE" in
         unset IFS
 
         # pre-mount (PVE privileged): mount at lxc.rootfs.path source so LXC picks it up
-        # mount (PVE unprivileged): same — LXC_ROOTFS_PATH is set at the mount hook point
+        # pre-start (PVE unprivileged): the only hook in the host INITIAL ns as
+        #   real root — pre-mount/mount run in the child userns where idmapped
+        #   bind mounts fail with EPERM (run 19). LXC_ROOTFS_PATH is set here.
         # pre-start (plain LXC): mount at $CONTAINER_DIR/rootfs directly
-        # All three use $LXC_ROOTFS_PATH when available, else $CONTAINER_DIR/rootfs
+        # All cases use $LXC_ROOTFS_PATH when available, else $CONTAINER_DIR/rootfs
         ROOTFS="${LXC_ROOTFS_PATH:-$CONTAINER_DIR/rootfs}"
 
         mkdir -p "$STATE_DIR/upper" "$STATE_DIR/work" "$ROOTFS"
@@ -251,37 +253,50 @@ case "$HOOK_TYPE" in
             # idmapped lowers with userxattr,index=off,metacopy=off so
             # container-root (host-<BASE>) can read/write the rootfs.
             #
-            # The idmap range is read from $LXC_CONFIG_FILE, which LXC has
-            # fully parsed and written before invoking any hook (race-free).
-            # Plain-lxc: kento emits `lxc.idmap = u 0 <BASE> <COUNT>` lines.
-            # pve-lxc: PVE generates them and writes them to the container config.
+            # Idmap range acquisition, in precedence order:
+            #   1. Parse `lxc.idmap = u 0 <BASE> <COUNT>` from $LXC_CONFIG_FILE.
+            #      This follows PVE's ACTUAL value (and plain-lxc, where kento
+            #      emits the line at create). It's authoritative WHEN present.
+            #   2. Fall back to the $CONTAINER_DIR/kento-idmap-range state file
+            #      ("<BASE> <COUNT>"), written at create following PVE's range.
+            #      For unprivileged pve-lxc the assembly runs in pre-start, where
+            #      PVE may not have populated lxc.idmap into the runtime config
+            #      yet — the state file makes us independent of that ordering.
+            # Fail closed only if NEITHER source yields a valid range.
             # ---------------------------------------------------------------------------
 
-            # Fail closed if LXC_CONFIG_FILE is not set or not readable.
-            if [ -z "${LXC_CONFIG_FILE:-}" ] || [ ! -r "$LXC_CONFIG_FILE" ]; then
-                echo "kento-hook: error: unprivileged mode requires LXC_CONFIG_FILE to be set and readable" >&2
-                echo "kento-hook: LXC_CONFIG_FILE='${LXC_CONFIG_FILE:-<unset>}'" >&2
-                exit 1
+            BASE=""
+            COUNT=""
+
+            # Source 1: parse the first `lxc.idmap = u 0 <BASE> <COUNT>` line
+            # from the runtime config (format: lxc.idmap = u 0 BASE COUNT).
+            if [ -n "${LXC_CONFIG_FILE:-}" ] && [ -r "$LXC_CONFIG_FILE" ]; then
+                _idmap_line=$(grep -m1 '^[[:space:]]*lxc\.idmap[[:space:]]*=[[:space:]]*u[[:space:]]' "$LXC_CONFIG_FILE" 2>/dev/null || true)
+                if [ -n "$_idmap_line" ]; then
+                    # Strip to "0 BASE COUNT" after the `u` prefix, skip the
+                    # container-side id (0), take BASE and COUNT.
+                    _idmap_rest=$(printf '%s' "$_idmap_line" | sed 's/^[[:space:]]*lxc\.idmap[[:space:]]*=[[:space:]]*u[[:space:]]*//')
+                    BASE=$(printf '%s' "$_idmap_rest" | awk '{print $2}')
+                    COUNT=$(printf '%s' "$_idmap_rest" | awk '{print $3}')
+                fi
             fi
 
-            # Parse the first `lxc.idmap = u 0 <BASE> <COUNT>` line.
-            # Format is exactly: lxc.idmap = u 0 BASE COUNT
-            _idmap_line=$(grep -m1 '^[[:space:]]*lxc\.idmap[[:space:]]*=[[:space:]]*u[[:space:]]' "$LXC_CONFIG_FILE" 2>/dev/null || true)
-            if [ -z "$_idmap_line" ]; then
-                echo "kento-hook: error: unprivileged mode requires lxc.idmap u ... lines in $LXC_CONFIG_FILE" >&2
-                echo "kento-hook: no 'lxc.idmap = u ...' line found in $LXC_CONFIG_FILE" >&2
-                exit 1
+            # Source 2 (fallback): the kento-idmap-range state file
+            # ("<BASE> <COUNT>"), used when LXC_CONFIG_FILE carries no idmap
+            # line yet (PVE pre-start ordering).
+            if [ -z "$BASE" ] || [ -z "$COUNT" ]; then
+                _idmap_range_file="$CONTAINER_DIR/kento-idmap-range"
+                if [ -r "$_idmap_range_file" ]; then
+                    _idmap_range=$(head -n1 "$_idmap_range_file" 2>/dev/null || true)
+                    BASE=$(printf '%s' "$_idmap_range" | awk '{print $1}')
+                    COUNT=$(printf '%s' "$_idmap_range" | awk '{print $2}')
+                fi
             fi
-
-            # Extract BASE and COUNT: strip to the last two whitespace-separated tokens
-            # after the `u 0` prefix. Line format: `lxc.idmap = u 0 BASE COUNT`
-            _idmap_rest=$(printf '%s' "$_idmap_line" | sed 's/^[[:space:]]*lxc\.idmap[[:space:]]*=[[:space:]]*u[[:space:]]*//')
-            # _idmap_rest is now: "0 BASE COUNT" — skip the container-side id (0)
-            BASE=$(printf '%s' "$_idmap_rest" | awk '{print $2}')
-            COUNT=$(printf '%s' "$_idmap_rest" | awk '{print $3}')
 
             if [ -z "$BASE" ] || [ -z "$COUNT" ]; then
-                echo "kento-hook: error: could not parse BASE and COUNT from lxc.idmap line: $_idmap_line" >&2
+                echo "kento-hook: error: unprivileged mode could not determine the idmap range" >&2
+                echo "kento-hook: no 'lxc.idmap = u 0 BASE COUNT' line in '${LXC_CONFIG_FILE:-<unset>}'" >&2
+                echo "kento-hook: and no usable $CONTAINER_DIR/kento-idmap-range state file" >&2
                 exit 1
             fi
 
@@ -324,10 +339,16 @@ case "$HOOK_TYPE" in
             # userxattr: required for overlay-on-idmapped-lowers (kernel 5.19+).
             # index=off,metacopy=off: avoid inode-index and metacopy features
             # that are incompatible with the per-layer idmap path.
-            # Idempotency guard: if rootfs is already a mountpoint (LXC retry
-            # or hook re-entry after a prior crash), skip the overlay mount to
-            # avoid EBUSY aborting the container start.
-            if ! mountpoint -q "$ROOTFS" 2>/dev/null; then
+            # Idempotency / PVE-coexistence guard. A plain `mountpoint -q` check
+            # is WRONG under PVE: lxc-pve-prestart-hook runs before this hook and
+            # bind-mounts the dir rootfs, so $ROOTFS is already a (non-overlay)
+            # mountpoint — a mountpoint guard would skip our overlay and leave the
+            # container with an empty rootfs. Skip ONLY when $ROOTFS is already
+            # OUR overlay (genuine LXC retry / hook re-entry); otherwise mount the
+            # overlay (on plain LXC: over nothing; on PVE: on top of PVE's bind,
+            # which PVE's later rootfs handling transparently picks up).
+            _rootfs_fstype=$(findmnt -fno FSTYPE "$ROOTFS" 2>/dev/null | head -1 || true)
+            if [ "$_rootfs_fstype" != "overlay" ]; then
                 mount -t overlay overlay \
                     -o "lowerdir=$IDLAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work,userxattr,index=off,metacopy=off" \
                     "$ROOTFS"

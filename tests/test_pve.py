@@ -345,7 +345,7 @@ class TestGeneratePveConfig:
         assert "lxc.rootfs.path" not in cfg
 
     def test_no_pre_start_hook(self):
-        """PVE mode uses pre-mount (privileged), not pre-start."""
+        """Privileged PVE mode uses pre-mount, not pre-start or mount."""
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "lxc.hook.pre-start" not in cfg
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
@@ -362,17 +362,18 @@ class TestGeneratePveConfig:
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "unprivileged:" not in cfg
 
-    def test_unprivileged_uses_hook_mount_not_pre_mount(self):
-        """Unprivileged pve-lxc must use lxc.hook.mount, not lxc.hook.pre-mount.
+    def test_unprivileged_uses_hook_pre_start_not_mount(self):
+        """Unprivileged pve-lxc must use lxc.hook.pre-start, not mount/pre-mount.
 
-        pre-mount runs in the mapped userns where the host-0 hook script is not
-        executable; mount runs as real root after rootfs setup (spike result,
-        Phase 0, run 19).
+        pre-start is the only hook that runs in the host INITIAL namespace as
+        real root; pre-mount/mount run in the child userns (mapped uid) where
+        idmapped bind mounts fail with EPERM (run 19 probe).
         """
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   unprivileged=True)
-        assert "lxc.hook.mount: /var/lib/lxc/100/kento-hook" in cfg
+        assert "lxc.hook.pre-start: /var/lib/lxc/100/kento-hook" in cfg
         assert "lxc.hook.pre-mount" not in cfg
+        assert "lxc.hook.mount:" not in cfg
 
     def test_privileged_uses_hook_pre_mount_not_mount(self):
         """Privileged pve-lxc keeps lxc.hook.pre-mount (unchanged from before)."""
@@ -380,6 +381,7 @@ class TestGeneratePveConfig:
                                   unprivileged=False)
         assert "lxc.hook.pre-mount: /var/lib/lxc/100/kento-hook" in cfg
         assert "lxc.hook.mount:" not in cfg
+        assert "lxc.hook.pre-start" not in cfg
 
     def test_arch_arm64(self):
         with patch("kento.pve.platform.machine", return_value="aarch64"):
@@ -626,20 +628,22 @@ class TestPveConfigPortForwarding:
 
     def test_unprivileged_no_port_emits_post_stop(self):
         """Unprivileged pve-lxc without port/memory/cores must emit exactly one
-        lxc.hook.post-stop line for idmap cleanup, plus the lxc.hook.mount line.
+        lxc.hook.post-stop line for idmap cleanup, plus the pre-start hook.
 
         Before this fix, unprivileged containers without port/memory/cores got
         no lxc.hook.post-stop and their $STATE_DIR/idmap dirs were never cleaned.
         """
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   unprivileged=True)
-        # Must have the mount hook for the per-layer idmap overlay
-        assert "lxc.hook.mount: /var/lib/lxc/100/kento-hook" in cfg
+        # Must have the pre-start hook for the per-layer idmap overlay (host
+        # initial ns; pre-mount/mount run in the child userns → EPERM).
+        assert "lxc.hook.pre-start: /var/lib/lxc/100/kento-hook" in cfg
         # Must have exactly one post-stop for idmap cleanup
         assert cfg.count("lxc.hook.post-stop:") == 1
         assert "lxc.hook.post-stop: /var/lib/lxc/100/kento-hook" in cfg
-        # pre-mount must NOT be present (unprivileged uses mount instead)
+        # pre-mount/mount must NOT be present (unprivileged uses pre-start)
         assert "lxc.hook.pre-mount" not in cfg
+        assert "lxc.hook.mount:" not in cfg
 
     def test_unprivileged_with_port_no_duplicate_post_stop(self):
         """Unprivileged pve-lxc with port must have exactly one post-stop.
