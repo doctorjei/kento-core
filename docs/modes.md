@@ -135,11 +135,25 @@ is exactly what the container's userns expects.
   overlay before `lxc-start` hands the rootfs to the container.
 - **pve-lxc:** kento sets `unprivileged: 1` in the PVE config so PVE owns the
   user namespace and provides honest accounting, the correct AppArmor profile,
-  and its own idmap lines in `/var/lib/lxc/<vmid>/config`. Kento's
-  `lxc.hook.mount` hook (which runs as real root) reads the idmap range from
-  `$LXC_CONFIG_FILE` at start time, idmaps each lower layer, and mounts the
-  overlay. Because the rootfs is kento's own overlay (not a PVE-managed storage
-  volume), PVE does not attempt to chown or double-idmap it.
+  and its own idmap lines in `/var/lib/lxc/<vmid>/config`. The overlay is built
+  from kento's `lxc.hook.pre-start` hook — for an *unprivileged* container this
+  is the only hook that runs in the host's **initial** namespace as real root.
+  `lxc.hook.pre-mount` and `lxc.hook.mount` both run inside the container's
+  **child** user namespace (where host root is mapped to UID 100000), so
+  creating a per-layer idmapped bind mount there fails with `EPERM`; pre-start
+  runs before the userns is entered and has the full host UID map and
+  capabilities. (This differs from the *privileged* pve-lxc path, which has no
+  userns and so mounts from `lxc.hook.pre-mount` — see "PVE startup sequence".)
+  The hook reads PVE's idmap range from the runtime config (`$LXC_CONFIG_FILE`),
+  falling back to a `kento-idmap-range` state file kento writes at create time,
+  because PVE may not have populated `lxc.idmap` into the runtime config by the
+  time pre-start fires. The overlay-mount idempotency guard checks the rootfs
+  *fstype* (it mounts only if `$ROOTFS` is not already an `overlay`) rather than
+  a bare `mountpoint` check, because PVE's own `lxc-pve-prestart-hook`
+  bind-mounts the dir rootfs before kento's hook runs — a mountpoint guard would
+  see that bind mount, wrongly skip kento's overlay, and leave an empty rootfs.
+  Because the rootfs is kento's own overlay (not a PVE-managed storage volume),
+  PVE does not attempt to chown or double-idmap it.
 
 **Requirements (fail-closed).** `--unprivileged` requires:
 - Linux kernel **5.19+** — idmapped overlay lower mounts (mainline since 5.19).
@@ -235,8 +249,9 @@ kento commands accept the instance name, not the VMID.
 
 1. PVE generates LXC config with hardcoded rootfs path
 2. `lxc-pve-prestart-hook` runs (harmless no-op for kento)
-3. Kento's hook fires (`pre-mount` for privileged; `lxc.hook.mount` for
-   `--unprivileged`) -- mounts overlayfs (with per-layer idmapped binds in
+3. Kento's hook fires (`pre-mount` for privileged; `pre-start` for
+   `--unprivileged`, the only hook running in the host's initial namespace as
+   real root) -- mounts overlayfs (with per-layer idmapped binds in
    unprivileged mode)
 4. LXC bind-mounts the populated rootfs
 5. Instance boots with systemd

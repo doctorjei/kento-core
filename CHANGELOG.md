@@ -5,10 +5,12 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - kento-core 1.6.0.dev1
+## [1.6.0.dev1] - 2026-06-14
 
 First release of `kento-core` as a standalone library (`import kento`), split out
-of the monolith. The public API is unstable until finalized (`.devN`).
+of the monolith. The public API is unstable until finalized (`.devN`). Gate:
+bifrost full E2E 256/256 — all four modes (lxc, pve-lxc, vm, pve-vm) plus nested
+Section D and the new `--unprivileged` Section E (31).
 
 ### Added
 
@@ -31,8 +33,15 @@ of the monolith. The public API is unstable until finalized (`.devN`).
   Plain-lxc: kento emits `lxc.idmap u/g 0 100000 65536` and its `pre-start` hook
   builds the per-layer overlay. Pve-lxc: kento sets `unprivileged: 1` (PVE
   manages the userns + honest accounting + AppArmor profile); kento's
-  `lxc.hook.mount` reads PVE's generated idmap range and builds the per-layer
-  overlay — PVE does not own the rootfs storage so there is no double-idmap.
+  `lxc.hook.pre-start` (the only hook that runs in the host's initial namespace
+  as real root — `pre-mount`/`mount` run inside the container's child userns and
+  hit EPERM building an idmapped bind) reads PVE's idmap range from the runtime
+  config (falling back to a `kento-idmap-range` state file kento writes at create,
+  since PVE may not have populated `lxc.idmap` by pre-start time) and builds the
+  per-layer overlay. The overlay guard is fstype-based (skip only if the rootfs is
+  already an `overlay`) so it coexists with PVE's own prestart bind-mount of the
+  dir rootfs. PVE does not own the rootfs storage so there is no double-idmap.
+  Privileged pve-lxc still mounts from `lxc.hook.pre-mount` (no userns there).
   **Requires kernel >= 5.19** (idmapped overlay lower mounts, mainline) **and
   util-linux >= 2.40** (`X-mount.idmap`); kento probes both at create time and
   **fails closed** with a clear error on incapable hosts — no silent fallback to
