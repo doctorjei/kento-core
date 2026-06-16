@@ -73,13 +73,26 @@ class TestGenerateConfig:
         assert "/dev/net/tun" not in cfg
         # apparmor block must stay even with nesting off (load-bearing for boot).
         assert "lxc.apparmor.profile = generated" in cfg
+        # With nesting off we emit the narrow systemd rule set instead of the
+        # old broad allow_nesting=1 (which we no longer write explicitly).
+        assert "lxc.apparmor.raw = userns," in cfg
+        assert "lxc.apparmor.raw = mount," in cfg
+        assert "lxc.apparmor.raw = umount," in cfg
+        assert "lxc.apparmor.raw = pivot_root," in cfg
+        assert "lxc.apparmor.raw = mqueue," in cfg
+        assert "lxc.apparmor.allow_nesting = 1" not in cfg
 
     def test_lxc_emits_generated_apparmor_lines(self, tmp_path):
         cfg = generate_config("test", tmp_path, mode="lxc", nesting=True)
         assert "lxc.include = /usr/share/lxc/config/common.conf" in cfg
+        assert "lxc.include = /usr/share/lxc/config/nesting.conf" in cfg
         assert "lxc.apparmor.profile = generated" in cfg
-        assert "lxc.apparmor.allow_nesting = 1" in cfg
         assert "lxc.apparmor.allow_incomplete = 1" in cfg
+        # With nesting on we no longer emit the explicit allow_nesting=1 line
+        # (nesting.conf provides it at runtime) and we do NOT emit the narrow
+        # raw rules (gated on `not nesting`).
+        assert "lxc.apparmor.allow_nesting = 1" not in cfg
+        assert "lxc.apparmor.raw" not in cfg
         # common.conf must appear before nesting.conf (order matters).
         common_idx = cfg.index("common.conf")
         nesting_idx = cfg.index("nesting.conf")
@@ -90,20 +103,25 @@ class TestGenerateConfig:
         assert apparmor_idx > nesting_idx, \
             "apparmor.profile = generated must come after nesting.conf include"
 
-    def test_pve_mode_omits_apparmor_lines(self, tmp_path):
-        # PVE-LXC handles AppArmor via pct's config, not the kento-generated
-        # lxc.conf. generate_config() emits apparmor lines only for mode="lxc".
+    def test_pve_generate_config_omits_apparmor_lines(self, tmp_path):
+        # generate_config() (plain-LXC's native config generator) emits apparmor
+        # lines only for mode="lxc". The pve-lxc apparmor lines live in the PVE
+        # .conf, built by pve.generate_pve_config (see TestGeneratePveConfig).
         cfg = generate_config("test", tmp_path, mode="pve")
         assert "common.conf" not in cfg
         assert "lxc.apparmor.profile" not in cfg
         assert "lxc.apparmor.allow_nesting" not in cfg
         assert "lxc.apparmor.allow_incomplete" not in cfg
+        assert "lxc.apparmor.raw" not in cfg
 
     def test_kento_apparmor_profile_env_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KENTO_APPARMOR_PROFILE", "unconfined")
         cfg = generate_config("test", tmp_path, mode="lxc")
         assert "lxc.apparmor.profile = unconfined" in cfg
         assert "lxc.apparmor.profile = generated" not in cfg
+        # The narrow systemd raw rules are gated on a generated profile; the
+        # unconfined escape hatch already permits everything, so emit none.
+        assert "lxc.apparmor.raw" not in cfg
 
     def test_kento_apparmor_profile_rejects_bogus_value(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KENTO_APPARMOR_PROFILE", "bogus")
@@ -184,6 +202,25 @@ class TestCreate:
         assert (lxc_dir / "kento-name").read_text().strip() == "test"
         # LXC mode does not get a kento-mac file — MAC only makes sense for VMs.
         assert not (lxc_dir / "kento-mac").exists()
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.require_root")
+    def test_rejects_image_over_layer_cap(self, mock_root, mock_run, tmp_path):
+        """An image with more than MAX_OVERLAY_LAYERS layers must fail closed
+        at create with zero filesystem side effects (before the container dir
+        is even made)."""
+        from kento.errors import StateError
+        from kento.defaults import MAX_OVERLAY_LAYERS
+        n = MAX_OVERLAY_LAYERS + 1
+        deep = ":".join(
+            f"/var/lib/containers/storage/overlay/id{i}/diff" for i in range(n))
+        with patch("kento.create.resolve_layers", return_value=deep), \
+             patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            with pytest.raises(StateError, match=str(n)):
+                create("deep:latest", name="test", mode="lxc")
+        # No container dir created.
+        assert not (tmp_path / "test").exists()
 
     @patch("kento.create.subprocess.run")
     @patch("kento.create.resolve_layers", return_value="/a:/b")

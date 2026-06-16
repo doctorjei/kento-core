@@ -319,6 +319,19 @@ On a kernel where AppArmor is *not* the active LSM, `generated` silently
 no-ops and no parser is needed. See [modes.md](modes.md) "AppArmor
 profile" for the full rationale.
 
+### LXC guest boots but has no IP (sshd up, network-dead) on Debian 13 / AppArmor 4.x
+
+Modern systemd (256+) sandboxes its own core units (systemd-networkd, resolved,
+logind, …) with `PrivateUsers=` / `PrivateMounts=`, creating a user namespace and
+doing bind/move/remount/pivot_root mounts. AppArmor 4.x mediates `userns_create`
+and these mounts; the LXC-generated profile denies them by default, so networkd
+can't start and the guest comes up with no IP. Kento grants the narrow set
+needed (`userns,`, `mount,`, `umount,`, `pivot_root,`, `mqueue,` via
+`lxc.apparmor.raw`) for both LXC modes when nesting is off — strictly tighter
+than `allow_nesting`. If you see this on an instance created before this fix,
+recreate it (the rules are written into the config at create time). See
+[modes.md](modes.md) "AppArmor profile".
+
 ### `kento list` shows an instance as `orphan` / `kento stop` fails with "unable to find configuration file for VM \<id\>"
 
 The instance's PVE config (`/etc/pve/nodes/<node>/qemu-server/<vmid>.conf` for
@@ -429,6 +442,40 @@ Check your version:
 ```
 mount --version
 ```
+
+### "failed to resolve '<path>': -2" / "workdir and upperdir must be separate subtrees" / pre-start exit 32
+
+A many-layered image whose overlay `lowerdir` overran the kernel's **4096-byte
+`mount(2)` options page limit** used to fail this way: the kernel silently
+truncates the options string mid-path, so overlayfs sees a non-existent
+(truncated) directory or a mangled `upperdir`/`workdir`. On PVE this surfaces as
+a pre-start hookscript **exit code 32**.
+
+Kento now builds the `lowerdir` from short `l/<short>` symlinks + a `chdir` into
+the podman overlay root (exactly how Docker/podman mount), keeping the options
+string small, and **caps images at 128 layers** (`MAX_OVERLAY_LAYERS`), failing
+closed *at create* rather than letting the kernel truncate. If you hit:
+
+```
+image has N overlay layers, exceeding kento's cap of 128 ...
+```
+
+the image is too deep — squash/flatten it to fewer layers (or rebuild it with a
+shallower layer stack). See `docs/modes.md` → "Limits". The cap can
+be lifted once the new mount API (`fsconfig`) is reliably available everywhere;
+the `LIBMOUNT_FORCE_MOUNT2=always` mitigation that targets it is a silent no-op
+on some util-linux / kernel combinations, so the cap stays for now.
+
+### "Error: instance name ... characters; the maximum is 64"
+
+Kento caps instance names at **64 characters** and refuses anything longer at
+create (this applies to both an explicit `--name` and an auto-generated name).
+The limit is `HOST_NAME_MAX`: kento writes the name as the guest **hostname**
+(`hostname: <name>`), and Linux caps a hostname at 64 characters. A longer name
+would be an invalid hostname — PVE rejects it, and on a plain guest
+`sethostname()` fails at the guest boot. Choose a name of 64 characters or
+fewer. See `docs/modes.md` → "Limits" for the full rationale (it also keeps the
+overlay mount-options string bounded).
 
 ### "Error: --unprivileged requires kernel >= 5.19 and util-linux >= 2.40"
 

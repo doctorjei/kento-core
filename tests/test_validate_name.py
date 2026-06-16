@@ -25,6 +25,13 @@ class TestValidateNameAccepts:
         name = "a" * 63
         validate_name(name)
 
+    def test_exactly_64_chars(self):
+        # 64 == MAX_INSTANCE_NAME (HOST_NAME_MAX); the boundary is accepted.
+        from kento.defaults import MAX_INSTANCE_NAME
+        assert MAX_INSTANCE_NAME == 64
+        name = "a" * MAX_INSTANCE_NAME
+        validate_name(name)
+
 
 class TestValidateNameRejects:
 
@@ -36,14 +43,15 @@ class TestValidateNameRejects:
         with pytest.raises(ValidationError, match="cannot be empty"):
             validate_name(None)  # type: ignore[arg-type]
 
-    def test_too_long_64_chars(self):
-        name = "a" * 64
-        with pytest.raises(ValidationError, match="too long"):
+    def test_too_long_65_chars(self):
+        # 65 == MAX_INSTANCE_NAME + 1; one past the boundary is rejected.
+        name = "a" * 65
+        with pytest.raises(ValidationError, match="the maximum is 64"):
             validate_name(name)
 
     def test_too_long_200_chars(self):
         name = "a" * 200
-        with pytest.raises(ValidationError, match="too long"):
+        with pytest.raises(ValidationError, match="the maximum is 64"):
             validate_name(name)
 
     def test_leading_dash(self):
@@ -127,7 +135,7 @@ class TestValidateNameWhatParameter:
             validate_name("a" * 100, what="auto-generated name")
         msg = str(exc_info.value)
         assert "auto-generated name" in msg
-        assert "too long" in msg
+        assert "the maximum is 64" in msg
 
     def test_custom_what_in_nul_error(self):
         with pytest.raises(ValidationError) as exc_info:

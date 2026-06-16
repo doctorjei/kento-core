@@ -8,7 +8,11 @@ import socket
 from pathlib import Path
 
 from kento import LXC_BASE, VM_BASE
-from kento.defaults import LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING
+from kento.defaults import (
+    APPARMOR_SYSTEMD_RULES,
+    LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING,
+    PVE_LXC_UNLIMITED_MEMORY_MB,
+)
 from kento.errors import ValidationError
 
 logger = logging.getLogger("kento")
@@ -275,6 +279,14 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         lines.append(f"lxc.hook.post-stop: {hook}")
     mount_auto = LXC_MOUNT_AUTO_NESTING if nesting else LXC_MOUNT_AUTO
     lines.append(f"lxc.mount.auto: {mount_auto}")
+    # Modern systemd (256+) needs userns_create + sandboxing mounts that the
+    # default non-nesting LXC apparmor profile denies under AppArmor 4.x; without
+    # this the guest boots network-dead. Parity with plain-lxc. When nesting is on,
+    # features: nesting=1 already provides a permissive profile, so skip.
+    if not nesting:
+        lines.append("lxc.apparmor.profile: generated")
+        for rule in APPARMOR_SYSTEMD_RULES:
+            lines.append(f"lxc.apparmor.raw: {rule}")
     lines.append(f"lxc.tty.max: {LXC_TTY}")
     if env:
         for e in env:
@@ -287,6 +299,18 @@ def generate_pve_config(name: str, vmid: int, container_dir: Path, *,
         # into the guest's cgroup root — so `cat /sys/fs/cgroup/memory.max`
         # inside the container still reads "max". Emitting both is safe.
         lines.append(f"lxc.cgroup2.memory.max: {memory * 1048576}")
+    else:
+        # No --memory => the user wants "unlimited". On pve-lxc, OMITTING the
+        # `memory:` field is NOT unlimited: PVE silently backfills its 512 MiB
+        # schema default at `pct start` and enforces it host-side on the
+        # container cgroup (surprise OOM-kills). Emit the schema-ceiling
+        # sentinel instead; its byte value exceeds the cgroup's representable
+        # max, so the kernel clamps memory.max to literal `max` (true
+        # unlimited). No lxc.cgroup2.memory.max line here: that raw line only
+        # exists to mirror a FINITE cap into the guest cgroup root, and an
+        # unlimited/`max` value has no finite limit to mirror. (plain-lxc is
+        # unaffected — liblxc treats an omitted limit as truly unlimited.)
+        lines.append(f"memory: {PVE_LXC_UNLIMITED_MEMORY_MB}")
     if cores is not None:
         # PVE's `cores` sets cpuset affinity only (restrict which CPUs).
         # `cpulimit` is the quota field that translates to cgroup cpu.max,

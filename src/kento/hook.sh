@@ -4,6 +4,7 @@ set -eu
 NAME="@@NAME@@"
 CONTAINER_DIR="@@CONTAINER_DIR@@"
 STATE_DIR="@@STATE_DIR@@"
+OVERLAY_BASE="@@OVERLAY_BASE@@"
 LAYERS="@@LAYERS@@"
 HOOK_TYPE="${LXC_HOOK_TYPE:-$3}"
 
@@ -221,17 +222,6 @@ WORKER_EOF
 
 case "$HOOK_TYPE" in
     pre-start|pre-mount|mount)
-        # Validate layer paths still exist (image may have changed)
-        IFS=:
-        for dir in $LAYERS; do
-            if [ ! -d "$dir" ]; then
-                echo "kento-hook: error: layer path missing: $dir" >&2
-                echo "kento-hook: image may have changed. Run: kento scrub $NAME" >&2
-                exit 1
-            fi
-        done
-        unset IFS
-
         # pre-mount (PVE privileged): mount at lxc.rootfs.path source so LXC picks it up
         # pre-start (PVE unprivileged): the only hook in the host INITIAL ns as
         #   real root — pre-mount/mount run in the child userns where idmapped
@@ -242,6 +232,28 @@ case "$HOOK_TYPE" in
 
         mkdir -p "$STATE_DIR/upper" "$STATE_DIR/work" "$ROOTFS"
         export LIBMOUNT_FORCE_MOUNT2=always
+
+        # Validate layers + mount inside a SUBSHELL that cd's into the podman
+        # overlay store root. LAYERS is in chdir-relative l/<short> form
+        # (Docker/podman parity) so the mount(2) options stay under the
+        # kernel's 4096-byte page limit. The subshell scopes the chdir so it
+        # never leaks to inject.sh / later hook phases (which use absolute
+        # paths). Both the privileged and unprivileged paths resolve the
+        # relative $LAYERS against this cwd; idmap targets / upper / work stay
+        # absolute and so are unaffected by the cwd.
+        (
+        cd "$OVERLAY_BASE" || { echo "kento-hook: error: overlay base missing: $OVERLAY_BASE" >&2; exit 1; }
+
+        # Validate layer paths still exist (image may have changed)
+        IFS=:
+        for dir in $LAYERS; do
+            if [ ! -d "$dir" ]; then
+                echo "kento-hook: error: layer path missing: $dir" >&2
+                echo "kento-hook: image may have changed. Run: kento scrub $NAME" >&2
+                exit 1
+            fi
+        done
+        unset IFS
 
         if [ -f "$CONTAINER_DIR/kento-unprivileged" ]; then
             # ---------------------------------------------------------------------------
@@ -354,13 +366,17 @@ case "$HOOK_TYPE" in
                     "$ROOTFS"
             fi
         else
-            # Privileged path — unchanged.
+            # Privileged path. lowerdir is the relative l/<short> form,
+            # resolved against the cwd ($OVERLAY_BASE) set above.
             mount -t overlay overlay \
                 -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \
                 "$ROOTFS"
         fi
+        ) || { echo "kento-hook: error: overlay mount failed" >&2; exit 1; }
 
-        # Guest config injection — shared with VM / PVE-VM modes.
+        # Guest config injection — shared with VM / PVE-VM modes. Runs with the
+        # ORIGINAL cwd (the mount subshell's chdir did not leak); $ROOTFS and
+        # $CONTAINER_DIR are absolute.
         sh "$CONTAINER_DIR/kento-inject.sh" "$ROOTFS" "$CONTAINER_DIR"
         ;;
     start-host)

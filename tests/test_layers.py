@@ -5,8 +5,9 @@ import subprocess
 
 import pytest
 
-from kento.errors import ImageNotFoundError
-from kento.layers import resolve_layers, ensure_image_hold, _podman_cmd
+from kento.errors import ImageNotFoundError, StateError
+from kento.layers import (resolve_layers, ensure_image_hold, _podman_cmd,
+                          to_overlay_lowerdir, preflight_overlay_layers)
 
 
 def _mock_run(args, **kwargs):
@@ -125,6 +126,149 @@ class TestEnsureImageHold:
     def test_tolerates_subprocess_failure(self, mock_run):
         # best-effort: never raises even if podman blows up
         ensure_image_hold("myimage:latest", "mybox")
+
+
+def _make_store(tmp_path, ids_and_shorts):
+    """Build a fake podman overlay store under tmp_path and return
+    (overlay_root, absolute_colon_joined_layers)."""
+    root = tmp_path / "var" / "lib" / "containers" / "storage" / "overlay"
+    paths = []
+    for lid, short in ids_and_shorts:
+        diff = root / lid / "diff"
+        diff.mkdir(parents=True)
+        if short is not None:
+            (root / lid / "link").write_text(short + "\n")
+        paths.append(str(diff))
+    return str(root), ":".join(paths)
+
+
+class TestToOverlayLowerdir:
+    """layer diff-paths -> chdir-relative l/<short> form (Docker/podman parity)."""
+
+    def test_converts_to_short_links(self, tmp_path):
+        root, layers = _make_store(tmp_path, [
+            ("aaaa", "SHORT1XXXXXXXXXXXXXXXXXXXXX"),
+            ("bbbb", "SHORT2YYYYYYYYYYYYYYYYYYYYY"),
+            ("cccc", "SHORT3ZZZZZZZZZZZZZZZZZZZZZ"),
+        ])
+        ov_root, rel = to_overlay_lowerdir(layers)
+        assert ov_root == root
+        assert rel == ("l/SHORT1XXXXXXXXXXXXXXXXXXXXX:"
+                       "l/SHORT2YYYYYYYYYYYYYYYYYYYYY:"
+                       "l/SHORT3ZZZZZZZZZZZZZZZZZZZZZ")
+
+    def test_preserves_order(self, tmp_path):
+        root, layers = _make_store(tmp_path, [
+            ("top", "TOPSHORTxxxxxxxxxxxxxxxxxxx"),
+            ("bot", "BOTSHORTyyyyyyyyyyyyyyyyyyy"),
+        ])
+        _, rel = to_overlay_lowerdir(layers)
+        assert rel.split(":") == ["l/TOPSHORTxxxxxxxxxxxxxxxxxxx",
+                                  "l/BOTSHORTyyyyyyyyyyyyyyyyyyy"]
+
+    def test_relative_links_resolve_under_root(self, tmp_path):
+        """The l/<short> relative entries must resolve to the diff dirs when
+        cd'd into the overlay root, exactly as podman lays out the store."""
+        root, layers = _make_store(tmp_path, [
+            ("aaaa", "SHORTAAAAAAAAAAAAAAAAAAAAAA"),
+            ("bbbb", "SHORTBBBBBBBBBBBBBBBBBBBBBB"),
+        ])
+        from pathlib import Path
+        ldir = Path(root) / "l"
+        ldir.mkdir()
+        (ldir / "SHORTAAAAAAAAAAAAAAAAAAAAAA").symlink_to(Path("..") / "aaaa" / "diff")
+        (ldir / "SHORTBBBBBBBBBBBBBBBBBBBBBB").symlink_to(Path("..") / "bbbb" / "diff")
+        ov_root, rel = to_overlay_lowerdir(layers)
+        import os
+        cwd = os.getcwd()
+        try:
+            os.chdir(ov_root)
+            for part in rel.split(":"):
+                assert Path(part).is_dir(), part
+        finally:
+            os.chdir(cwd)
+
+    def test_missing_link_file_falls_back_to_relative_diff(self, tmp_path):
+        """A layer without a link file falls back to <id>/diff (still relative
+        to the overlay root, so still short-ish)."""
+        root, layers = _make_store(tmp_path, [
+            ("aaaa", "SHORTAAAAAAAAAAAAAAAAAAAAAA"),
+            ("bbbb", None),  # no link file
+            ("cccc", "SHORTCCCCCCCCCCCCCCCCCCCCCC"),
+        ])
+        ov_root, rel = to_overlay_lowerdir(layers)
+        assert ov_root == root
+        assert rel.split(":") == [
+            "l/SHORTAAAAAAAAAAAAAAAAAAAAAA",
+            "bbbb/diff",
+            "l/SHORTCCCCCCCCCCCCCCCCCCCCCC",
+        ]
+
+    def test_empty_link_file_falls_back(self, tmp_path):
+        root, layers = _make_store(tmp_path, [("aaaa", "")])
+        ov_root, rel = to_overlay_lowerdir(layers)
+        assert ov_root == root
+        assert rel == "aaaa/diff"
+
+    def test_non_store_layout_falls_back_to_absolute(self):
+        """Layers not in <root>/<id>/diff shape return the original absolute
+        string + empty root (current behavior preserved)."""
+        root, rel = to_overlay_lowerdir("/weird/path:/another")
+        assert root == ""
+        assert rel == "/weird/path:/another"
+
+    def test_divergent_roots_fall_back_to_absolute(self, tmp_path):
+        """Layers sharing no common overlay root fall back to absolute."""
+        a = tmp_path / "storeA" / "aaaa" / "diff"
+        b = tmp_path / "storeB" / "bbbb" / "diff"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        layers = f"{a}:{b}"
+        root, rel = to_overlay_lowerdir(layers)
+        assert root == ""
+        assert rel == layers
+
+    def test_empty_layers(self):
+        root, rel = to_overlay_lowerdir("")
+        assert root == ""
+        assert rel == ""
+
+
+class TestPreflightOverlayLayers:
+    """Create-time fail-closed cap + byte backstop."""
+
+    def test_passes_at_cap(self):
+        from kento.defaults import MAX_OVERLAY_LAYERS
+        layers = ":".join(
+            f"/var/lib/containers/storage/overlay/id{i}/diff"
+            for i in range(MAX_OVERLAY_LAYERS))
+        preflight_overlay_layers(layers)  # should not raise
+
+    def test_raises_above_cap(self):
+        from kento.defaults import MAX_OVERLAY_LAYERS
+        n = MAX_OVERLAY_LAYERS + 1
+        layers = ":".join(
+            f"/var/lib/containers/storage/overlay/id{i}/diff"
+            for i in range(n))
+        with pytest.raises(StateError, match=str(n)):
+            preflight_overlay_layers(layers)
+        with pytest.raises(StateError, match=str(MAX_OVERLAY_LAYERS)):
+            preflight_overlay_layers(layers)
+
+    def test_byte_backstop_trips_when_forced(self, tmp_path):
+        """A pathologically long absolute-fallback layer string must trip the
+        byte backstop even under the cap."""
+        # Non-store layout so it falls back to absolute (long) paths.
+        layers = "/notastore/" + ("a" * 4050) + ":/notastore/b"
+        with pytest.raises(StateError, match="bytes"):
+            preflight_overlay_layers(layers, tmp_path)
+
+    def test_byte_backstop_ok_for_normal_short_form(self, tmp_path):
+        root, layers = _make_store(tmp_path, [
+            ("aaaa", "SHORTAAAAAAAAAAAAAAAAAAAAAA"),
+            ("bbbb", "SHORTBBBBBBBBBBBBBBBBBBBBBB"),
+        ])
+        preflight_overlay_layers(layers, tmp_path)  # should not raise
 
 
 class TestPodmanCmd:

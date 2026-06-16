@@ -9,9 +9,9 @@ from pathlib import Path
 from kento import (LXC_BASE, VM_BASE, _scan_namespace, next_instance_name,
                    require_root, sanitize_image_name, upper_base, validate_name)
 from kento.cloudinit import detect_cloudinit, write_seed
-from kento.defaults import (LXC_TTY, LXC_MOUNT_AUTO, LXC_MOUNT_AUTO_NESTING,
-                            LXC_ARG_DENYLIST, PVE_ARG_DENYLIST,
-                            QEMU_ARG_DENYLIST)
+from kento.defaults import (APPARMOR_SYSTEMD_RULES, LXC_TTY, LXC_MOUNT_AUTO,
+                            LXC_MOUNT_AUTO_NESTING, LXC_ARG_DENYLIST,
+                            PVE_ARG_DENYLIST, QEMU_ARG_DENYLIST)
 from kento.errors import (InstanceExistsError, ModeError, StateError,
                           SubprocessError, ValidationError)
 from kento.hook import write_hook
@@ -384,8 +384,14 @@ def generate_config(name: str, lxc_dir: Path, *, bridge: str | None = None,
                 "    enforce the host/container boundary; in-kernel MAC confinement off)."
             )
         lines.append(f"lxc.apparmor.profile = {profile}")
-        lines.append("lxc.apparmor.allow_nesting = 1")
         lines.append("lxc.apparmor.allow_incomplete = 1")
+        # Narrow AppArmor grant for modern systemd (replaces the old broad
+        # allow_nesting=1). Only valid with a generated profile, and only needed
+        # when nesting is off -- with --allow-nesting, nesting.conf already sets
+        # allow_nesting=1. The unconfined escape hatch needs nothing (permits all).
+        if profile == "generated" and not nesting:
+            for rule in APPARMOR_SYSTEMD_RULES:
+                lines.append(f"lxc.apparmor.raw = {rule}")
         # Unprivileged plain-LXC: map container UID/GID 0 onto an unprivileged
         # host range (100000:65536). The actual rootfs idmap is done per-layer
         # by kento's hook (kento-hook): for each lowerdir, the hook creates an
@@ -706,6 +712,15 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # is needed here.
     layers = resolve_layers(image)
 
+    # Fail closed on an over-deep overlay BEFORE any filesystem side effect.
+    # The kernel caps classic mount(2) options at one 4096-byte page; an image
+    # with more than MAX_OVERLAY_LAYERS layers would overrun it and be silently
+    # truncated, failing the overlay mount with cryptic errors. The layer-count
+    # cap is checked here (zero side effects); the exact-byte backstop runs once
+    # state_dir is known (below). See layers.preflight_overlay_layers.
+    from kento.layers import preflight_overlay_layers
+    preflight_overlay_layers(layers)
+
     # detect_cloudinit() does filesystem I/O over every layer. ``layers`` is
     # resolved once and never reassigned, so probe once and reuse the boolean
     # at all three decision sites below (cloudinit-mode precondition, the
@@ -836,6 +851,12 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                           lambda: shutil.rmtree(state_dir, ignore_errors=True)))
         (state_dir / "upper").mkdir(exist_ok=True)
         (state_dir / "work").mkdir(exist_ok=True)
+
+        # Byte backstop: now that state_dir (hence upper/work paths) is known,
+        # assert the exact overlay options string can't truncate. Runs before
+        # any hook/config/PVE state is generated; a violation rolls back via
+        # the undos registered above. See preflight_overlay_layers.
+        preflight_overlay_layers(layers, state_dir)
 
         # Write image reference, layer paths, state dir, mode, and name
         (container_dir / "kento-image").write_text(image + "\n")

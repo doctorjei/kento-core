@@ -73,6 +73,20 @@ break plain-LXC on recent OCI images:
 `generated` fixes both without dropping host-boundary confinement.
 No flag is required.
 
+**Modern-systemd userns mounts.** systemd 256+ also sandboxes its own core
+units (systemd-networkd, resolved, logind, journald, …) with `PrivateUsers=` /
+`PrivateMounts=`, which create a user namespace and do bind/move/remount/
+pivot_root mounts. Under AppArmor 4.x (Debian 13 / trixie) the generated
+profile mediates `userns_create` and these mounts and denies them by default —
+the guest then boots with sshd up but **no IP**. Kento grants exactly that
+bounded vocabulary via `lxc.apparmor.raw` — `userns,`, `mount,`, `umount,`,
+`pivot_root,`, `mqueue,` — which is strictly tighter than `allow_nesting` (no
+nested-container peer rules, no raw proc/sys). This applies to **both** LXC
+modes (plain-lxc and pve-lxc) when nesting is off; with `--allow-nesting` the
+runtime nesting profile already grants it, so the narrow set is skipped. (pve-lxc
+gets a `lxc.apparmor.profile: generated` line of its own — kento creates
+`ostype: unmanaged` containers, which carry no PVE-managed profile.)
+
 **Host requirement.** `generated` is compiled by `apparmor_parser`, so on a
 host whose kernel has AppArmor as an active LSM the `apparmor` package must be
 installed. LXC only *recommends* `apparmor`, so an image built with recommends
@@ -115,6 +129,62 @@ profile (above) still enforces the host/container boundary, and namespaces and
 cgroups apply in both modes. The trade-off is that container root is uid 0 on
 the host, so a kernel-level container escape lands as host root. Run untrusted
 or multi-tenant workloads in `vm`/`pve-vm` mode instead.
+
+#### Limits
+
+Kento enforces two hard create-time limits. Both **fail closed at create** with
+a clear error rather than letting a bad value reach the kernel and surface as a
+cryptic later failure. The numbers are not arbitrary — each is pinned to a real
+kernel ceiling, explained below.
+
+##### Max overlay layers per image: 128
+
+Kento builds the overlayfs `lowerdir` from the podman store's layer
+directories. The kernel caps the options string of a classic `mount(2)` call at
+a single **4096-byte page**; a deeply layered image whose absolute
+`<store>/<id>/diff` paths (~104 bytes each) exceed that page would be **silently
+truncated** by the kernel mid-path, and the overlay mount then fails with
+cryptic errors like `overlayfs: failed to resolve '<truncated path>': -2` or
+`workdir and upperdir must be separate subtrees` (surfacing as a PVE pre-start
+hookscript exit code 32).
+
+To avoid this, kento mounts exactly the way Docker (`overlay2`) and podman
+themselves do: each layer has a short `l/<SHORTID>` symlink in the store, and
+the mount `chdir`s into the overlay root and uses **relative** `l/<short>`
+entries (~28 bytes each) instead of full absolute paths. The `chdir` is scoped
+to a subshell (LXC/VM hooks) or the mount subprocess (`vm.py`) so it never leaks
+to later steps.
+
+On top of that, kento **caps images at 128 overlay layers** (`MAX_OVERLAY_LAYERS`,
+matching Docker overlay2's `maxDepth`) and **fails closed at create** if an
+image is deeper, with an actionable message — rather than letting the kernel
+truncate. A defensive byte assert additionally refuses any options string that
+would come within 16 bytes of the 4096-byte limit (a backstop for pathological
+state-dir / instance-name lengths; it should never fire given the 128 cap).
+Squash or flatten an over-deep image to fewer layers.
+
+> **TODO:** the 128-layer cap can be lifted once the new mount API (`fsconfig`,
+> what `LIBMOUNT_FORCE_MOUNT2=always` is meant to trigger) is reliably
+> available — it has no single-page options limit. That env var is currently a
+> silent no-op on some util-linux / kernel combinations (it falls back to
+> classic `mount(2)` and truncates anyway), so the cap stays for now.
+
+##### Max instance name: 64 characters
+
+Kento writes the instance name as the guest **hostname** (`hostname: <name>`),
+and Linux caps a hostname at `HOST_NAME_MAX` = **64** (the kernel
+`utsname.nodename` field). A longer name is simply an invalid hostname — PVE
+rejects it, and on a plain guest `sethostname()` fails at boot. So 64 is the
+binding ceiling, and kento **fails closed at create** with a clear `name too
+long, max 64`-style error. This applies to both an explicit `--name` and an
+auto-generated name.
+
+The 64-char limit also keeps the overlay mount-options string (above) bounded:
+the name appears **twice** in that string — once in the `upperdir` path and once
+in the `workdir` path — so it counts double toward the 4096-byte budget. It is
+the last otherwise-uncapped contributor to that budget, but the hostname limit
+is by far the tighter constraint, so that is the one kento documents and
+enforces.
 
 #### `--unprivileged` (lxc and pve-lxc)
 
@@ -227,7 +297,10 @@ be managed with `pct`. Created with `kento lxc create` on a PVE host
 - **Access:** `pct exec <VMID> -- bash` or the Proxmox web console
 - **Network bridge:** `vmbr0` (override with `--network bridge=<name>`)
 - **Config location:** `/etc/pve/nodes/<hostname>/lxc/<VMID>.conf`
-- **Memory:** 512 MB default (override with `--memory`, configurable via `/etc/kento/lxc.conf`)
+- **Memory:** no limit by default (override with `--memory`). Note: PVE has no
+  "unlimited" sentinel and silently backfills its 512 MiB schema default on an
+  omitted `memory:` field, so kento instead emits PVE's schema-ceiling value,
+  which the kernel clamps to cgroup `memory.max = max` (truly unlimited).
 - **CPU:** 1 core default (override with `--cores`, configurable via `/etc/kento/lxc.conf`)
 - **Nesting:** enabled by default
 - **Privilege:** privileged by default -- kento writes no `unprivileged: 1`
@@ -362,5 +435,9 @@ an empty value (`--qemu-arg ''`), and leave it untouched when omitted.
 | Access | lxc-attach | pct exec / web UI | SSH | qm terminal / SSH |
 | Network | Bridge | Bridge | User-mode (NAT) | Bridge |
 | Management UI | None | Proxmox web UI | None | Proxmox web UI |
-| Memory default | No limit | 512 MB | 512 MB | 512 MB |
+| Memory default | No limit | No limit¹ | 512 MB | 512 MB |
 | CPU default | No limit | 1 core | Host CPU | Host CPU |
+
+¹ plain-lxc is truly unlimited (an omitted limit → liblxc default). pve-lxc
+cannot rely on omission — PVE backfills its 512 MiB schema default — so kento
+emits PVE's schema-ceiling value, which clamps the cgroup `memory.max` to `max`.

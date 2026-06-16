@@ -14,7 +14,21 @@ def generate_vm_hook(container_dir: Path, layers: str, name: str,
     """Return a hookscript with baked-in paths for a PVE VM.
 
     The script receives VMID as $1 and phase as $2 from qm.
+
+    The overlay lowerdir is emitted in chdir-relative ``l/<short>`` form
+    (matching Docker/podman) so a deeply layered image's mount options stay
+    under the kernel's 4096-byte mount(2) page limit. ``OVERLAY_BASE`` is the
+    podman overlay store root; the pre-start mount cd's into it inside a
+    subshell so the chdir never leaks to virtiofsd / later steps. If the short
+    form can't be derived, to_overlay_lowerdir falls back to absolute layers
+    and OVERLAY_BASE is "/" (a harmless no-op cd).
     """
+    from kento.layers import to_overlay_lowerdir
+    overlay_base, rel_layers = to_overlay_lowerdir(layers)
+    if not overlay_base:
+        # Fallback: absolute lowerdir; cd to / is a no-op that keeps the
+        # absolute paths valid.
+        overlay_base = "/"
     return f"""#!/bin/sh
 set -eu
 
@@ -24,7 +38,8 @@ PHASE="$2"
 NAME="{name}"
 CONTAINER_DIR="{container_dir}"
 STATE_DIR="{state_dir}"
-LAYERS="{layers}"
+OVERLAY_BASE="{overlay_base}"
+LAYERS="{rel_layers}"
 
 case "$PHASE" in
     pre-start)
@@ -42,24 +57,30 @@ case "$PHASE" in
             fi
         fi
 
-        # 2. Validate layer paths
-        IFS=:
-        for dir in $LAYERS; do
-            if [ ! -d "$dir" ]; then
-                echo "kento-hook: error: layer path missing: $dir" >&2
-                echo "kento-hook: image may have changed. Run: kento vm scrub $NAME" >&2
-                exit 1
-            fi
-        done
-        unset IFS
-
-        # 3. Mount overlayfs
+        # 2+3. Validate layer paths and mount overlayfs.
+        # LAYERS is in chdir-relative l/<short> form (Docker/podman parity) so
+        # the mount(2) options stay under the kernel's 4096-byte page limit.
+        # The cd into $OVERLAY_BASE + the relative lowerdir + the validation
+        # loop run inside a SUBSHELL so the chdir never leaks to virtiofsd or
+        # any later step (they keep the original CWD and use absolute paths).
         ROOTFS="$CONTAINER_DIR/rootfs"
         mkdir -p "$STATE_DIR/upper" "$STATE_DIR/work" "$ROOTFS"
         export LIBMOUNT_FORCE_MOUNT2=always
-        mount -t overlay overlay \\
-            -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \\
-            "$ROOTFS"
+        (
+            cd "$OVERLAY_BASE" || {{ echo "kento-hook: error: overlay base missing: $OVERLAY_BASE" >&2; exit 1; }}
+            IFS=:
+            for dir in $LAYERS; do
+                if [ ! -d "$dir" ]; then
+                    echo "kento-hook: error: layer path missing: $dir" >&2
+                    echo "kento-hook: image may have changed. Run: kento vm scrub $NAME" >&2
+                    exit 1
+                fi
+            done
+            unset IFS
+            mount -t overlay overlay \\
+                -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \\
+                "$ROOTFS"
+        ) || {{ echo "kento-hook: error: overlay mount failed" >&2; exit 1; }}
 
         # 4. Validate kernel and initramfs
         if [ ! -f "$ROOTFS/boot/vmlinuz" ]; then

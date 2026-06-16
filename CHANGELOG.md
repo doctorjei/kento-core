@@ -5,6 +5,29 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **AppArmor: pve-lxc guests running modern systemd booted network-dead; plain-lxc
+  used an over-broad `allow_nesting=1`.** Modern systemd (256+, Debian 13 / trixie,
+  AppArmor 4.x) sandboxes its own core units (systemd-networkd, resolved, logind,
+  journald, …) with `PrivateUsers=`/`PrivateMounts=`, which create a user namespace
+  and perform bind/move/remount/pivot_root mounts. AppArmor 4.x mediates
+  `userns_create` and these mounts, and the LXC-generated container profile denies
+  them by default — so the guest comes up with sshd running but no IP. pve-lxc
+  emitted **no** AppArmor lines at all (on the false premise that PVE manages
+  AppArmor via `pct` — it does not for `ostype: unmanaged`, which is what kento
+  creates), so pve-lxc guests with modern systemd were network-dead. Plain-lxc
+  worked around it with a broad `lxc.apparmor.allow_nesting = 1`. Both LXC modes
+  now emit a **narrow** `lxc.apparmor.raw` set (`userns,`, `mount,`, `umount,`,
+  `pivot_root,`, `mqueue,`) on a generated profile when nesting is off — strictly
+  tighter than `allow_nesting` (no nested-container peer rules, no raw proc/sys),
+  validated clean (zero denials) on two Debian 13 images on a real PVE host. When
+  `--allow-nesting` is set, the runtime nesting profile (plain-lxc `nesting.conf`,
+  pve-lxc `features: nesting=1`) already grants the needed permissions, so the
+  narrow set is skipped. Upstream context: lxc#4529 / Debian #1098521.
+
 ## [1.6.0.dev2] - 2026-06-14
 
 Bug fix: the durable orphan-vmid reconcile. An **orphan** is a kento-managed

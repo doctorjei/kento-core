@@ -24,31 +24,37 @@ LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_NAME_MAX_LEN = 63
 
 
 def validate_name(name: str, *, what: str = "instance name") -> None:
     """Reject names that would enable injection or path traversal.
 
     Accepts: ASCII alphanumerics plus `_`, `.`, `-`. Must start with
-    alphanumeric. Max 63 chars (matches Linux HOST_NAME_MAX constraint).
+    alphanumeric. Max MAX_INSTANCE_NAME (64) chars -- the name becomes the
+    guest hostname (HOST_NAME_MAX) and is the last otherwise-uncapped
+    contributor to the overlay mount-options budget (see layers.py).
     Rejects: empty, whitespace, shell metacharacters, `/`, `..`, NUL.
 
     Raises ValidationError on rejection. what is used in the message for
     context (e.g. "instance name", "auto-generated name").
     """
+    from kento.defaults import MAX_INSTANCE_NAME
+
     if not isinstance(name, str) or not name:
         raise ValidationError(f"{what} cannot be empty")
-    if len(name) > _NAME_MAX_LEN:
+    if len(name) > MAX_INSTANCE_NAME:
         raise ValidationError(
-            f"{what} too long ({len(name)} chars, max {_NAME_MAX_LEN}): {name!r}"
+            f"{what} {name!r} is {len(name)} characters; the maximum is "
+            f"{MAX_INSTANCE_NAME} (it becomes the guest hostname and bounds "
+            f"the overlay mount options)."
         )
     if "\x00" in name:
         raise ValidationError(f"{what} contains NUL byte: {name!r}")
     if not _NAME_RE.match(name):
         raise ValidationError(
             f"invalid {what}: {name!r}. Names must start with a letter "
-            f"or digit and contain only [A-Za-z0-9_.-] (max {_NAME_MAX_LEN} chars)."
+            f"or digit and contain only [A-Za-z0-9_.-] "
+            f"(max {MAX_INSTANCE_NAME} chars)."
         )
 
 

@@ -36,6 +36,52 @@ def test_generate_hook_has_mount_workaround():
     assert "mount -t overlay" in script
 
 
+def _store_layers(tmp_path, ids_and_shorts):
+    root = tmp_path / "var/lib/containers/storage/overlay"
+    paths = []
+    for lid, short in ids_and_shorts:
+        diff = root / lid / "diff"
+        diff.mkdir(parents=True)
+        (root / lid / "link").write_text(short + "\n")
+        paths.append(str(diff))
+    return str(root), ":".join(paths)
+
+
+def test_generate_hook_uses_chdir_relative_short_links(tmp_path):
+    """For a podman-store image the hook must bake OVERLAY_BASE + relative
+    l/<short> lowerdir, cd into the base in a subshell, and NOT embed the
+    absolute /<id>/diff paths (which would overrun the 4096-byte mount limit)."""
+    root, layers = _store_layers(tmp_path, [
+        ("aaaa", "SHORTAAAAAAAAAAAAAAAAAAAAAA"),
+        ("bbbb", "SHORTBBBBBBBBBBBBBBBBBBBBBB"),
+    ])
+    script = generate_hook(Path("/var/lib/lxc/test"), layers, "test")
+    assert f'OVERLAY_BASE="{root}"' in script
+    assert 'LAYERS="l/SHORTAAAAAAAAAAAAAAAAAAAAAA:l/SHORTBBBBBBBBBBBBBBBBBBBBBB"' in script
+    assert 'cd "$OVERLAY_BASE"' in script
+    # The absolute diff paths must NOT appear in the lowerdir.
+    assert f"{root}/aaaa/diff" not in script
+
+
+def test_generate_hook_mount_in_subshell(tmp_path):
+    """The validation loop + overlay mount run inside a subshell so the
+    chdir into OVERLAY_BASE never leaks to inject.sh / later phases."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    # Subshell opens, cd's, and closes with an || error guard before inject.
+    cd_idx = script.index('cd "$OVERLAY_BASE"')
+    mount_idx = script.index("mount -t overlay")
+    inject_idx = script.index("kento-inject.sh")
+    close_idx = script.index('overlay mount failed')
+    assert cd_idx < mount_idx < close_idx < inject_idx
+
+
+def test_generate_hook_non_store_layers_fall_back_to_absolute():
+    """Non-store layers keep the absolute lowerdir and a no-op cd to /."""
+    script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
+    assert 'OVERLAY_BASE="/"' in script
+    assert 'LAYERS="/a:/b"' in script
+
+
 def test_generate_hook_validates_layers():
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
     assert "layer path missing" in script

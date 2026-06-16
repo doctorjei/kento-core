@@ -263,11 +263,15 @@ class TestGeneratePveConfig:
         assert "lxc.mount.auto: proc:mixed sys:mixed cgroup:mixed" in cfg
         assert "lxc.tty.max: 2" in cfg
         assert "arch: amd64" in cfg
-        assert "memory:" not in cfg
+        # pve-lxc with no --memory emits the unlimited sentinel (PVE backfills
+        # 512 MiB on an omitted field; see test_memory_none_emits_sentinel).
+        assert "memory: 17592186044415" in cfg
+        assert "lxc.cgroup2.memory.max:" not in cfg
         assert "swap:" not in cfg
         assert "cores:" not in cfg
         assert "onboot:" not in cfg
-        assert "lxc.apparmor.profile:" not in cfg
+        # nesting off (the default): narrow systemd apparmor grant is emitted.
+        assert "lxc.apparmor.profile: generated" in cfg
         assert "lxc.init.cmd:" not in cfg
         assert "lxc.pty.max:" not in cfg
 
@@ -293,6 +297,28 @@ class TestGeneratePveConfig:
         assert "/dev/fuse dev/fuse none bind,create=file,optional" in cfg
         assert "/dev/net/tun dev/net/tun none bind,create=file,optional" in cfg
         assert "lxc.mount.auto: proc:rw sys:rw cgroup:rw" in cfg
+
+    def test_emits_systemd_apparmor(self):
+        # pve-lxc with nesting off (the default) emits the narrow AppArmor grant
+        # modern systemd (256+) needs to boot under AppArmor 4.x. Without it the
+        # guest comes up network-dead (sshd up but no IP). PVE's `ostype: unmanaged`
+        # gives no apparmor profile of its own, so kento must set one.
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  nesting=False)
+        assert "lxc.apparmor.profile: generated" in cfg
+        assert "lxc.apparmor.raw: userns," in cfg
+        assert "lxc.apparmor.raw: mount," in cfg
+        assert "lxc.apparmor.raw: umount," in cfg
+        assert "lxc.apparmor.raw: pivot_root," in cfg
+        assert "lxc.apparmor.raw: mqueue," in cfg
+
+    def test_nesting_omits_systemd_apparmor(self):
+        # With nesting on, `features: nesting=1` already provides a permissive
+        # profile, so the narrow grant is skipped (no duplicate / no apparmor lines).
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  nesting=True)
+        assert "lxc.apparmor.profile" not in cfg
+        assert "lxc.apparmor.raw" not in cfg
 
     def test_no_bridge(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
@@ -392,6 +418,29 @@ class TestGeneratePveConfig:
         with patch("kento.pve.platform.machine", return_value="riscv64"):
             cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
         assert "arch: riscv64" in cfg
+
+    def test_memory_none_emits_sentinel(self):
+        """pve-lxc with no --memory emits the unlimited sentinel, NOT an
+        omitted field. PVE silently backfills its 512 MiB schema default on an
+        omitted `memory:` and enforces it host-side; the sentinel
+        (PVE's 2^44-1 MiB schema ceiling) clamps the cgroup memory.max to
+        literal `max` (true unlimited). No raw lxc.cgroup2.memory.max line is
+        emitted — there is no finite cap to mirror into the guest cgroup root.
+        """
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
+        assert "memory: 17592186044415" in cfg
+        assert "lxc.cgroup2.memory.max:" not in cfg
+
+    def test_memory_explicit_dual_emit(self):
+        """Explicit --memory keeps the unchanged dual-emit: the PVE `memory:`
+        shorthand plus the raw lxc.cgroup2.memory.max in bytes.
+        """
+        cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
+                                  memory=2048)
+        assert "memory: 2048" in cfg
+        assert "lxc.cgroup2.memory.max: 2147483648" in cfg
+        # The unlimited sentinel must NOT appear when a finite cap is set.
+        assert "memory: 17592186044415" not in cfg
 
 
 class TestWritePveConfig:
@@ -760,13 +809,21 @@ class TestPveConfigMemoryCores:
 
     def test_no_memory_no_cores_by_default(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"))
-        assert "memory:" not in cfg
+        # No --memory => the unlimited sentinel (PVE backfills 512 MiB on an
+        # omitted field; the sentinel clamps the cgroup to `max`). cores stays
+        # omitted (PVE does not backfill a cpu cap).
+        assert "memory: 17592186044415" in cfg
+        assert "lxc.cgroup2.memory.max:" not in cfg
         assert "cores:" not in cfg
 
-    def test_memory_none_omitted(self):
+    def test_memory_none_emits_unlimited_sentinel(self):
         cfg = generate_pve_config("test", 100, Path("/var/lib/lxc/100"),
                                   memory=None)
-        assert "memory:" not in cfg
+        # PVE has no unlimited sentinel and silently caps an omitted memory:
+        # field at 512 MiB; emit the schema-ceiling value, which clamps the
+        # cgroup memory.max to literal `max`. No raw cgroup line (nothing
+        # finite to mirror).
+        assert "memory: 17592186044415" in cfg
         assert "lxc.cgroup2.memory.max" not in cfg
 
     def test_cores_none_omitted(self):
@@ -936,7 +993,8 @@ class TestGeneratePveConfigPassthrough:
         after = generate_pve_config("test", 100, tmp_path)
         assert before == after
         # And the last non-empty line is kento-controlled (no stray appends).
-        assert before.rstrip().splitlines()[-1].startswith("lxc.tty.max:")
+        # With no --memory, the unlimited sentinel is the final kento line.
+        assert before.rstrip().splitlines()[-1].startswith("memory: 17592186044415")
 
     def test_single_line_appended_at_end(self, tmp_path):
         (tmp_path / "kento-pve-args").write_text("tags: kento-test\n")

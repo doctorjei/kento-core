@@ -2,11 +2,65 @@
 
 from pathlib import Path
 
+# --- Overlay layer cap ---
+# Docker overlay2 parity. The kernel caps classic mount(2) options at one
+# 4096-byte page; an over-deep lowerdir overruns it and the kernel SILENTLY
+# TRUNCATES, corrupting upperdir/workdir and failing the overlay mount. kento
+# mounts from short l/<short> symlinks + chdir (like Docker/podman) to stay
+# small, and fails closed at create above this many layers rather than letting
+# the kernel truncate. Lift once the new mount API (fsconfig, what
+# LIBMOUNT_FORCE_MOUNT2 targets) is reliably available — it has no single-page
+# limit (currently a silent no-op on some util-linux/kernel combos).
+MAX_OVERLAY_LAYERS = 128
+
+# The single-page mount(2) options limit. We compute the exact options string
+# kento will emit and refuse to hand the kernel anything that could truncate,
+# leaving a 16-byte safety margin. With the l/<short> short-link form the 128
+# cap keeps us far under this; the byte check is a backstop for pathological
+# state-dir / name lengths.
+OVERLAY_OPTS_PAGE_LIMIT = 4096
+
+# Maximum instance-name length. The name flows into STATE_DIR (e.g.
+# /var/lib/kento/vm/<name>), which is the upperdir/workdir of the overlay
+# mount-options string -- the last otherwise-uncapped contributor to that
+# budget (the layer count + byte backstop above cap the rest). It also becomes
+# the guest hostname, so HOST_NAME_MAX (64) is the natural ceiling.
+MAX_INSTANCE_NAME = 64  # HOST_NAME_MAX; the name becomes the guest hostname, and
+                        # bounds the overlay mount-options budget (see layers.py)
+
 # --- LXC defaults ---
 LXC_TTY = 2
 LXC_MOUNT_AUTO = "proc:mixed sys:mixed cgroup:mixed"
 LXC_MOUNT_AUTO_NESTING = "proc:rw sys:rw cgroup:rw"
 LXC_NESTING = False
+
+# AppArmor rules that let modern systemd (256+) boot inside an LXC guest. systemd
+# sandboxes its own core units (networkd, resolved, logind, journald, ...) with
+# PrivateUsers=/PrivateMounts=, which create a user namespace and do bind/move/
+# remount/pivot_root mounts. AppArmor 4.x (Debian 13 / kernel 6.x) mediates
+# userns_create and these mounts; the LXC-generated profile denies them by default,
+# so the guest comes up network-dead. These rules grant exactly that bounded
+# sandboxing vocabulary -- narrower than allow_nesting (no nested-container peer
+# rules, no raw proc/sys). Injected via lxc.apparmor.raw, which is only honored with
+# a generated profile. Validated clean on droste-loom + kanibako-lxc (Debian 13,
+# systemd 257) on a real PVE host.
+APPARMOR_SYSTEMD_RULES = ("userns,", "mount,", "umount,", "pivot_root,", "mqueue,")
+
+# --- PVE-LXC defaults ---
+# PVE has no "unlimited" memory sentinel: it rejects `memory: 0` and
+# `memory: max` at schema validation, and it silently backfills its 512 MiB
+# schema default whenever the `memory:` field is omitted -- then enforces that
+# 512 MiB host-side on the container cgroup (confirmed live on PVE 9.1.6: an
+# empty conf yields memory.max = 536870912). So an omitted field is NOT
+# unlimited on pve-lxc; it is a surprise 512 MiB cap (real-world OOM-kills).
+# This value is PVE's schema ceiling (2^44 - 1 MiB, "signed int max"); it is
+# accepted by pct, and the resulting byte value exceeds the cgroup's
+# representable maximum so the kernel clamps memory.max to the literal string
+# `max` -- i.e. truly unlimited. Chosen over detecting host RAM deliberately,
+# so the value survives PVE cluster live-migration / extreme hosts (a host-RAM
+# value baked in at create time could under-cap after the container migrates
+# to a smaller node).
+PVE_LXC_UNLIMITED_MEMORY_MB = 17592186044415
 
 # --- VM defaults ---
 VM_MEMORY = 512          # MB

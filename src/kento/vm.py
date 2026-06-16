@@ -182,19 +182,31 @@ def _umount_with_retry(path: Path, force: bool) -> bool:
 
 
 def mount_rootfs(container_dir: Path, layers: str, state_dir: Path) -> None:
-    """Mount overlayfs at container_dir/rootfs on the host."""
+    """Mount overlayfs at container_dir/rootfs on the host.
+
+    Builds the lowerdir from short chdir-relative ``l/<short>`` symlinks
+    (Docker/podman parity) so a deeply layered image's mount(2) options stay
+    under the kernel's 4096-byte page limit. The mount subprocess is given
+    ``cwd=<overlay_root>`` so the relative lowerdir resolves; the subprocess
+    cwd is scoped (no chdir leaks into this process). upper/work/rootfs stay
+    absolute. If the short form can't be derived, to_overlay_lowerdir returns
+    the absolute layers + an empty root → cwd=None (current absolute behavior).
+    """
+    from kento.layers import to_overlay_lowerdir
     rootfs = container_dir / "rootfs"
     if _is_mountpoint(rootfs):
         raise StateError(f"rootfs already mounted at {rootfs}")
     upper = state_dir / "upper"
     work = state_dir / "work"
-    opts = f"lowerdir={layers},upperdir={upper},workdir={work}"
+    overlay_root, rel_layers = to_overlay_lowerdir(layers)
+    opts = f"lowerdir={rel_layers},upperdir={upper},workdir={work}"
     env = {**os.environ, "LIBMOUNT_FORCE_MOUNT2": "always"}
     run_or_die(
         ["mount", "-t", "overlay", "overlay", "-o", opts, str(rootfs)],
         what="mount overlayfs",
         hint=f"common causes: upperdir on overlayfs (set KENTO_STATE_DIR), missing overlay module, stale mount at {rootfs}.",
         env=env,
+        cwd=overlay_root or None,
     )
 
 

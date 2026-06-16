@@ -34,6 +34,39 @@ class TestGenerateVmHook:
         assert "LIBMOUNT_FORCE_MOUNT2=always" in hook
         assert "mount -t overlay" in hook
 
+    def test_non_store_layers_fall_back_to_absolute(self):
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        assert 'OVERLAY_BASE="/"' in hook
+        assert 'LAYERS="/a:/b"' in hook
+
+    def test_uses_chdir_relative_short_links(self, tmp_path):
+        """A podman-store image must bake OVERLAY_BASE + relative l/<short>
+        lowerdir and cd into the base in a subshell (kernel 4096-byte limit)."""
+        root = tmp_path / "var/lib/containers/storage/overlay"
+        paths = []
+        for lid, short in [("aaaa", "SHORTAAAAAAAAAAAAAAAAAAAAAA"),
+                           ("bbbb", "SHORTBBBBBBBBBBBBBBBBBBBBBB")]:
+            (root / lid / "diff").mkdir(parents=True)
+            (root / lid / "link").write_text(short + "\n")
+            paths.append(str(root / lid / "diff"))
+        layers = ":".join(paths)
+        hook = generate_vm_hook(Path("/d"), layers, "x", Path("/d"))
+        assert f'OVERLAY_BASE="{root}"' in hook
+        assert 'LAYERS="l/SHORTAAAAAAAAAAAAAAAAAAAAAA:l/SHORTBBBBBBBBBBBBBBBBBBBBBB"' in hook
+        assert 'cd "$OVERLAY_BASE"' in hook
+        assert f"{root}/aaaa/diff" not in hook
+
+    def test_mount_in_subshell_before_virtiofsd(self):
+        """The validation loop + mount run inside a subshell so the chdir into
+        OVERLAY_BASE never leaks to inject.sh / virtiofsd."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        cd_idx = hook.index('cd "$OVERLAY_BASE"')
+        mount_idx = hook.index("mount -t overlay")
+        close_idx = hook.index("overlay mount failed")
+        inject_idx = hook.index("kento-inject.sh")
+        virtiofsd_idx = hook.index("$VIRTIOFSD --socket-path=")
+        assert cd_idx < mount_idx < close_idx < inject_idx < virtiofsd_idx
+
     def test_contains_virtiofsd_start(self):
         hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
         assert "virtiofsd" in hook.lower() or "VIRTIOFSD" in hook
