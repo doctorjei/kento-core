@@ -126,6 +126,12 @@ Use `--memory` and `--cores` to override the defaults:
 sudo kento vm create <image> --memory 1024 --cores 2
 ```
 
+`--cores` is clamped down to the node's logical CPU count (with a warning) if you
+request more vCPUs than the host has — QEMU/PVE refuse to start a VM with more
+vCPUs than the node, so the clamp avoids creating an unstartable guest. The same
+clamp applies to `kento set --cores`. Over-requesting `--memory` only warns (KVM
+permits overcommit) and is never changed.
+
 ### Port forwarding
 
 By default, kento allocates the next free host port starting from 10022

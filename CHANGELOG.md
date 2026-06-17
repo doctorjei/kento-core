@@ -5,6 +5,22 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **VM-mode `--cores` is now clamped to the node's CPU count, with a loud
+  warning.** Requesting more vCPUs than the host has (`kento vm create --cores 8`
+  on a 4-CPU node) previously created the guest and then failed at `qm start`
+  (QEMU/PVE hard-refuse more vCPUs than the host has), leaving an unstartable VM.
+  The requested cores are now clamped down to the node's logical CPU count
+  (`os.cpu_count()`, floor 1) at create time and on `kento set --cores`, and a
+  warning explains the clamp and how to silence it. If the host CPU count can't
+  be determined, the check is skipped (never clamps blindly). Applies to VM modes
+  only (`vm`, `pve-vm`); LXC `--cores` (a cgroup quota with no hard boot failure)
+  is unaffected. Memory over-requests get a warning only — KVM overcommit is
+  legitimate, so the value is never clamped.
+
 ## [1.6.0.dev3] - 2026-06-17
 
 ### Changed

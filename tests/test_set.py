@@ -134,6 +134,52 @@ def test_vm_writes_metadata_only(tmp_path):
     assert not (d / "config").exists()
 
 
+def test_vm_set_cores_clamped_to_node_capacity(tmp_path, caplog):
+    """`kento set --cores N` on a VM clamps N to the node CPU count (same rule
+    as create) so we never leave an unstartable guest."""
+    import logging
+    d = tmp_path / "box"
+    d.mkdir()
+    with _env(d, "vm"), \
+         patch("kento.create._host_cpu_count", return_value=4), \
+         patch("kento.create._host_memory_mb", return_value=None):
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            rc = set_cmd("box", cores=8)
+    assert rc == 0
+    assert (d / "kento-cores").read_text() == "4\n"
+    assert any("clamping to 4" in r.getMessage() for r in caplog.records)
+
+
+def test_vm_set_cores_within_capacity_not_clamped(tmp_path, caplog):
+    import logging
+    d = tmp_path / "box"
+    d.mkdir()
+    with _env(d, "vm"), \
+         patch("kento.create._host_cpu_count", return_value=4), \
+         patch("kento.create._host_memory_mb", return_value=None):
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            rc = set_cmd("box", cores=2)
+    assert rc == 0
+    assert (d / "kento-cores").read_text() == "2\n"
+    assert not any("clamping" in r.getMessage() for r in caplog.records)
+
+
+def test_lxc_set_cores_never_clamped(tmp_path, caplog):
+    """LXC set --cores is cgroup quota, never clamped to node capacity."""
+    import logging
+    d = tmp_path / "box"
+    d.mkdir()
+    (d / "config").write_text(_LXC_CONFIG)
+    with _env(d, "lxc"), \
+         patch("kento.create._host_cpu_count", return_value=1), \
+         patch("kento.create._host_memory_mb", return_value=1):
+        with caplog.at_level(logging.WARNING, logger="kento"):
+            rc = set_cmd("box", cores=8)
+    assert rc == 0
+    assert (d / "kento-cores").read_text() == "8\n"
+    assert not any("clamping" in r.getMessage() for r in caplog.records)
+
+
 def test_vm_pve_arg_rejected(tmp_path):
     d = tmp_path / "box"
     d.mkdir()
@@ -396,7 +442,10 @@ def test_pve_vm_memory_patches_and_resyncs_args(tmp_path):
 
 def test_pve_vm_cores_patch(tmp_path):
     pve_dir, d, conf = _make_pve(tmp_path, 100, "qemu-server", _QM_CONF)
-    with _env(d, "pve-vm"), _pve_patch(pve_dir):
+    # Mock a large node so cores=8 isn't clamped — this test exercises the
+    # conf-patch mechanism, not the capacity clamp (covered separately).
+    with _env(d, "pve-vm"), _pve_patch(pve_dir), \
+         patch("kento.create._host_cpu_count", return_value=64):
         assert set_cmd("box", cores=8) == 0
     assert "cores: 8" in conf.read_text()
     assert (d / "kento-cores").read_text() == "8\n"

@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from kento.create import create, generate_config
+from kento.create import create, generate_config, _clamp_vm_capacity
 from kento.errors import (InstanceExistsError, ModeError, StateError,
                            SubprocessError, ValidationError)
 from kento.vm import VM_BASE
@@ -2287,6 +2287,149 @@ class TestVmCreateMemoryCores:
 
         assert not (tmp_path / "test" / "kento-memory").exists()
         assert not (tmp_path / "test" / "kento-cores").exists()
+
+
+class TestClampVmCapacityHelper:
+    """Unit tests for the _clamp_vm_capacity helper (warning/clamp logic)."""
+
+    def test_cores_clamped_when_over_host(self, caplog):
+        with patch("kento.create._host_cpu_count", return_value=4), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                result = _clamp_vm_capacity(8, 1024, mode="vm")
+        assert result == 4
+        assert any("clamping to 4" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_cores_not_clamped_when_within_host(self, caplog):
+        with patch("kento.create._host_cpu_count", return_value=4), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                result = _clamp_vm_capacity(2, 1024, mode="vm")
+        assert result == 2
+        assert not any("clamping" in r.getMessage() for r in caplog.records)
+
+    def test_cores_not_clamped_when_host_unknown(self, caplog):
+        with patch("kento.create._host_cpu_count", return_value=None), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                result = _clamp_vm_capacity(8, 1024, mode="vm")
+        assert result == 8
+        assert not any("clamping" in r.getMessage() for r in caplog.records)
+
+    def test_cores_clamp_floor_is_one(self):
+        # Pathological host count of 0 must still floor to 1.
+        with patch("kento.create._host_cpu_count", return_value=0), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            assert _clamp_vm_capacity(8, 1024, mode="vm") == 1
+
+    def test_memory_overcommit_warns_no_clamp(self, caplog):
+        with patch("kento.create._host_cpu_count", return_value=8), \
+             patch("kento.create._host_memory_mb", return_value=512):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                result = _clamp_vm_capacity(2, 4096, mode="vm")
+        # cores returned unchanged; memory is never clamped (warning only).
+        assert result == 2
+        assert any("exceeds this node's total RAM" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_memory_within_host_no_warn(self, caplog):
+        with patch("kento.create._host_cpu_count", return_value=8), \
+             patch("kento.create._host_memory_mb", return_value=8192):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                _clamp_vm_capacity(2, 1024, mode="vm")
+        assert not any("total RAM" in r.getMessage() for r in caplog.records)
+
+    def test_noop_for_lxc_mode(self, caplog):
+        # Even with a tiny host, LXC modes are never clamped or warned.
+        with patch("kento.create._host_cpu_count", return_value=1), \
+             patch("kento.create._host_memory_mb", return_value=1):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                result = _clamp_vm_capacity(8, 999999, mode="lxc")
+        assert result == 8
+        assert caplog.records == []
+
+
+class TestVmCreateCapacityClamp:
+    """Integration: VM create clamps kento-cores to node capacity."""
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_create_clamps_cores_metadata(self, mock_root, mock_layers,
+                                          tmp_path, caplog):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.create._host_cpu_count", return_value=4), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                create("myimage:latest", name="test", mode="vm", cores=8)
+        assert (vm_dir / "test" / "kento-cores").read_text().strip() == "4"
+        assert any("clamping to 4" in r.getMessage()
+                   for r in caplog.records)
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_create_no_clamp_within_capacity(self, mock_root, mock_layers,
+                                             tmp_path, caplog):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.create._host_cpu_count", return_value=4), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                create("myimage:latest", name="test", mode="vm", cores=2)
+        assert (vm_dir / "test" / "kento-cores").read_text().strip() == "2"
+        assert not any("clamping" in r.getMessage() for r in caplog.records)
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_create_host_cpu_unknown_no_clamp(self, mock_root, mock_layers,
+                                              tmp_path, caplog):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.create._host_cpu_count", return_value=None), \
+             patch("kento.create._host_memory_mb", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                create("myimage:latest", name="test", mode="vm", cores=8)
+        assert (vm_dir / "test" / "kento-cores").read_text().strip() == "8"
+        assert not any("clamping" in r.getMessage() for r in caplog.records)
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_create_memory_overcommit_warns_unchanged(
+            self, mock_root, mock_layers, tmp_path, caplog):
+        vm_dir = tmp_path / "vm"
+        vm_dir.mkdir()
+        with patch("kento.create.VM_BASE", vm_dir), \
+             patch("kento.create.upper_base", return_value=vm_dir / "test"), \
+             patch("kento.create._host_cpu_count", return_value=8), \
+             patch("kento.create._host_memory_mb", return_value=512):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                create("myimage:latest", name="test", mode="vm",
+                       memory=4096, cores=2)
+        # memory persisted unchanged (no clamp), warning emitted.
+        assert (vm_dir / "test" / "kento-memory").read_text().strip() == "4096"
+        assert any("exceeds this node's total RAM" in r.getMessage()
+                   for r in caplog.records)
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_cores_never_clamped(self, mock_root, mock_layers, mock_run,
+                                     tmp_path, caplog):
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento.create._host_cpu_count", return_value=1), \
+             patch("kento.create._host_memory_mb", return_value=1):
+            with caplog.at_level(logging.WARNING, logger="kento"):
+                create("myimage:latest", name="test", mode="lxc", cores=8)
+        assert (tmp_path / "test" / "kento-cores").read_text().strip() == "8"
+        assert not any("clamping" in r.getMessage() for r in caplog.records)
 
 
 class TestPveAutopromote:

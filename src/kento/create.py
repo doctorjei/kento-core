@@ -41,6 +41,81 @@ def _apparmor_parser_present() -> bool:
     return shutil.which("apparmor_parser") is not None
 
 
+def _host_cpu_count() -> int | None:
+    """Logical CPU count of this node, or None if undeterminable.
+
+    Wraps ``os.cpu_count()``. kento runs locally on the node for both vm and
+    pve-vm modes, so this is the correct vCPU ceiling. A None return (rare)
+    means we can't tell — callers must SKIP the cores check and never clamp
+    blindly. Kept as a module-level function so tests can monkeypatch it.
+    """
+    return os.cpu_count()
+
+
+def _host_memory_mb() -> int | None:
+    """Total RAM of this node in MB, or None if undeterminable.
+
+    Parses ``/proc/meminfo`` (``MemTotal:   N kB``) and converts kB→MB. Any
+    error (missing file, unexpected format) returns None so the caller SKIPs
+    the memory warning. Kept module-level so tests can monkeypatch it.
+    """
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])
+                return kb // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _clamp_vm_capacity(cores: int, memory: int, *, mode: str) -> int:
+    """Clamp VM vCPUs to node capacity (loud) and warn on memory overcommit.
+
+    VM modes only (``vm``, ``pve-vm``): for any other mode this is a no-op and
+    returns ``cores`` unchanged with no warning.
+
+    Cores are firm — QEMU/PVE refuses more vCPUs than the host has, so an
+    over-request would create a guest that fails to start. When the host CPU
+    count is known and ``cores`` exceeds it, clamp down to the host count
+    (floor 1) and warn loudly. If the host count is undeterminable, skip the
+    check (never clamp blindly).
+
+    Memory is soft — KVM permits overcommit/ballooning, so an over-request is
+    legitimate. We only warn (never clamp) when the requested memory exceeds
+    the node's total RAM. Returns the (possibly clamped) cores.
+    """
+    if mode not in ("vm", "pve-vm"):
+        return cores
+
+    host_cpus = _host_cpu_count()
+    if host_cpus is not None and cores > host_cpus:
+        clamped = max(1, host_cpus)
+        logger.warning(
+            "requested %d cores exceeds this node's CPU count (%d); "
+            "clamping to %d.\n"
+            "  QEMU/PVE refuses more vCPUs than the host has, so the VM "
+            "would fail to start\n"
+            "  otherwise. Pass --cores %d (or fewer) to silence this "
+            "warning.",
+            cores, host_cpus, clamped, clamped,
+        )
+        cores = clamped
+
+    host_mb = _host_memory_mb()
+    if host_mb is not None and memory > host_mb:
+        logger.warning(
+            "requested %d MB memory exceeds this node's total RAM (%d MB); "
+            "proceeding\n"
+            "  anyway (KVM permits overcommit), but the VM may be OOM-killed "
+            "or fail to start\n"
+            "  under memory pressure.",
+            memory, host_mb,
+        )
+
+    return cores
+
+
 def _perlayer_idmap_supported() -> bool:
     """True iff this kernel supports per-layer idmap for overlayfs.
 
@@ -1001,6 +1076,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             vm_defaults = get_vm_defaults()
             effective_memory = memory if memory is not None else vm_defaults["memory"]
             effective_cores = cores if cores is not None else vm_defaults["cores"]
+            # Clamp vCPUs to node capacity (loud) + warn on memory overcommit
+            # BEFORE persisting/handing to qm: an over-request would otherwise
+            # create an unstartable guest (qm refuses > node CPUs).
+            effective_cores = _clamp_vm_capacity(
+                effective_cores, effective_memory, mode=mode)
             (container_dir / "kento-memory").write_text(str(effective_memory) + "\n")
             (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
             (container_dir / "kento-nesting").write_text(

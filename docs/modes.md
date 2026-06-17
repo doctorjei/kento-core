@@ -339,6 +339,11 @@ for full details.
 - **Access:** SSH (`ssh -p <port> <user>@localhost`)
 - **Network:** QEMU user-mode networking with port forwarding
 - **Memory:** 1024 MB default (override with `--memory`, configurable via `/etc/kento/vm.conf`)
+- **CPU:** Host CPU count. `--cores` is **clamped down to the node's logical
+  CPU count** (with a warning) — QEMU/PVE refuse more vCPUs than the host has, so
+  an over-request would create an unstartable VM. The same clamp applies on
+  `kento set --cores`. Over-requesting `--memory` only warns (KVM permits
+  overcommit) and is never clamped.
 - **Instance directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** QEMU, virtiofsd, kernel + initramfs in image
 
@@ -358,6 +363,10 @@ the VM appears in the Proxmox web UI.
   host-port forwarding into the qm `args:` line (no `net0:` field), giving
   the same usermode networking as plain `vm`.
 - **Memory:** 1024 MB default (override with `--memory`)
+- **CPU:** Host CPU count. `--cores` is **clamped down to the node's logical CPU
+  count** (with a warning), at create time and on `kento set --cores` — `qm`
+  hard-refuses more vCPUs than the node has. Over-requesting `--memory` only warns
+  and is never clamped.
 - **Instance directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** QEMU, virtiofsd, kernel + initramfs in image, PVE host
 

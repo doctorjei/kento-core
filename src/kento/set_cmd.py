@@ -500,6 +500,21 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
             f"--cores must be a positive integer, got {cores}."
         )
 
+    # Clamp requested vCPUs to node capacity for VM modes (same rule as create:
+    # qm/QEMU refuse more vCPUs than the host has, so an over-request would
+    # leave an unstartable guest). Reuses the create-time helper. The memory
+    # arg drives only the overcommit warning; pass the effective memory (the
+    # new value if being set, else the instance's current value, else 0 so the
+    # check is a no-op) so set never spuriously warns about memory.
+    if cores is not None and mode in ("vm", "pve-vm"):
+        from kento.create import _clamp_vm_capacity
+        if memory is not None:
+            eff_mem = memory
+        else:
+            cur_mem = _read_line(container_dir, "memory")
+            eff_mem = int(cur_mem) if cur_mem else 0
+        cores = _clamp_vm_capacity(cores, eff_mem, mode=mode)
+
     # --- Network delta: resolve-current -> apply-overrides -> validate ---
     net_provided = (network is not None or ip is not None or gateway is not None
                     or dns is not None or hostname is not None
