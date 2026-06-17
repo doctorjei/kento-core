@@ -494,7 +494,7 @@ class TestGenerateQmConfig:
         assert "name: test" in cfg
         assert "ostype: l26" in cfg
         assert "machine: q35" in cfg
-        assert "memory: 512" in cfg
+        assert "memory: 1024" in cfg
         assert "cores: 1" in cfg
         assert "hookscript: local:snippets/kento-vm-100.sh" in cfg
         assert "serial0: socket" in cfg
@@ -523,7 +523,7 @@ class TestGenerateQmConfig:
     def test_args_contains_memfd(self):
         cfg = generate_qm_config("test", 100, Path("/var/lib/kento/vm/test"),
                                   hookscript_ref="local:snippets/kento-vm-100.sh")
-        assert "memory-backend-memfd,id=mem,size=512M,share=on" in cfg
+        assert "memory-backend-memfd,id=mem,size=1024M,share=on" in cfg
         assert "numa node,memdev=mem" in cfg
 
     def test_memfd_matches_memory(self):

@@ -338,7 +338,7 @@ for full details.
 - **Start command:** QEMU via kento (no external hypervisor manager)
 - **Access:** SSH (`ssh -p <port> <user>@localhost`)
 - **Network:** QEMU user-mode networking with port forwarding
-- **Memory:** 512 MB default (override with `--memory`, configurable via `/etc/kento/vm.conf`)
+- **Memory:** 1024 MB default (override with `--memory`, configurable via `/etc/kento/vm.conf`)
 - **Instance directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** QEMU, virtiofsd, kernel + initramfs in image
 
@@ -357,7 +357,7 @@ the VM appears in the Proxmox web UI.
   `--network usermode` is also supported: kento injects a slirp netdev +
   host-port forwarding into the qm `args:` line (no `net0:` field), giving
   the same usermode networking as plain `vm`.
-- **Memory:** 512 MB default (override with `--memory`)
+- **Memory:** 1024 MB default (override with `--memory`)
 - **Instance directory:** `/var/lib/kento/vm/<name>/`
 - **Requires:** QEMU, virtiofsd, kernel + initramfs in image, PVE host
 
@@ -435,7 +435,7 @@ an empty value (`--qemu-arg ''`), and leave it untouched when omitted.
 | Access | lxc-attach | pct exec / web UI | SSH | qm terminal / SSH |
 | Network | Bridge | Bridge | User-mode (NAT) | Bridge |
 | Management UI | None | Proxmox web UI | None | Proxmox web UI |
-| Memory default | No limit | No limit¹ | 512 MB | 512 MB |
+| Memory default | No limit | No limit¹ | 1024 MB | 1024 MB |
 | CPU default | No limit | 1 core | Host CPU | Host CPU |
 
 ¹ plain-lxc is truly unlimited (an omitted limit → liblxc default). pve-lxc

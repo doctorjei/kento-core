@@ -5,9 +5,39 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.0.dev3] - 2026-06-17
+
+### Changed
+
+- **VM-mode default memory raised from 512 MB to 1024 MB** (cores default
+  unchanged at 1). The hardcoded 512 MB was too small for typical workloads. The
+  `--memory` flag overrides as before. Applies to both `vm` and `pve-vm` modes.
 
 ### Fixed
+
+- **`kento prune` now reports images it failed to remove** (previously swallowed
+  as a `logger.warning`, omitted from the summary) and exits non-zero when any
+  expected removal fails. `prune` only ever targets images it has already
+  determined are safe to remove (no surviving guest reference, no surviving hold),
+  so a `podman image rm` refusal signals an external non-kento reference or a
+  kento-accounting mismatch — meaningful, not benign. `prune()` now returns
+  `(summary_text, failed_count)`; the summary lists each failed image and the
+  reason podman gave, mirroring how `diagnose` surfaces problems.
+
+- **`scrub` now re-pins the image hold to the resolved image.** The image hold
+  (`kento-hold.<guest>`, a stopped podman container that pins the OCI image
+  against `podman prune`) pins by content-ID at create time. `scrub` re-resolves
+  the guest onto its current image, but the re-pin was create-IF-MISSING — so when
+  the image tag had moved (e.g. a re-pull) the hold stayed on the OLD image: the
+  old image leaked (pinned but unused) and the new image was under-protected (held
+  only by the floating tag). `scrub` now removes and recreates the hold against the
+  freshly resolved image (idempotent no-op when already aligned). Image holds now
+  also carry an `io.kento.hold-image-id=<id>` label and guests record a
+  `kento-image-id` file, and `kento diagnose` reports hold/guest image-ID **drift**
+  (a hold pinning a different image than its guest currently runs, remediable with
+  `kento scrub <name>`). Legacy pre-fix guests/holds (missing the label/file) are
+  handled gracefully — holds fall back to pinning by tag and drift detection skips
+  them silently.
 
 - **AppArmor: pve-lxc guests running modern systemd booted network-dead; plain-lxc
   used an over-broad `allow_nesting=1`.** Modern systemd (256+, Debian 13 / trixie,

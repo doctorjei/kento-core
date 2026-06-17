@@ -203,6 +203,31 @@ class TestCreate:
         # LXC mode does not get a kento-mac file — MAC only makes sense for VMs.
         assert not (lxc_dir / "kento-mac").exists()
 
+    @patch("kento.create.resolve_image_id", return_value="sha256:abc123")
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_writes_kento_image_id(self, mock_root, mock_layers, mock_run,
+                                   mock_id, tmp_path):
+        """create records the resolved content-ID in kento-image-id."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-image-id").read_text().strip() == "sha256:abc123"
+
+    @patch("kento.create.resolve_image_id", return_value="")
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_skips_kento_image_id_when_unresolvable(self, mock_root, mock_layers,
+                                                    mock_run, mock_id, tmp_path):
+        """An unresolvable id (older podman) -> no kento-image-id file."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", mode="lxc")
+        assert not (tmp_path / "test" / "kento-image-id").exists()
+
     @patch("kento.create.subprocess.run")
     @patch("kento.create.require_root")
     def test_rejects_image_over_layer_cap(self, mock_root, mock_run, tmp_path):
@@ -2223,7 +2248,7 @@ class TestVmCreateMemoryCores:
              patch("kento.create.upper_base", return_value=vm_dir / "test"):
             create("myimage:latest", name="test", mode="vm")
 
-        assert (vm_dir / "test" / "kento-memory").read_text().strip() == "512"
+        assert (vm_dir / "test" / "kento-memory").read_text().strip() == "1024"
         assert (vm_dir / "test" / "kento-cores").read_text().strip() == "1"
 
     @patch("kento.create.resolve_layers", return_value="/a:/b")

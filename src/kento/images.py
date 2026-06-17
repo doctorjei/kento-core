@@ -97,6 +97,36 @@ def _holds() -> list[tuple[str, str]]:
     return holds
 
 
+def _hold_image_ids() -> dict[str, str]:
+    """Map each held-for guest name -> the hold's pinned content-ID label.
+
+    Separate query from ``_holds()`` (whose (name, image) shape prune/list
+    depend on) so those callers are untouched. Only entries carrying a
+    non-empty ``io.kento.hold-image-id`` label are returned; legacy holds
+    created before the label existed are simply absent from the map.
+    """
+    result = subprocess.run(
+        [*_podman_cmd(), "ps", "-a",
+         "--filter", "label=io.kento.hold-for",
+         "--format",
+         '{{.Label "io.kento.hold-for"}}\t{{.Label "io.kento.hold-image-id"}}'],
+        capture_output=True, text=True,
+    )
+    ids: dict[str, str] = {}
+    if result.returncode != 0:
+        return ids
+    for line in result.stdout.splitlines():
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        held_for = parts[0].strip()
+        image_id = parts[1].strip() if len(parts) > 1 else ""
+        if held_for and image_id and image_id != "<no value>":
+            ids[held_for] = image_id
+    return ids
+
+
 def list_images(in_use_only: bool = False) -> str:
     """List kento-managed images (read-only).
 
@@ -142,7 +172,7 @@ def list_images(in_use_only: bool = False) -> str:
     return "\n".join(lines)
 
 
-def prune(yes: bool = False) -> str:
+def prune(yes: bool = False) -> tuple[str, int]:
     """Safe GC of orphaned kento hold containers and the images they freed.
 
     DRY-RUN by default. Removes only holds whose guest no longer exists,
@@ -150,7 +180,13 @@ def prune(yes: bool = False) -> str:
     no surviving guest. Never removes a hold whose guest exists; never
     prunes all images.
 
-    Returns the user-facing plan/summary text as a string (no trailing newline).
+    Returns ``(summary_text, failed_count)`` where ``summary_text`` is the
+    user-facing plan/summary (no trailing newline) and ``failed_count`` is
+    the number of candidate images podman refused to remove. Because every
+    candidate is, by construction, an image with no surviving guest ref and
+    no surviving-hold ref, a removal failure is meaningful (an external
+    non-kento reference or a kento-accounting miss) — the CLI exits
+    non-zero on a non-zero count, mirroring ``diagnose``.
     """
     guest_names = _guest_names()
     refs = _guest_image_refs()  # image -> guests still present
@@ -162,7 +198,7 @@ def prune(yes: bool = False) -> str:
                  if name in guest_names]
 
     if not orphaned:
-        return "Nothing to prune."
+        return "Nothing to prune.", 0
 
     # Images still pinned by a surviving (non-orphaned) hold must not be
     # removed. Likewise, images referenced by any guest must not be removed.
@@ -186,7 +222,7 @@ def prune(yes: bool = False) -> str:
         else:
             lines.append("  Images then eligible for removal: (none)")
         lines.append("Run 'kento prune --yes' to remove them.")
-        return "\n".join(lines)
+        return "\n".join(lines), 0
 
     removed_holds = 0
     for name, _image in orphaned:
@@ -194,6 +230,7 @@ def prune(yes: bool = False) -> str:
         removed_holds += 1
 
     removed_images = 0
+    failures: list[tuple[str, str]] = []
     for image in candidate_images:
         result = subprocess.run(
             [*_podman_cmd(), "image", "rm", image],
@@ -202,9 +239,19 @@ def prune(yes: bool = False) -> str:
         if result.returncode == 0:
             removed_images += 1
         else:
-            # podman refuses if the image is still in use — that is the
-            # intended safety net, so we tolerate the failure and report.
+            # Every candidate had no surviving guest ref and no surviving
+            # hold ref, so a refusal here is meaningful — an external
+            # non-kento reference or a kento-accounting miss. Surface it.
             msg = (result.stderr or result.stdout or "").strip()
             logger.warning("skipped image %s: %s", image, msg)
+            failures.append((image, msg))
 
-    return f"Removed {removed_holds} orphaned hold(s), {removed_images} image(s)."
+    lines = [f"Removed {removed_holds} orphaned hold(s), {removed_images} image(s)."]
+    if failures:
+        lines.append(
+            f"Failed to remove {len(failures)} image(s) "
+            "(still referenced or accounting mismatch):"
+        )
+        for image, reason in failures:
+            lines.append(f"  {image}: {reason}")
+    return "\n".join(lines), len(failures)

@@ -355,6 +355,93 @@ def test_no_stale_holds_ok(tmp_path):
     assert all(f["severity"] != "warn" for f in sh)
 
 
+# --- image-hold / guest image-ID drift (host) ---------------------------
+
+
+def test_hold_drift_detected(tmp_path):
+    """Hold pins an old id, guest records a new id -> warn finding."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = _mk_instance(lxc, "box", name="box")
+    (d / "kento-image-id").write_text("sha256:newnewnewnew0000\n")
+
+    with _patch_bases(lxc, vm), \
+         patch("kento.diagnose._apparmor_active", return_value=False), \
+         patch("kento.diagnose._apparmor_parser_present", return_value=True), \
+         patch("kento.diagnose._holds", return_value=[("box", "img:latest")]), \
+         patch("kento.diagnose._hold_image_ids",
+               return_value={"box": "sha256:oldoldoldold0000"}), \
+         patch("kento.diagnose._guest_names", return_value={"box"}), \
+         patch("kento.diagnose.is_pve", return_value=False), \
+         patch("kento.diagnose.is_running", return_value=False), \
+         patch("kento.diagnose.os.path.ismount", return_value=False):
+        report = run_diagnostics()
+
+    warns = [f for f in report["checks"]
+             if f["category"] == "hold" and f["severity"] == "warn"]
+    drift = [f for f in warns if "re-pin" in f["message"]]
+    assert drift, "expected a hold-drift warn"
+    assert "box" in drift[0]["message"]
+    assert "oldoldoldold" in drift[0]["message"]
+    assert "newnewnewnew" in drift[0]["message"]
+    assert drift[0]["remediation"] == "kento scrub box"
+
+
+def test_hold_drift_aligned_no_warn(tmp_path):
+    """Hold id == guest id -> no drift warn."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    d = _mk_instance(lxc, "box", name="box")
+    (d / "kento-image-id").write_text("sha256:samesame0000\n")
+
+    with _patch_bases(lxc, vm), \
+         patch("kento.diagnose._apparmor_active", return_value=False), \
+         patch("kento.diagnose._apparmor_parser_present", return_value=True), \
+         patch("kento.diagnose._holds", return_value=[("box", "img:latest")]), \
+         patch("kento.diagnose._hold_image_ids",
+               return_value={"box": "sha256:samesame0000"}), \
+         patch("kento.diagnose._guest_names", return_value={"box"}), \
+         patch("kento.diagnose.is_pve", return_value=False), \
+         patch("kento.diagnose.is_running", return_value=False), \
+         patch("kento.diagnose.os.path.ismount", return_value=False):
+        report = run_diagnostics()
+
+    drift = [f for f in report["checks"]
+             if f["category"] == "hold" and f["severity"] == "warn"
+             and "re-pin" in f["message"]]
+    assert not drift
+
+
+def test_hold_drift_legacy_skipped(tmp_path):
+    """Guest with no kento-image-id file (or hold with no label) is skipped
+    silently — no warn, no noise."""
+    lxc = tmp_path / "lxc"
+    vm = tmp_path / "vm"
+    lxc.mkdir()
+    vm.mkdir()
+    _mk_instance(lxc, "box", name="box")  # no kento-image-id file
+
+    with _patch_bases(lxc, vm), \
+         patch("kento.diagnose._apparmor_active", return_value=False), \
+         patch("kento.diagnose._apparmor_parser_present", return_value=True), \
+         patch("kento.diagnose._holds", return_value=[("box", "img:latest")]), \
+         patch("kento.diagnose._hold_image_ids", return_value={}), \
+         patch("kento.diagnose._guest_names", return_value={"box"}), \
+         patch("kento.diagnose.is_pve", return_value=False), \
+         patch("kento.diagnose.is_running", return_value=False), \
+         patch("kento.diagnose.os.path.ismount", return_value=False):
+        report = run_diagnostics()
+
+    drift = [f for f in report["checks"]
+             if f["category"] == "hold" and f["severity"] == "warn"
+             and "re-pin" in f["message"]]
+    assert not drift
+
+
 # --- per-instance scoping with name= ------------------------------------
 
 

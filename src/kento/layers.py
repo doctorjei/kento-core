@@ -171,15 +171,104 @@ def preflight_overlay_layers(layers: str, state_dir: "Path | None" = None) -> No
             )
 
 
+def resolve_image_id(image: str) -> str:
+    """Return the full content-ID of an image (e.g. ``sha256:...``).
+
+    Runs ``podman image inspect <image> --format {{.Id}}``. Returns the
+    stripped id, or ``""`` on any failure (image gone, podman absent, older
+    podman). Callers treat an empty result gracefully — they never rely on
+    this raising.
+    """
+    try:
+        result = subprocess.run(
+            [*_podman_cmd(), "image", "inspect", image, "--format", "{{.Id}}"],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    out = result.stdout
+    if not isinstance(out, str):
+        return ""
+    return out.strip()
+
+
 def create_image_hold(image: str, name: str) -> None:
-    """Create a stopped podman container to pin the image against pruning."""
+    """Create a stopped podman container to pin the image against pruning.
+
+    The hold is created FROM THE RESOLVED IMAGE ID (not the tag) so the pin
+    stays unambiguous even after the tag later moves to a different image, and
+    carries an ``io.kento.hold-image-id=<id>`` label recording exactly which
+    image content it pins. If the id can't be resolved (e.g. an older podman),
+    fall back to pinning by tag and omit the image-id label.
+    """
     hold_name = f"kento-hold.{name}"
-    subprocess.run(
-        [*_podman_cmd(), "create", "--name", hold_name,
-         "--label", f"io.kento.hold-for={name}",
-         image, "/bin/true"],
-        capture_output=True,
-    )
+    image_id = resolve_image_id(image)
+    cmd = [*_podman_cmd(), "create", "--name", hold_name,
+           "--label", f"io.kento.hold-for={name}"]
+    if image_id:
+        cmd += ["--label", f"io.kento.hold-image-id={image_id}", image_id]
+    else:
+        cmd += [image]
+    cmd += ["/bin/true"]
+    subprocess.run(cmd, capture_output=True)
+
+
+def _hold_pinned_id(name: str) -> str:
+    """Return the ``io.kento.hold-image-id`` label of ``kento-hold.<name>``.
+
+    Empty string if the hold is missing, carries no such label (legacy hold),
+    or the query fails.
+    """
+    try:
+        result = subprocess.run(
+            [*_podman_cmd(), "container", "inspect", f"kento-hold.{name}",
+             "--format", '{{index .Config.Labels "io.kento.hold-image-id"}}'],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    out = result.stdout.strip()
+    # podman renders a missing label key as "<no value>".
+    if out == "<no value>":
+        return ""
+    return out
+
+
+def repin_image_hold(image: str, name: str) -> bool:
+    """Re-pin the image hold to the resolved image. Returns True if it re-pinned.
+
+    Resolves the target image id and compares it against the existing hold's
+    recorded ``io.kento.hold-image-id`` label. If the hold is missing OR its
+    pinned id differs from the target → remove the old hold and create a fresh
+    one pinning the current image (returns True). If already aligned → no-op
+    (returns False). Defensive: when the target id can't be resolved we fall
+    back to ensuring a hold exists (mirrors the prior backfill behavior).
+    """
+    target = resolve_image_id(image)
+    if not target:
+        # Can't resolve the new id (older podman / image gone): fall back to
+        # the create-if-missing backfill rather than churning the hold.
+        ensure_image_hold(image, name)
+        return False
+    try:
+        pinned = _hold_pinned_id(name)
+        hold_present = subprocess.run(
+            [*_podman_cmd(), "container", "exists", f"kento-hold.{name}"],
+            capture_output=True,
+        ).returncode == 0
+    except Exception:
+        # On any inspect failure prefer recreating — fail toward a correct pin.
+        pinned = ""
+        hold_present = False
+    if hold_present and pinned == target:
+        return False
+    remove_image_hold(name)
+    create_image_hold(image, name)
+    return True
 
 
 def ensure_image_hold(image: str, name: str) -> None:

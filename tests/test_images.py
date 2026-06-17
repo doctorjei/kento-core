@@ -122,8 +122,9 @@ def test_prune_dry_run_makes_no_destructive_calls(tmp_path):
          patch("kento.images.subprocess.run",
                side_effect=_holds_mock(holds)) as mock_run, \
          patch("kento.images.remove_image_hold") as mock_rm:
-        result = prune()
+        result, failed = prune()
 
+    assert failed == 0
     assert "kento-hold.ghost" in result
     assert "imageB:latest" in result
     assert "kento prune --yes" in result
@@ -156,7 +157,7 @@ def test_prune_yes_removes_orphaned_only(tmp_path):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_run) as mock_run, \
          patch("kento.images.remove_image_hold") as mock_rm:
-        result = prune(yes=True)
+        result, failed = prune(yes=True)
 
     # Only the orphaned hold removed.
     mock_rm.assert_called_once_with("ghost")
@@ -168,6 +169,7 @@ def test_prune_yes_removes_orphaned_only(tmp_path):
     assert len(img_rm_calls) == 1
     assert "imageB:latest" in img_rm_calls[0].args[0]
     assert "Removed 1 orphaned hold(s), 1 image(s)." in result
+    assert failed == 0
 
 
 def test_prune_yes_tolerates_image_rm_failure(tmp_path, caplog):
@@ -190,10 +192,16 @@ def test_prune_yes_tolerates_image_rm_failure(tmp_path, caplog):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_run), \
          patch("kento.images.remove_image_hold"):
-        result = prune(yes=True)
+        result, failed = prune(yes=True)
 
-    # Hold removed (1), image refused (0).
+    # Hold removed (1), image refused (0) -> reported, not swallowed.
     assert "Removed 1 orphaned hold(s), 0 image(s)." in result
+    # The failing image and its reason are surfaced in the summary text,
+    # and the failure count is non-zero so the CLI can exit non-zero.
+    assert "Failed to remove 1 image(s)" in result
+    assert "imageB:latest" in result
+    assert "image is in use by a container" in result
+    assert failed == 1
 
 
 def test_prune_image_pinned_by_surviving_hold_not_removed(tmp_path):
@@ -216,7 +224,7 @@ def test_prune_image_pinned_by_surviving_hold_not_removed(tmp_path):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_run) as mock_run, \
          patch("kento.images.remove_image_hold") as mock_rm:
-        result = prune(yes=True)
+        result, failed = prune(yes=True)
 
     mock_rm.assert_called_once_with("ghost")
     img_rm_calls = [
@@ -225,6 +233,7 @@ def test_prune_image_pinned_by_surviving_hold_not_removed(tmp_path):
     ]
     assert img_rm_calls == []
     assert "Removed 1 orphaned hold(s), 0 image(s)." in result
+    assert failed == 0
 
 
 def test_prune_nothing_to_do(tmp_path):
@@ -239,7 +248,8 @@ def test_prune_nothing_to_do(tmp_path):
          patch("kento.images.VM_BASE", vm), \
          patch("kento.images.subprocess.run", side_effect=_holds_mock(holds)), \
          patch("kento.images.remove_image_hold") as mock_rm:
-        result = prune(yes=True)
+        result, failed = prune(yes=True)
 
     assert "Nothing to prune." in result
+    assert failed == 0
     mock_rm.assert_not_called()

@@ -349,7 +349,7 @@ def _read_passthrough_lines(path: Path) -> list[str]:
 
 
 def generate_qm_args(container_dir: Path, *,
-                     memory: int = 512,
+                     memory: int = 1024,
                      kvm: bool = True) -> str:
     """Build the kento-managed `args:` payload for a PVE VM config.
 
@@ -453,7 +453,7 @@ def generate_qm_args(container_dir: Path, *,
 
 def generate_qm_config(name: str, vmid: int, container_dir: Path, *,
                         hookscript_ref: str,
-                        memory: int = 512,
+                        memory: int = 1024,
                         cores: int = 1,
                         machine: str = "q35",
                         bridge: str | None = None,

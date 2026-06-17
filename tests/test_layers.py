@@ -7,7 +7,8 @@ import pytest
 
 from kento.errors import ImageNotFoundError, StateError
 from kento.layers import (resolve_layers, ensure_image_hold, _podman_cmd,
-                          to_overlay_lowerdir, preflight_overlay_layers)
+                          to_overlay_lowerdir, preflight_overlay_layers,
+                          resolve_image_id, repin_image_hold)
 
 
 def _mock_run(args, **kwargs):
@@ -83,8 +84,9 @@ class TestEnsureImageHold:
                 return cmd
         return None
 
+    @patch("kento.layers.resolve_image_id", return_value="")
     @patch("kento.layers.subprocess.run")
-    def test_creates_hold_when_missing(self, mock_run):
+    def test_creates_hold_when_missing(self, mock_run, mock_id):
         def side_effect(args, **kwargs):
             cmd = list(args)
             if "exists" in cmd:
@@ -98,7 +100,7 @@ class TestEnsureImageHold:
         exists_cmd = self._exists_check_cmd(mock_run.call_args_list)
         assert exists_cmd == ["podman", "container", "exists", "kento-hold.mybox"]
 
-        # create_image_hold was invoked
+        # create_image_hold was invoked (id unresolvable -> pins by tag)
         create_calls = [list(c.args[0]) for c in mock_run.call_args_list
                         if "create" in list(c.args[0])]
         assert len(create_calls) == 1
@@ -126,6 +128,80 @@ class TestEnsureImageHold:
     def test_tolerates_subprocess_failure(self, mock_run):
         # best-effort: never raises even if podman blows up
         ensure_image_hold("myimage:latest", "mybox")
+
+
+class TestResolveImageId:
+    @patch("kento.layers.subprocess.run")
+    def test_returns_stripped_id(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0, stdout="sha256:deadbeef\n")
+        assert resolve_image_id("img:latest") == "sha256:deadbeef"
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["podman", "image", "inspect", "img:latest",
+                       "--format", "{{.Id}}"]
+
+    @patch("kento.layers.subprocess.run")
+    def test_empty_on_nonzero(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess([], 1, stdout="")
+        assert resolve_image_id("missing:latest") == ""
+
+    @patch("kento.layers.subprocess.run", side_effect=OSError("boom"))
+    def test_empty_on_exception(self, mock_run):
+        assert resolve_image_id("img") == ""
+
+
+class TestRepinImageHold:
+    """repin_image_hold removes+recreates only on drift; no-op when aligned."""
+
+    @patch("kento.layers.create_image_hold")
+    @patch("kento.layers.remove_image_hold")
+    @patch("kento.layers._hold_pinned_id", return_value="sha256:OLD")
+    @patch("kento.layers.resolve_image_id", return_value="sha256:NEW")
+    @patch("kento.layers.subprocess.run")
+    def test_repins_on_drift(self, mock_run, mock_id, mock_pinned,
+                             mock_remove, mock_create):
+        # hold exists but pins a different id -> remove + recreate, return True.
+        mock_run.return_value = subprocess.CompletedProcess([], 0)  # exists
+        assert repin_image_hold("img:latest", "mybox") is True
+        mock_remove.assert_called_once_with("mybox")
+        mock_create.assert_called_once_with("img:latest", "mybox")
+
+    @patch("kento.layers.create_image_hold")
+    @patch("kento.layers.remove_image_hold")
+    @patch("kento.layers._hold_pinned_id", return_value="sha256:SAME")
+    @patch("kento.layers.resolve_image_id", return_value="sha256:SAME")
+    @patch("kento.layers.subprocess.run")
+    def test_noop_when_aligned(self, mock_run, mock_id, mock_pinned,
+                               mock_remove, mock_create):
+        mock_run.return_value = subprocess.CompletedProcess([], 0)  # exists
+        assert repin_image_hold("img:latest", "mybox") is False
+        mock_remove.assert_not_called()
+        mock_create.assert_not_called()
+
+    @patch("kento.layers.create_image_hold")
+    @patch("kento.layers.remove_image_hold")
+    @patch("kento.layers._hold_pinned_id", return_value="")
+    @patch("kento.layers.resolve_image_id", return_value="sha256:NEW")
+    @patch("kento.layers.subprocess.run")
+    def test_repins_when_hold_missing(self, mock_run, mock_id, mock_pinned,
+                                      mock_remove, mock_create):
+        # container exists check returns nonzero -> hold absent -> recreate.
+        mock_run.return_value = subprocess.CompletedProcess([], 1)
+        assert repin_image_hold("img:latest", "mybox") is True
+        mock_remove.assert_called_once_with("mybox")
+        mock_create.assert_called_once_with("img:latest", "mybox")
+
+    @patch("kento.layers.ensure_image_hold")
+    @patch("kento.layers.create_image_hold")
+    @patch("kento.layers.remove_image_hold")
+    @patch("kento.layers.resolve_image_id", return_value="")
+    def test_falls_back_to_ensure_when_id_unresolvable(
+            self, mock_id, mock_remove, mock_create, mock_ensure):
+        # Target id can't be resolved -> backfill (ensure), no churn, False.
+        assert repin_image_hold("img:latest", "mybox") is False
+        mock_ensure.assert_called_once_with("img:latest", "mybox")
+        mock_remove.assert_not_called()
+        mock_create.assert_not_called()
 
 
 def _make_store(tmp_path, ids_and_shorts):

@@ -1013,7 +1013,7 @@ def _apply_pve_vm(container_dir, memory, cores, mac, qemu_args,
         if mem is None:
             mem_file = container_dir / "kento-memory"
             mem = (int(mem_file.read_text().strip())
-                   if mem_file.is_file() else 512)
+                   if mem_file.is_file() else 1024)
         new_args = f"args: {generate_qm_args(container_dir, memory=mem)}"
         content = _replace_conf_field(content, "args", None)
         # _replace_conf_field with None removed the old args; append fresh.

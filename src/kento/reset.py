@@ -8,7 +8,7 @@ from pathlib import Path
 from kento import is_running, read_mode, require_root, resolve_container
 from kento.errors import StateError
 from kento.hook import write_hook
-from kento.layers import ensure_image_hold, resolve_layers
+from kento.layers import repin_image_hold, resolve_image_id, resolve_layers
 from kento.vm_hook import write_vm_hook
 
 logger = logging.getLogger("kento")
@@ -51,6 +51,13 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     # half-scrubbed instance with stale kento-layers/hook.
     image = (container_dir / "kento-image").read_text().strip()
     layers = resolve_layers(image)
+
+    # Record the freshly resolved content-ID so it reflects the post-scrub
+    # image (the tag may have moved since create). Drift detection in diagnose
+    # compares this against the hold's pinned id. Skip if unresolvable.
+    new_image_id = resolve_image_id(image)
+    if new_image_id:
+        (container_dir / "kento-image-id").write_text(new_image_id + "\n")
 
     # Read state dir
     state_file = container_dir / "kento-state"
@@ -164,11 +171,14 @@ def reset(name: str, *, container_dir: Path | None = None, mode: str | None = No
     # Persist the layers resolved up-front (before the writable layer was cleared).
     (container_dir / "kento-layers").write_text(layers + "\n")
 
-    # Backfill the image-hold container if it's missing (self-heals guests
-    # created before the hold mechanism existed). Store-level, mode-agnostic.
+    # Re-pin the image hold to the freshly resolved image. The hold pins by
+    # content-ID, so if the image tag moved since create (or the hold is
+    # missing), this releases the old image and pins the current one. Idempotent
+    # no-op when already aligned. Store-level, mode-agnostic.
     hold_name = (container_dir / "kento-name").read_text().strip() \
         if (container_dir / "kento-name").is_file() else name
-    ensure_image_hold(image, hold_name)
+    if repin_image_hold(image, hold_name):
+        logger.info("  Image hold re-pinned to current image.")
 
     # Regenerate the mode-appropriate hook so fresh image paths land in it.
     # Plain VM mode has no hook (QEMU starts from Python), but pve-vm does —

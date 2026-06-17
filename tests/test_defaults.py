@@ -186,7 +186,7 @@ class TestEnsureConfigFiles:
         assert "# mount_auto = proc:mixed sys:mixed cgroup:mixed" in lxc_text
 
         vm_text = vm_file.read_text()
-        assert "# memory = 512" in vm_text
+        assert "# memory = 1024" in vm_text
         assert "# cores = 1" in vm_text
         assert "# kvm = True" in vm_text
         assert "# machine = q35" in vm_text

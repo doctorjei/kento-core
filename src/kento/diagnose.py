@@ -26,7 +26,7 @@ from kento import (LXC_BASE, VM_BASE, InstanceNotFoundError, _scan_namespace,
                    is_running, pve_config_exists, read_mode, validate_name)
 from kento.cloudinit import detect_cloudinit
 from kento.create import _apparmor_active, _apparmor_parser_present
-from kento.images import _guest_names, _holds
+from kento.images import _guest_names, _hold_image_ids, _holds
 from kento.info import _read_meta
 from kento.pve import _kento_recorded_vmids, is_pve, next_vmid
 from kento.reconcile import _is_orphan, _orphan_vmid
@@ -162,6 +162,72 @@ def _check_stale_holds():
             f"stale image hold 'kento-hold.{n}' pins {img or '?'} but guest "
             f"'{n}' no longer exists",
             "kento prune"))
+    return findings
+
+
+def _short_id(image_id):
+    """First 12 hex chars of an image id, stripping any ``sha256:`` prefix."""
+    s = image_id.strip()
+    if s.startswith("sha256:"):
+        s = s[len("sha256:"):]
+    return s[:12]
+
+
+def _check_hold_drift():
+    """Image-hold / guest image-ID drift (host). READ ONLY.
+
+    For each guest that exists AND has a hold, compare the hold's pinned
+    content-ID (its ``io.kento.hold-image-id`` label) against the guest's
+    recorded ``kento-image-id`` file. A mismatch means the image tag moved
+    since the hold was created (e.g. a re-pull) and a scrub is needed to
+    re-pin. Legacy guests/holds missing either value are skipped silently
+    (no noise). Never mutates.
+    """
+    try:
+        guests = _guest_names()
+        hold_ids = _hold_image_ids()
+    except (PermissionError, OSError):
+        return [_finding("hold", "info", "host",
+                         "could not enumerate image-hold pins (podman/root?)",
+                         None)]
+
+    # Map guest display name -> its recorded kento-image-id (when present).
+    guest_image_ids: dict[str, str] = {}
+    for base in (LXC_BASE, VM_BASE):
+        if not base.is_dir():
+            continue
+        for image_file in base.glob("*/kento-image"):
+            container_dir = image_file.parent
+            try:
+                name_file = container_dir / "kento-name"
+                gname = (name_file.read_text().strip()
+                         if name_file.is_file() else container_dir.name)
+                id_file = container_dir / "kento-image-id"
+                if id_file.is_file():
+                    guest_image_ids[gname] = id_file.read_text().strip()
+            except (PermissionError, OSError):
+                continue
+
+    findings = []
+    drift = 0
+    for n in sorted(guests):
+        pinned = hold_ids.get(n, "")
+        guest_id = guest_image_ids.get(n, "")
+        if not pinned or not guest_id:
+            # Legacy / pre-fix guest or hold (missing label or file) — skip.
+            continue
+        if pinned != guest_id:
+            drift += 1
+            findings.append(_finding(
+                "hold", "warn", "host",
+                f"image hold for '{n}' pins {_short_id(pinned)} but guest "
+                f"runs {_short_id(guest_id)} — run 'kento scrub {n}' to "
+                f"re-pin",
+                f"kento scrub {n}"))
+    if drift == 0:
+        findings.append(_finding(
+            "hold", "ok", "host",
+            "image holds are pinned to their guests' current images", None))
     return findings
 
 
@@ -458,6 +524,7 @@ def run_diagnostics(name=None):
     # Host-level checks run regardless of name.
     checks.extend(_check_apparmor())
     checks.extend(_check_stale_holds())
+    checks.extend(_check_hold_drift())
     checks.extend(_check_vmid_health())
 
     for container_dir, mode, display in instances:

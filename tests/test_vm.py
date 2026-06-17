@@ -438,7 +438,7 @@ class TestStartVm:
 
     @patch("kento.vm.VM_KVM", True)
     @patch("kento.vm.VM_MACHINE", "q35")
-    @patch("kento.vm.VM_MEMORY", 512)
+    @patch("kento.vm.VM_MEMORY", 1024)
     @patch("kento.subprocess_util.subprocess.run",
            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
@@ -484,7 +484,7 @@ class TestStartVm:
 
         # Memory
         m_idx = qemu_args.index("-m")
-        assert qemu_args[m_idx + 1] == "512"
+        assert qemu_args[m_idx + 1] == "1024"
 
         # Machine type
         machine_idx = qemu_args.index("-machine")
@@ -520,7 +520,7 @@ class TestStartVm:
 
         # Memory backend for virtiofs (memfd with share=on)
         obj_idx = qemu_args.index("-object")
-        assert qemu_args[obj_idx + 1] == "memory-backend-memfd,id=mem,size=512M,share=on"
+        assert qemu_args[obj_idx + 1] == "memory-backend-memfd,id=mem,size=1024M,share=on"
 
         # NUMA node
         numa_idx = qemu_args.index("-numa")
@@ -578,7 +578,7 @@ class TestStartVm:
 
     @patch("kento.vm.VM_KVM", True)
     @patch("kento.vm.VM_MACHINE", "q35")
-    @patch("kento.vm.VM_MEMORY", 512)
+    @patch("kento.vm.VM_MEMORY", 1024)
     @patch("kento.subprocess_util.subprocess.run",
            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
     @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
@@ -1112,12 +1112,12 @@ class TestStartVmQemuArgsPassthrough:
         qemu_args = mock_popen.call_args_list[1][0][0]
         # All four entries appear in order at the tail.
         assert qemu_args[-4:] == ["-device", "virtio-rng-pci", "-m", "2048"]
-        # The kento-emitted -m 512 still precedes the pass-through -m 2048;
+        # The kento-emitted -m 1024 still precedes the pass-through -m 2048;
         # QEMU's last-occurrence semantics lets the user override.
         first_m = qemu_args.index("-m")
         last_m = len(qemu_args) - 1 - qemu_args[::-1].index("-m")
         assert first_m < last_m
-        assert qemu_args[first_m + 1] == "512"
+        assert qemu_args[first_m + 1] == "1024"
         assert qemu_args[last_m + 1] == "2048"
 
     @patch("kento.subprocess_util.subprocess.run",

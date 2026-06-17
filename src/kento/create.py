@@ -16,7 +16,7 @@ from kento.errors import (InstanceExistsError, ModeError, StateError,
                           SubprocessError, ValidationError)
 from kento.hook import write_hook
 from kento.inject import write_inject
-from kento.layers import resolve_layers
+from kento.layers import resolve_image_id, resolve_layers
 from kento.locking import kento_lock
 
 logger = logging.getLogger("kento")
@@ -860,6 +860,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
 
         # Write image reference, layer paths, state dir, mode, and name
         (container_dir / "kento-image").write_text(image + "\n")
+        # Record the resolved content-ID alongside the (floating) tag so a
+        # later scrub/diagnose can detect when the tag has moved to a new
+        # image. Skip if it can't be resolved (older podman) — drift detection
+        # simply degrades to a no-op for that guest.
+        _img_id = resolve_image_id(image)
+        if _img_id:
+            (container_dir / "kento-image-id").write_text(_img_id + "\n")
         (container_dir / "kento-layers").write_text(layers + "\n")
         (container_dir / "kento-state").write_text(str(state_dir) + "\n")
         (container_dir / "kento-mode").write_text(mode + "\n")

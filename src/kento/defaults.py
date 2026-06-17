@@ -63,7 +63,7 @@ APPARMOR_SYSTEMD_RULES = ("userns,", "mount,", "umount,", "pivot_root,", "mqueue
 PVE_LXC_UNLIMITED_MEMORY_MB = 17592186044415
 
 # --- VM defaults ---
-VM_MEMORY = 512          # MB
+VM_MEMORY = 1024         # MB
 VM_CORES = 1
 VM_KVM = True
 VM_MACHINE = "q35"

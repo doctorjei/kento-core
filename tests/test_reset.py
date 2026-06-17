@@ -12,11 +12,13 @@ from kento.errors import StateError
 
 @pytest.fixture(autouse=True)
 def _hold_noop():
-    """Default the image-hold backfill to a no-op so unrelated reset tests
+    """Default the image-hold re-pin to a no-op so unrelated reset tests
     don't touch real podman. (`subprocess.run` is a shared global, so patching
     layers.subprocess.run would collide with kento.reset's own patch; patching
-    the function is clean.)"""
-    with patch("kento.reset.ensure_image_hold"):
+    the function is clean.) resolve_image_id is also stubbed so the
+    kento-image-id write doesn't shell out."""
+    with patch("kento.reset.repin_image_hold", return_value=False), \
+         patch("kento.reset.resolve_image_id", return_value=""):
         yield
 
 
@@ -714,12 +716,11 @@ def test_reset_removes_portfwd_active(mock_root, mock_layers, mock_run,
 @patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
 @patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
 @patch("kento.reset.require_root")
-def test_reset_backfills_hold(mock_root, mock_layers, mock_run, tmp_path):
-    """Scrub invokes ensure_image_hold with the image + kento-name.
+def test_reset_repins_hold(mock_root, mock_layers, mock_run, tmp_path):
+    """Scrub invokes repin_image_hold with the image + kento-name.
 
-    The real `podman create --name kento-hold.<name> ... --label
-    io.kento.hold-for=<name>` command is verified in test_layers.py
-    (TestEnsureImageHold); here we only assert reset wires it up.
+    The real remove+create-from-id re-pin is verified in test_layers.py
+    (TestRepinImageHold); here we only assert reset wires it up.
     """
     lxc_dir = tmp_path / "test"
     lxc_dir.mkdir()
@@ -731,18 +732,18 @@ def test_reset_backfills_hold(mock_root, mock_layers, mock_run, tmp_path):
     (lxc_dir / "rootfs").mkdir()
 
     with patch("kento.reset.resolve_container", return_value=lxc_dir), \
-         patch("kento.reset.ensure_image_hold") as mock_ensure:
+         patch("kento.reset.repin_image_hold", return_value=True) as mock_repin:
         reset("test")
 
-    mock_ensure.assert_called_once_with("myimage:latest", "mybox")
+    mock_repin.assert_called_once_with("myimage:latest", "mybox")
 
 
 @patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
 @patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
 @patch("kento.reset.require_root")
-def test_reset_backfill_falls_back_to_name(mock_root, mock_layers, mock_run,
-                                           tmp_path):
-    """No kento-name file -> backfill uses the passed name."""
+def test_reset_repin_falls_back_to_name(mock_root, mock_layers, mock_run,
+                                        tmp_path):
+    """No kento-name file -> re-pin uses the passed name."""
     lxc_dir = tmp_path / "test"
     lxc_dir.mkdir()
     (lxc_dir / "kento-image").write_text("myimage:latest\n")
@@ -752,10 +753,32 @@ def test_reset_backfill_falls_back_to_name(mock_root, mock_layers, mock_run,
     (lxc_dir / "rootfs").mkdir()
 
     with patch("kento.reset.resolve_container", return_value=lxc_dir), \
-         patch("kento.reset.ensure_image_hold") as mock_ensure:
+         patch("kento.reset.repin_image_hold", return_value=False) as mock_repin:
         reset("test")
 
-    mock_ensure.assert_called_once_with("myimage:latest", "test")
+    mock_repin.assert_called_once_with("myimage:latest", "test")
+
+
+@patch("kento.reset.subprocess.run", side_effect=_mock_run_stopped)
+@patch("kento.reset.resolve_layers", return_value="/new/upper:/new/lower")
+@patch("kento.reset.require_root")
+def test_reset_writes_image_id(mock_root, mock_layers, mock_run, tmp_path):
+    """Scrub records the freshly resolved kento-image-id."""
+    lxc_dir = tmp_path / "test"
+    lxc_dir.mkdir()
+    (lxc_dir / "kento-image").write_text("myimage:latest\n")
+    (lxc_dir / "kento-name").write_text("mybox\n")
+    (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+    (lxc_dir / "upper").mkdir()
+    (lxc_dir / "work").mkdir()
+    (lxc_dir / "rootfs").mkdir()
+
+    with patch("kento.reset.resolve_container", return_value=lxc_dir), \
+         patch("kento.reset.repin_image_hold", return_value=False), \
+         patch("kento.reset.resolve_image_id", return_value="sha256:newid"):
+        reset("test")
+
+    assert (lxc_dir / "kento-image-id").read_text().strip() == "sha256:newid"
 
 
 # --- F12: crash-safe upper/work clear ---

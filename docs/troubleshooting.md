@@ -12,7 +12,9 @@ sudo kento diagnose --json   # structured report for tooling
 
 It checks eight categories — orphaned instances (PVE state present but `.conf`
 gone), the AppArmor `generated`/`apparmor_parser` pre-flight, port-forward
-marker state, stale image holds, networkd drop-ins, the cloud-init root-ssh
+marker state, stale image holds (plus image-ID **drift** — a hold pinning a
+different image than its guest currently runs, fixed by `kento scrub <name>`),
+networkd drop-ins, the cloud-init root-ssh
 footgun, leaked overlay/virtiofsd mounts, and PVE vmid allocation — and prints
 a finding with a remediation for each problem. It exits `1` if anything needs
 attention, else `0`, and degrades gracefully when run without root.
@@ -544,7 +546,10 @@ Two safeguards:
 
 - **Self-healing:** `kento scrub <name>` and `kento start <name>` now
   create the hold if it is missing, so older instances get protected on
-  their next start or scrub.
+  their next start or scrub. `scrub` additionally **re-pins** the hold to
+  the freshly resolved image, so if the image tag moved since create the
+  hold follows it (releasing the old image, protecting the new one).
+  `kento diagnose` reports hold/guest image-ID drift when the two disagree.
 - **Safe cleanup:** prefer `kento prune` over `podman system prune -a`.
   It is dry-run by default and removes only *orphaned* holds (whose
   instance no longer exists) plus the images they freed — never an image
