@@ -30,6 +30,12 @@ from kento._network import (  # noqa: F401  (public re-export)
 from kento._diagnosis import (  # noqa: F401  (public re-export)
     DiagnosisDomain, CheckLevel, PruneScope, Finding, Diagnosis, ReclaimReport,
 )
+from kento._platform import (  # noqa: F401  (public re-export)
+    PlatformMode, PlatformProfile, Status,
+)
+from kento._storage import (  # noqa: F401  (public re-export)
+    StorageMode,
+)
 
 # Curated public surface. The source-reference value types are re-exported
 # flat (canonical paths kento.OciReference etc.); the `_references` module is
@@ -50,6 +56,10 @@ __all__ = [
     # diagnosis & report value types (Block 04 — kento._diagnosis)
     "DiagnosisDomain", "CheckLevel", "PruneScope", "Finding", "Diagnosis",
     "ReclaimReport",
+    # platform / lifecycle-status value types (Block 03 — kento._platform)
+    "PlatformMode", "PlatformProfile", "Status",
+    # root-storage value type (Block 03 — kento._storage)
+    "StorageMode",
     # module-level helpers (defined in this module)
     "validate_name", "detect_bridge", "resolve_network", "read_mode",
     "require_root", "detect_mode", "upper_base", "sanitize_image_name",
