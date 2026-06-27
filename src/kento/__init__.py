@@ -27,6 +27,9 @@ from kento._network import (  # noqa: F401  (public re-export)
     HostBinding, GuestTarget, ForwardAddressNotImplemented,
     parse_forward_spec, render_forward_spec, parse_forwards, parse_cidr,
 )
+from kento._diagnosis import (  # noqa: F401  (public re-export)
+    DiagnosisDomain, CheckLevel, PruneScope, Finding, Diagnosis, ReclaimReport,
+)
 
 # Curated public surface. The source-reference value types are re-exported
 # flat (canonical paths kento.OciReference etc.); the `_references` module is
@@ -44,6 +47,9 @@ __all__ = [
     "NetworkMode", "ForwardProtocol", "NetworkConnection",
     "HostBinding", "GuestTarget", "ForwardAddressNotImplemented",
     "parse_forward_spec", "render_forward_spec", "parse_forwards", "parse_cidr",
+    # diagnosis & report value types (Block 04 — kento._diagnosis)
+    "DiagnosisDomain", "CheckLevel", "PruneScope", "Finding", "Diagnosis",
+    "ReclaimReport",
     # module-level helpers (defined in this module)
     "validate_name", "detect_bridge", "resolve_network", "read_mode",
     "require_root", "detect_mode", "upper_base", "sanitize_image_name",
