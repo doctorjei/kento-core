@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from kento._diagnosis import PruneScope, ReclaimReport
 from kento._references import Digest, OciReference, SourceReference
 from kento.errors import ImageNotFoundError, KentoError, StateError
 
@@ -369,6 +370,115 @@ class LayeredImage(Image):
                 _images_logger.warning(
                     "skipping unresolvable image %r: %s", entry, exc)
         return images
+
+    @classmethod
+    def prune(
+        cls, *, scope: PruneScope = PruneScope.DANGLING,
+    ) -> ReclaimReport:
+        """Reclaim DANGLING images; **never touches a held image** (M22).
+
+        Removes unused/dangling images — untagged ``<none>`` layers podman no
+        longer references — and returns a :class:`ReclaimReport` of what was
+        removed (``reclaimed``) and what podman refused (``failed`` = ``(id,
+        reason)`` pairs, surfaced not swallowed — the 1.6.2 contract). This is
+        a store-level GC, so it is a ``classmethod`` mirroring ``pull``/``get``/
+        ``list`` (it manages the store, not one handle); it is **distinct** from
+        the kento orphan-HOLD GC (``images.prune`` / future
+        ``Instance.prune_orphans``).
+
+        The locked M22 signature carries ONE param, ``scope: PruneScope =
+        PruneScope.DANGLING`` (§11.5). ``DANGLING`` is the only 1.0 value (the
+        further provenance scopes land with the lifecycle EPIC, §11.9). Any
+        other ``scope`` value cannot occur in 1.0, but is rejected with a typed
+        :class:`ValidationError` (principle 5 — a typed raise, never a silent
+        no-op or a fabricated result) so a future caller passing an
+        unimplemented scope fails loudly instead of silently pruning DANGLING
+        anyway (gate C).
+
+        There is **NO** ``dry_run`` param: the locked signature has only
+        ``scope``, so ``prune`` EXECUTES and the report is ``dry_run=False``.
+
+        **The held-image invariant is guaranteed, not assumed.** A held image is
+        pinned by a stopped ``kento-hold.<guest>`` container, so podman's
+        ``dangling=true`` filter normally already excludes it — but the spec
+        says *never*, so we EXCLUDE held content explicitly rather than trusting
+        the filter: any dangling id that matches a hold's pinned **content id**
+        (``images._hold_image_ids()`` label values, and ``images._holds()``'s
+        ``{{.Image}}`` field for a modern id-pinned hold) is skipped. We reuse
+        the existing hold knowledge (no forked hold logic) — the same content-id
+        keying :meth:`_is_held` uses, since a dangling image is untagged and so
+        is identified by its **id**, not a ``repo:tag``.
+
+        Raises a typed :class:`SubprocessError` (principle 5) if the dangling
+        enumeration query itself fails (the whole prune failing, distinct from a
+        per-image ``rmi`` refusal which is surfaced in ``failed``).
+        """
+        from kento import images as _images_mod
+        from kento import layers as _layers
+        from kento.errors import SubprocessError
+        from kento.subprocess_util import run_or_die
+
+        if scope is not PruneScope.DANGLING:
+            from kento.errors import ValidationError
+
+            raise ValidationError(
+                f"unsupported prune scope: {scope!r}"
+                " — only PruneScope.DANGLING is supported in this release"
+                " (further provenance scopes land with the image-lifecycle"
+                " EPIC)."
+            )
+
+        # Enumerate dangling images by content id ({{.Id}} = "sha256:..." — the
+        # same full form layers.resolve_image_id yields, so it compares
+        # apples-to-apples against a hold's pinned content id). A dangling image
+        # is untagged ("<none>"), so its id IS its identifier in the report.
+        result = run_or_die(
+            [*_layers._podman_cmd(), "images",
+             "--filter", "dangling=true", "--format", "{{.Id}}"],
+            "list dangling images",
+        )
+
+        # Held content ids — guarantee the "never touches a held image"
+        # invariant ourselves rather than trusting podman's filter. Compose the
+        # existing hold knowledge (no forked hold logic): the authoritative
+        # io.kento.hold-image-id label values, plus _holds()'s {{.Image}} field
+        # (the pinned content id for a modern hold; a repo:tag for a legacy
+        # hold, which can never equal a dangling image's id and so is inert).
+        held_ids: set[str] = set(_images_mod._hold_image_ids().values())
+        for _name, img in _images_mod._holds():
+            if img:
+                held_ids.add(img)
+
+        reclaimed: list[str] = []
+        failed: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for line in result.stdout.splitlines():
+            image_id = line.strip()
+            if not image_id or image_id in seen:
+                continue
+            seen.add(image_id)
+            if image_id in held_ids:
+                # Belt-and-suspenders: a held image must never be removed even
+                # if it somehow surfaced as dangling (spec invariant).
+                _images_logger.debug(
+                    "prune: skipping held dangling image %s", image_id)
+                continue
+            try:
+                run_or_die(
+                    [*_layers._podman_cmd(), "rmi", image_id],
+                    "remove dangling image", name=image_id,
+                )
+                reclaimed.append(image_id)
+            except SubprocessError as exc:
+                # Surface the refusal (1.6.2 contract) — do NOT swallow it, and
+                # do NOT abort the batch on one refusal.
+                failed.append((image_id, str(exc)))
+
+        return ReclaimReport(
+            dry_run=False,
+            reclaimed=tuple(reclaimed),
+            failed=tuple(failed),
+        )
 
     def remove(self, *, force: bool = False) -> None:
         """Remove THIS image from the local store (M23). ``-> None``.
