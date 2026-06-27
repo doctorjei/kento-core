@@ -19,6 +19,29 @@ from kento.errors import (  # noqa: F401  (public re-export)
     KentoError, ValidationError, InstanceNotFoundError, InstanceExistsError,
     ImageNotFoundError, ModeError, StateError, SubprocessError,
 )
+from kento._references import (  # noqa: F401  (public re-export)
+    MalformedReference, Endpoint, Digest, SourceReference, OciReference,
+)
+
+# Curated public surface. The source-reference value types are re-exported
+# flat (canonical paths kento.OciReference etc.); the `_references` module is
+# internal. Errors are re-exported from kento.errors. The remaining names are
+# the long-standing module-level helpers defined below.
+__all__ = [
+    # exception hierarchy (kento.errors)
+    "KentoError", "ValidationError", "InstanceNotFoundError",
+    "InstanceExistsError", "ImageNotFoundError", "ModeError", "StateError",
+    "SubprocessError",
+    # source-reference value types (Block 01 — kento._references)
+    "MalformedReference", "Endpoint", "Digest", "SourceReference",
+    "OciReference",
+    # module-level helpers (defined in this module)
+    "validate_name", "detect_bridge", "resolve_network", "read_mode",
+    "require_root", "detect_mode", "upper_base", "sanitize_image_name",
+    "next_instance_name", "pve_config_exists", "is_running",
+    "resolve_container", "resolve_in_namespace", "resolve_any",
+    "check_name_conflict", "LXC_BASE", "VM_BASE",
+]
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
