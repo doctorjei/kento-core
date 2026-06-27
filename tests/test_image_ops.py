@@ -403,3 +403,207 @@ def test_ops_do_not_wrap_display_list_images():
                       side_effect=lambda oci: _resolved_img(oci)):
         LayeredImage.list()
     m_display.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# prune (M22) — reclaim DANGLING images; NEVER a held one; surface refusals.
+# Block 07. Classmethod (store-level GC), locked sig scope=PruneScope.DANGLING,
+# no dry_run, ReclaimReport(dry_run=False, ...).
+# --------------------------------------------------------------------------- #
+
+ID_A = f"sha256:{'a' * 64}"
+ID_B = f"sha256:{'b' * 64}"
+ID_C = f"sha256:{'c' * 64}"
+
+
+def _dispatch_run(*, dangling, rmi_fail=()):
+    """side_effect dispatching the dangling-images query and per-id rmi calls.
+
+    ``dangling`` = the {{.Id}} lines podman returns; ``rmi_fail`` = a set of ids
+    whose ``podman rmi`` returns non-zero (a refusal surfaced in ``failed``).
+    """
+    rmi_fail = set(rmi_fail)
+
+    def _run(*a, **k):
+        argv = a[0]
+        if "images" in argv and "dangling=true" in argv:
+            body = "".join(f"{i}\n" for i in dangling)
+            return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+        if "rmi" in argv:
+            target = argv[-1]
+            if target in rmi_fail:
+                return subprocess.CompletedProcess(
+                    argv, 2, stdout="", stderr="image is in use")
+            return _ok(argv)
+        return _ok(argv)
+
+    return _run
+
+
+def test_prune_signature_is_locked_scope_only_no_dry_run():
+    import inspect
+
+    sig = inspect.signature(LayeredImage.prune)
+    # Exactly one param `scope`, keyword-only, default PruneScope.DANGLING.
+    assert list(sig.parameters) == ["scope"]
+    p = sig.parameters["scope"]
+    assert p.kind is inspect.Parameter.KEYWORD_ONLY
+    from kento import PruneScope
+
+    assert p.default is PruneScope.DANGLING
+    # No un-spec'd dry_run / yes parameter.
+    assert "dry_run" not in sig.parameters
+    assert "yes" not in sig.parameters
+    # It is a classmethod (store-level GC), mirroring pull/get/list.
+    assert isinstance(inspect.getattr_static(LayeredImage, "prune"), classmethod)
+
+
+def test_prune_removes_dangling_and_reports_dry_run_false():
+    from kento import ReclaimReport
+
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
+        report = LayeredImage.prune()
+
+    assert isinstance(report, ReclaimReport)
+    # prune EXECUTES — never a dry run (locked sig has no dry_run param).
+    assert report.dry_run is False
+    assert set(report.reclaimed) == {ID_A, ID_B}
+    assert report.failed == ()
+    assert report.ok is True
+    # Delegation: a `podman images --filter dangling=true` enumeration, then a
+    # `podman rmi <id>` per candidate.
+    cmds = [c.args[0] for c in m_run.call_args_list]
+    assert any("images" in c and "dangling=true" in c for c in cmds)
+    assert ["podman", "rmi", ID_A] in cmds
+    assert ["podman", "rmi", ID_B] in cmds
+
+
+def test_prune_empty_store_returns_empty_report():
+    from kento import ReclaimReport
+
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[])) as m_run:
+        report = LayeredImage.prune()
+
+    assert report == ReclaimReport(dry_run=False, reclaimed=(), failed=())
+    # No rmi attempted on an empty dangling set.
+    assert all("rmi" not in c.args[0] for c in m_run.call_args_list)
+
+
+def test_prune_NEVER_touches_a_held_image_even_if_listed_via_label():
+    # THE spec invariant: a held image that somehow appears as dangling must be
+    # skipped. Hold identified by CONTENT ID (io.kento.hold-image-id label),
+    # matched against the dangling {{.Id}} — guaranteed, not trusting podman's
+    # filter to have excluded it.
+    with patch("kento.images._hold_image_ids",
+               return_value={"guest-a": ID_A}), \
+         patch("kento.images._holds", return_value=[("guest-a", ID_A)]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
+        report = LayeredImage.prune()
+
+    # ID_A is held → NEVER removed; only the genuinely-unreferenced ID_B is.
+    assert set(report.reclaimed) == {ID_B}
+    rmi_cmds = [c.args[0] for c in m_run.call_args_list if "rmi" in c.args[0]]
+    assert ["podman", "rmi", ID_A] not in rmi_cmds  # held image untouched
+    assert ["podman", "rmi", ID_B] in rmi_cmds
+
+
+def test_prune_held_skip_via_holds_image_field_no_label():
+    # A modern hold whose {{.Image}} is the content id but the label map missed
+    # it — the _holds() fallback must still pin (exclude) it.
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[("guest-a", ID_A)]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
+        report = LayeredImage.prune()
+
+    assert set(report.reclaimed) == {ID_B}
+    rmi_cmds = [c.args[0] for c in m_run.call_args_list if "rmi" in c.args[0]]
+    assert ["podman", "rmi", ID_A] not in rmi_cmds
+
+
+def test_prune_reuses_existing_hold_knowledge_no_forked_logic():
+    # Held-detection composes the existing images._hold_image_ids/_holds — it
+    # does NOT re-query holds itself.
+    with patch("kento.images._hold_image_ids", return_value={}) as m_ids, \
+         patch("kento.images._holds", return_value=[]) as m_holds, \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A])):
+        LayeredImage.prune()
+    assert m_ids.called
+    assert m_holds.called
+
+
+def test_prune_surfaces_rmi_refusal_in_failed_not_swallowed():
+    # A `podman rmi` refusal is surfaced as a (id, reason) pair in `failed`,
+    # never swallowed (1.6.2 contract); the batch does NOT abort — the other
+    # candidate still gets removed.
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A, ID_B],
+                                         rmi_fail=[ID_A])):
+        report = LayeredImage.prune()
+
+    assert report.reclaimed == (ID_B,)            # batch continued past ID_A
+    assert len(report.failed) == 1
+    target, reason = report.failed[0]
+    assert target == ID_A
+    assert reason                                  # a non-empty reason string
+    assert report.ok is False                      # derived from failed
+
+
+def test_prune_raises_typed_when_enumeration_query_fails():
+    # A failure of the dangling-images enumeration is the WHOLE prune failing —
+    # that DOES raise a typed SubprocessError (distinct from a per-image refusal,
+    # which is surfaced in `failed`).
+    def _fail(*a, **k):
+        return subprocess.CompletedProcess(a[0], 1, stdout="",
+                                           stderr="podman down")
+
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[]), \
+         patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
+        with pytest.raises(SubprocessError):
+            LayeredImage.prune()
+
+
+def test_prune_dedupes_repeated_dangling_ids():
+    # A defensively-deduped enumeration: a repeated id is removed once.
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A, ID_A])) as m_run:
+        report = LayeredImage.prune()
+
+    assert report.reclaimed == (ID_A,)
+    rmi_calls = [c for c in m_run.call_args_list
+                 if "rmi" in c.args[0] and c.args[0][-1] == ID_A]
+    assert len(rmi_calls) == 1
+
+
+def test_prune_rejects_unsupported_scope_typed_raise():
+    # DANGLING is the only 1.0 value. A future/other scope value cannot occur
+    # today, but must fail loudly (typed ValidationError) rather than silently
+    # pruning DANGLING anyway (gate C). Simulate one with a stand-in member.
+    from enum import Enum
+
+    from kento.errors import ValidationError
+
+    class _FakeScope(str, Enum):
+        OTHER = "other"
+
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=_dispatch_run(dangling=[ID_A])) as m_run:
+        with pytest.raises(ValidationError):
+            LayeredImage.prune(scope=_FakeScope.OTHER)
+    # Rejected BEFORE any podman call.
+    m_run.assert_not_called()
