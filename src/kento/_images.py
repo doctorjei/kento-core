@@ -32,13 +32,16 @@ the locator's OCI-only ``digest`` pin — §4.3).
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from kento._references import Digest, OciReference, SourceReference
-from kento.errors import ImageNotFoundError
+from kento.errors import ImageNotFoundError, KentoError, StateError
+
+_images_logger = logging.getLogger("kento")
 
 __all__ = [
     "DiskFormat",
@@ -272,6 +275,186 @@ class LayeredImage(Image):
                 f" — is it present in the local store?  kento pull {ref}"
             )
         return Digest.parse(raw)
+
+    # ------------------------------------------------------------------- #
+    # Content lifecycle (§4.4, §11.5 M19–M21/M23) — acquire / enumerate /
+    # remove. ADDITIVE wrappers over kento.layers / podman; produce/manage
+    # LayeredImages (the 1.0 OCI-store representation, §4.4).
+    #
+    # PLACEMENT (disclosed): §11.5 phrases these `Image.pull -> Self`, but for
+    # 1.0 they are OCI-store ops that produce/manage LayeredImages (§4.4), and
+    # `Image` is a genuine ABC (abstract prepare/mount/...) that cannot be
+    # instantiated — so a classmethod resolving to `cls(...)` only works on the
+    # concrete LayeredImage. They live here as LayeredImage classmethods
+    # (`pull`/`get`/`list`) + instance `remove`; `Self` is satisfied (cls IS
+    # LayeredImage). A future base-`Image` dispatch (when VolumeImage fetch
+    # lands) is purely additive / non-breaking.
+    # ------------------------------------------------------------------- #
+    @classmethod
+    def pull(cls, ref: "str | OciReference") -> "LayeredImage":
+        """Acquire an OCI image from a registry into the local store (M19).
+
+        ``podman pull <ref>``, then resolve the now-local image to a populated
+        handle via :meth:`resolve`. Accepts a ``str`` or an ``OciReference``:
+        a ``str`` is parsed through ``OciReference.parse`` (§2 principle 3 — we
+        never hand an unvalidated string to the shell; a malformed ref raises
+        ``MalformedReference`` BEFORE any podman call). No ``force`` (§11.5 M19:
+        podman re-pulls moved tags / no-ops identical digests). Raises a typed
+        ``SubprocessError`` on pull failure (principle 5), never a sentinel.
+        """
+        from kento import layers as _layers
+        from kento.subprocess_util import run_or_die
+
+        oci = cls._coerce_ref(ref)
+        rendered = oci.render()
+        run_or_die(
+            [*_layers._podman_cmd(), "pull", rendered],
+            "pull image",
+            name=rendered,
+        )
+        return cls.resolve(oci)
+
+    @classmethod
+    def get(cls, ref: "str | OciReference") -> "LayeredImage":
+        """Resolve an ALREADY-LOCAL image to a handle; no network (M20).
+
+        Read-only: :meth:`resolve` queries the local podman store only (no
+        ``pull``). When the image is absent ``layers.resolve_layers`` raises
+        ``ImageNotFoundError`` — :meth:`get` lets that propagate (mirrors
+        ``Instance.get``); it does NOT fabricate a handle for a missing image
+        (gate C). A ``str`` ref is parsed/validated as in :meth:`pull`.
+        """
+        return cls.resolve(cls._coerce_ref(ref))
+
+    @classmethod
+    def list(cls) -> "list[LayeredImage]":
+        """Enumerate local OCI images as resolved handles (M21).
+
+        Queries ``podman images`` for repository references (new, additive — we
+        do NOT wrap ``images.list_images()``, which renders a DISPLAY TABLE
+        STRING, not objects), then resolves each to a ``LayeredImage``.
+
+        TOTAL OVER THE STORE (disclosed policy, grounded in §2 + §7.2's
+        ``Status.UNKNOWN`` totality rationale): a single image that fails to
+        resolve mid-enumeration — e.g. a tag that raced a removal, or an
+        unexpected store layout for one entry — is SKIPPED WITH A LOG, not
+        raised, so one bad image cannot blow up enumeration of every other. A
+        hard failure of the enumerating query itself (``podman images``) is a
+        different thing and DOES raise a typed ``SubprocessError`` — that is the
+        whole listing failing, not one entry. NO provenance flag in 1.0 (§11.5
+        M21 — that lands with the lifecycle EPIC).
+        """
+        from kento import layers as _layers
+        from kento.subprocess_util import run_or_die
+
+        result = run_or_die(
+            [*_layers._podman_cmd(), "images",
+             "--format", "{{.Repository}}:{{.Tag}}"],
+            "list images",
+        )
+        images: list[LayeredImage] = []
+        for line in result.stdout.splitlines():
+            entry = line.strip()
+            # podman renders a dangling (untagged) image as "<none>:<none>";
+            # such an entry has no resolvable repository ref, so skip it (it is
+            # surfaced by the lifecycle-EPIC provenance work, not 1.0 list).
+            if not entry or "<none>" in entry:
+                continue
+            try:
+                oci = OciReference.parse(entry)
+                images.append(cls.resolve(oci))
+            except KentoError as exc:
+                # Total over the store: one unresolvable entry is logged and
+                # skipped, never fatal to the whole enumeration.
+                _images_logger.warning(
+                    "skipping unresolvable image %r: %s", entry, exc)
+        return images
+
+    def remove(self, *, force: bool = False) -> None:
+        """Remove THIS image from the local store (M23). ``-> None``.
+
+        ``podman rmi <ref>``. REFUSES BY DEFAULT if a kento hold pins THIS
+        image's content (a stopped ``kento-hold.<name>`` container — see
+        ``layers``/``images``): removing a held image would break the guest that
+        pinned it. The hold is identified by the **content id** the image was
+        pinned from, matched against this handle's resolved ``self.id``
+        (:meth:`_is_held` — NOT the ``repo:tag``, which would never match a
+        modern id-pinned hold). ``force`` removes past the hold (``podman rmi
+        --force``, which detaches the hold container). Raises ``StateError``
+        when held and not forced; raises a typed ``SubprocessError`` on a podman
+        failure (principle 5). Reuses the existing hold knowledge
+        (``images._hold_image_ids()`` / ``images._holds()``) — does NOT
+        reimplement hold detection.
+        """
+        from kento import layers as _layers
+        from kento.subprocess_util import run_or_die
+
+        rendered = self.source.render()
+        if not force and self._is_held(rendered):
+            raise StateError(
+                f"image is held by a kento guest and was not removed: {rendered}"
+                "\n  A stopped kento-hold.<guest> container pins it so the"
+                " guest's overlay base stays present."
+                "\n  Remove the guest(s) first, or force removal with"
+                " remove(force=True) (kento image rm --force)."
+            )
+        cmd = [*_layers._podman_cmd(), "rmi"]
+        if force:
+            cmd.append("--force")
+        cmd.append(rendered)
+        run_or_die(cmd, "remove image", name=rendered)
+
+    def _is_held(self, rendered_ref: str) -> bool:
+        """True iff a kento hold container pins THIS image's content (M23).
+
+        Ground truth (``layers.create_image_hold``): the modern hold is created
+        FROM THE RESOLVED IMAGE ID and records it in an ``io.kento.hold-image-id``
+        label; only a legacy hold (older podman, id unresolvable at create time)
+        pins by tag. So a hold's image is identified by a **content id**, NOT a
+        ``repo:tag`` — comparing ``_holds()``'s ``{{.Image}}`` to a re-normalized
+        ``source.render()`` would NEVER match the common case and would let a
+        held image be removed without ``force`` (the M23 violation B1).
+
+        We therefore key on the content **id this handle already carries**
+        (``self.id``, a ``Digest`` resolved via the same ``resolve_image_id``
+        the hold used — apples-to-apples), composing the existing hold knowledge
+        (no forked hold logic):
+
+        * the authoritative ``io.kento.hold-image-id`` label
+          (``images._hold_image_ids()`` — the purpose-built content-id record); and
+        * ``images._holds()``'s ``{{.Image}}`` field, which is that same content
+          id for a modern hold OR the ``repo:tag`` for a legacy hold — so we
+          accept a match there against EITHER the content id or the rendered tag.
+        """
+        from kento import images as _images_mod
+
+        # "sha256:..." — the same form layers.resolve_image_id ({{.Id}}) yields,
+        # so it compares apples-to-apples against the hold's pinned content id.
+        content_id = self.id.render()
+
+        # Authoritative: the io.kento.hold-image-id label records the pinned id.
+        if content_id in _images_mod._hold_image_ids().values():
+            return True
+        # Fallback: _holds() {{.Image}} is the content id (modern hold) or the
+        # repo:tag (legacy hold pinned by ref) — match either so legacy holds
+        # still pin correctly.
+        for _name, img in _images_mod._holds():
+            if img and (img == content_id or img == rendered_ref):
+                return True
+        return False
+
+    @staticmethod
+    def _coerce_ref(ref: "str | OciReference") -> OciReference:
+        """Normalize a ``str | OciReference`` argument to an ``OciReference``.
+
+        A ``str`` is parsed through ``OciReference.parse`` (faithful, raises
+        ``MalformedReference`` on a bad ref) so no unvalidated string ever
+        reaches the shell (§2 principle 3); an ``OciReference`` passes through
+        unchanged. The single coercion point shared by ``pull``/``get``.
+        """
+        if isinstance(ref, OciReference):
+            return ref
+        return OciReference.parse(ref)
 
     # ------------------------------------------------------------------- #
     # Runtime lifecycle (§4.4) — ADDITIVE wrappers over kento.layers/kento.vm.
