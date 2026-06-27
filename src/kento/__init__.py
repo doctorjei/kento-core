@@ -36,6 +36,9 @@ from kento._platform import (  # noqa: F401  (public re-export)
 from kento._storage import (  # noqa: F401  (public re-export)
     StorageMode,
 )
+from kento._images import (  # noqa: F401  (public re-export)
+    DiskFormat, Layer, Image, LayeredImage, VolumeImage, CompositeImage,
+)
 
 # Curated public surface. The source-reference value types are re-exported
 # flat (canonical paths kento.OciReference etc.); the `_references` module is
@@ -60,6 +63,9 @@ __all__ = [
     "PlatformMode", "PlatformProfile", "Status",
     # root-storage value type (Block 03 — kento._storage)
     "StorageMode",
+    # image family value types (Block 05 — kento._images)
+    "DiskFormat", "Layer", "Image", "LayeredImage", "VolumeImage",
+    "CompositeImage",
     # module-level helpers (defined in this module)
     "validate_name", "detect_bridge", "resolve_network", "read_mode",
     "require_root", "detect_mode", "upper_base", "sanitize_image_name",
