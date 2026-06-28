@@ -79,6 +79,8 @@ __all__ = [
     "check_name_conflict", "LXC_BASE", "VM_BASE",
     # module-level diagnosis entry point (Block 10 — global host+images+instances)
     "diagnose",
+    # module-level library version (Block 13, M26 — a property of the library)
+    "version",
 ]
 
 LXC_BASE = Path("/var/lib/lxc")
@@ -577,3 +579,17 @@ def diagnose() -> "Diagnosis":  # noqa: F821  (Diagnosis re-exported above)
 
     report = _diagnose_submodule.run_diagnostics(None)
     return diagnosis_from_report(report)
+
+
+def version() -> str:
+    """Return the installed ``kento-core`` version string (§11.7 M26).
+
+    A module-level function (NOT a method — it is a property of the library, not
+    of any one instance, mirroring ``kento.diagnose()``). Minimal by design: it
+    returns the ``__version__`` resolved at import from ``importlib.metadata``
+    (the installed distribution's version), or ``"unknown"`` if the package
+    metadata is unavailable (e.g. running straight from a source tree without an
+    installed dist). A richer capability/feature-flag struct can come later,
+    non-breakingly, if a consumer needs one (§11.7).
+    """
+    return __version__

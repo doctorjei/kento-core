@@ -1692,3 +1692,368 @@ def test_plain_create_is_not_a_context_manager(tmp_path):
 def test_instance_has_no_enter_exit():
     assert not hasattr(Instance, "__enter__")
     assert not hasattr(Instance, "__exit__")
+
+
+# --------------------------------------------------------------------------- #
+# Block 13 — interactive/runtime methods (ADDITIVE + 1 authorized exec_cmd
+# touch): attach (M12, base) / exec (M13, SC) / logs (M14, SC) / suspend+resume
+# (M17/M18, VM). attach/exec/suspend/resume WRAP their runtime func; logs is an
+# additive captured-line generator. Mocked runtime; no live process runs.
+# --------------------------------------------------------------------------- #
+
+
+# -- M12 attach: on the BASE, delegates for all modes, drops int->None --------
+
+
+@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
+def test_attach_delegates_all_modes(tmp_path, mode):
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.attach.attach", return_value=0) as mock_attach:
+        result = inst.attach()
+    # Delegates to the runtime by name (it re-dispatches per mode internally).
+    mock_attach.assert_called_once_with(inst.name)
+    # int -> None (interactive console, not a status check; brief JC3).
+    assert result is None
+
+
+def test_attach_is_on_base_instance():
+    # M12 placement: attach is shared by all kinds, so it lives on the base —
+    # both concrete kinds inherit the SAME method object.
+    assert SystemContainer.attach is Instance.attach
+    assert VirtualMachine.attach is Instance.attach
+
+
+def test_attach_drops_nonzero_exit_code(tmp_path):
+    # Even a non-zero runtime return is dropped — attach is not a status check.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.attach.attach", return_value=3):
+        assert inst.attach() is None
+
+
+def test_attach_dead_handle_raises(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    inst._dead = True
+    with patch("kento.attach.attach") as mock_attach:
+        with pytest.raises(InstanceNotFoundError):
+            inst.attach()
+    mock_attach.assert_not_called()
+
+
+# -- M13 exec: SC-only; threads tty/user/env; returns code; no raise ----------
+
+
+def test_exec_only_on_system_container():
+    assert hasattr(SystemContainer, "exec")
+    # A VM has no in-guest agent -> exec is NOT on VirtualMachine (§11.3).
+    assert not hasattr(VirtualMachine, "exec")
+
+
+def test_exec_delegates_with_defaults(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.exec_cmd.exec_cmd", return_value=0) as mock_exec:
+        rc = inst.exec(["ls", "-la"])
+    mock_exec.assert_called_once_with(
+        inst.name, ["ls", "-la"], tty=False, user=None, env=None,
+    )
+    assert rc == 0
+
+
+def test_exec_threads_tty_user_env(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.exec_cmd.exec_cmd", return_value=0) as mock_exec:
+        inst.exec(["id"], tty=True, user="alice", env={"K": "V"})
+    mock_exec.assert_called_once_with(
+        inst.name, ["id"], tty=True, user="alice", env={"K": "V"},
+    )
+
+
+def test_exec_normalizes_command_to_list(tmp_path):
+    # M13 takes a Sequence[str]; a tuple is normalized to the list exec_cmd wants.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.exec_cmd.exec_cmd", return_value=0) as mock_exec:
+        inst.exec(("echo", "hi"))
+    passed = mock_exec.call_args[0][1]
+    assert passed == ["echo", "hi"]
+    assert isinstance(passed, list)
+
+
+def test_exec_returns_nonzero_without_raising(tmp_path):
+    # §11.9 / M13: non-zero is normal info, returned not raised.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.exec_cmd.exec_cmd", return_value=2):
+        assert inst.exec(["grep", "x", "/nope"]) == 2
+
+
+def test_exec_dead_handle_raises(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    inst._dead = True
+    with patch("kento.exec_cmd.exec_cmd") as mock_exec:
+        with pytest.raises(InstanceNotFoundError):
+            inst.exec(["ls"])
+    mock_exec.assert_not_called()
+
+
+# -- M14 logs: SC-only; captured-line generator; argv from follow/lines -------
+
+
+def test_logs_only_on_system_container():
+    assert hasattr(SystemContainer, "logs")
+    assert not hasattr(VirtualMachine, "logs")
+
+
+def test_logs_argv_snapshot_lxc(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    # follow=False, no lines: a bare snapshot.
+    assert inst._logs_argv(follow=False, lines=None) == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl"]
+
+
+def test_logs_argv_lines_tail(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst._logs_argv(follow=False, lines=50) == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl", "-n", "50"]
+
+
+def test_logs_argv_follow(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst._logs_argv(follow=True, lines=None) == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl", "-f"]
+
+
+def test_logs_argv_follow_with_lines(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst._logs_argv(follow=True, lines=10) == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl", "-f", "-n", "10"]
+
+
+def test_logs_argv_pve_lxc_uses_pct_exec_and_vmid(tmp_path):
+    d = _make_for_mode(tmp_path, "pve")  # dir name "200" IS the vmid
+    inst = _snapshot(d, "pve")
+    assert inst._logs_argv(follow=False, lines=5) == [
+        "pct", "exec", "200", "--", "journalctl", "-n", "5"]
+
+
+def test_logs_negative_lines_rejected(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with pytest.raises(ValidationError, match="must be >= 0"):
+        inst._logs_argv(follow=False, lines=-1)
+
+
+def test_logs_dead_handle_raises(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    inst._dead = True
+    with pytest.raises(InstanceNotFoundError):
+        inst.logs()
+
+
+class _FakeStdout:
+    """A fake text stdout: iterates the given lines, tracks close()."""
+
+    def __init__(self, lines):
+        self._iter = iter(lines)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._iter)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeProc:
+    """A fake Popen: scripted stdout + poll/terminate/wait/kill tracking."""
+
+    def __init__(self, lines, *, finishes=True):
+        self.stdout = _FakeStdout(lines)
+        # finishes=True => the child exits on its own (poll() goes non-None
+        # after wait); False => a `journalctl -f` that runs until terminated.
+        self._finishes = finishes
+        self._exited = False
+        self.terminated = False
+        self.killed = False
+        self.waited = False
+
+    def poll(self):
+        return 0 if self._exited else None
+
+    def wait(self, timeout=None):
+        self.waited = True
+        self._exited = True
+        return 0
+
+    def terminate(self):
+        self.terminated = True
+        self._exited = True
+
+    def kill(self):
+        self.killed = True
+        self._exited = True
+
+
+def test_logs_yields_decoded_lines_and_reaps_on_eof(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    proc = _FakeProc(["line one\n", "line two\n"])
+    with patch("kento._instances.subprocess.Popen", return_value=proc) as mp:
+        out = list(inst.logs(lines=2))
+    # Newlines stripped; finite snapshot collected via list().
+    assert out == ["line one", "line two"]
+    # Popen got the snapshot argv with piped stdout, text mode.
+    args, kwargs = mp.call_args
+    assert args[0] == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl", "-n", "2"]
+    assert kwargs["text"] is True
+    # On EOF the child is reaped and its pipe closed (no leak).
+    assert proc.stdout.closed
+
+
+def test_logs_decode_uses_errors_replace(tmp_path):
+    # The decode is configured errors="replace" so a bad byte can't crash it.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    proc = _FakeProc(["ok\n"])
+    with patch("kento._instances.subprocess.Popen", return_value=proc) as mp:
+        list(inst.logs())
+    assert mp.call_args.kwargs["encoding"] == "utf-8"
+    assert mp.call_args.kwargs["errors"] == "replace"
+
+
+def test_logs_follow_terminates_child_on_early_close(tmp_path):
+    # The follow=True (`journalctl -f`) child must NOT leak when the caller stops
+    # iterating early: closing the generator terminates the child (brief JC2).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    proc = _FakeProc(["a\n", "b\n", "c\n"], finishes=False)
+    with patch("kento._instances.subprocess.Popen", return_value=proc):
+        gen = inst.logs(follow=True)
+        first = next(gen)        # pull one live line
+        assert first == "a"
+        gen.close()              # caller stops early -> GeneratorExit
+    # The follower was terminated and its pipe closed.
+    assert proc.terminated
+    assert proc.stdout.closed
+    assert not proc.killed       # it honored SIGTERM (no SIGKILL needed)
+
+
+def test_logs_follow_break_out_of_loop_reaps(tmp_path):
+    # A `break` out of the for-loop is the idiomatic early stop; Python turns the
+    # generator GC/close into GeneratorExit -> the child is reaped.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    proc = _FakeProc(["x\n", "y\n", "z\n"], finishes=False)
+    with patch("kento._instances.subprocess.Popen", return_value=proc):
+        collected = []
+        for line in inst.logs(follow=True):
+            collected.append(line)
+            if len(collected) == 2:
+                break
+    assert collected == ["x", "y"]
+    assert proc.terminated
+    assert proc.stdout.closed
+
+
+def test_logs_follow_sigkill_if_term_ignored(tmp_path):
+    # If the child ignores SIGTERM (wait times out), we escalate to SIGKILL so
+    # the follower can never outlive the iterator.
+    import subprocess as _sp
+
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+
+    class _StubbornProc(_FakeProc):
+        def __init__(self):
+            super().__init__(["a\n"], finishes=False)
+            self._term_waits = 0
+
+        def terminate(self):
+            self.terminated = True  # but does NOT exit
+
+        def wait(self, timeout=None):
+            if timeout is not None and not self.killed:
+                # The post-terminate bounded wait times out (still running).
+                raise _sp.TimeoutExpired(cmd="journalctl", timeout=timeout)
+            self.waited = True
+            self._exited = True
+            return 0
+
+    proc = _StubbornProc()
+    with patch("kento._instances.subprocess.Popen", return_value=proc):
+        gen = inst.logs(follow=True)
+        next(gen)
+        gen.close()
+    assert proc.terminated
+    assert proc.killed
+    assert proc.stdout.closed
+
+
+# -- M17/M18 suspend/resume: VM-only; delegate + self-update _status ----------
+
+
+def test_suspend_resume_only_on_vm():
+    assert hasattr(VirtualMachine, "suspend")
+    assert hasattr(VirtualMachine, "resume")
+    assert not hasattr(SystemContainer, "suspend")
+    assert not hasattr(SystemContainer, "resume")
+
+
+@pytest.mark.parametrize("mode", ["vm", "pve-vm"])
+def test_suspend_delegates_and_sets_suspended(tmp_path, mode):
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.suspend.suspend") as mock_suspend:
+        inst.suspend()
+    mock_suspend.assert_called_once_with(inst.name)
+    # M17: self-update to the LITERAL SUSPENDED (not via _resolve_status, which
+    # cannot see a paused VM — it reports RUNNING).
+    assert inst.status is Status.SUSPENDED
+
+
+@pytest.mark.parametrize("mode", ["vm", "pve-vm"])
+def test_resume_delegates_and_sets_running(tmp_path, mode):
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    inst._status = Status.SUSPENDED
+    with patch("kento.suspend.resume") as mock_resume:
+        inst.resume()
+    mock_resume.assert_called_once_with(inst.name)
+    assert inst.status is Status.RUNNING
+
+
+def test_suspend_does_not_update_status_on_failure(tmp_path):
+    # If the runtime raises, the self-update must NOT happen (status untouched).
+    from kento.errors import StateError
+
+    d = _make_for_mode(tmp_path, "vm")
+    inst = _snapshot(d, "vm")
+    before = inst.status
+    with patch("kento.suspend.suspend", side_effect=StateError("not running")):
+        with pytest.raises(StateError):
+            inst.suspend()
+    assert inst.status is before
+
+
+def test_suspend_dead_handle_raises(tmp_path):
+    d = _make_for_mode(tmp_path, "vm")
+    inst = _snapshot(d, "vm")
+    inst._dead = True
+    with patch("kento.suspend.suspend") as mock_suspend:
+        with pytest.raises(InstanceNotFoundError):
+            inst.suspend()
+    mock_suspend.assert_not_called()

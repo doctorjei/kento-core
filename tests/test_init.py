@@ -847,3 +847,25 @@ class TestPveConfigExists:
         existing behavior rather than crash or wrongly declare gone)."""
         with patch("kento.pve.PVE_DIR", tmp_path):
             assert pve_config_exists("100", "pve") is True
+
+
+# --------------------------------------------------------------------------- #
+# Block 13 — kento.version() (M26): module-level library-version function.
+# --------------------------------------------------------------------------- #
+
+
+def test_version_returns_installed_version_string():
+    import kento
+
+    # version() is a module-level function (NOT a method) returning the resolved
+    # __version__ string (importlib.metadata at import, or "unknown").
+    assert kento.version() == kento.__version__
+    assert isinstance(kento.version(), str)
+    assert kento.version()  # non-empty
+
+
+def test_version_in_public_surface():
+    import kento
+
+    assert "version" in kento.__all__
+    assert callable(kento.version)
