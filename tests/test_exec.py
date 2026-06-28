@@ -126,3 +126,104 @@ def test_exec_default_namespace_is_none(mock_root, mock_run, tmp_path):
         exec_cmd("mybox", ["ls"])
 
     mock_resolve.assert_called_once_with("mybox", None)
+
+
+# --------------------------------------------------------------------------- #
+# Block 13 — the authorized tty/user/env touch (M13). The DEFAULT path stays
+# byte-identical (covered by the per-mode tests above); these cover the new
+# command construction. Mocked subprocess; no live process runs.
+# --------------------------------------------------------------------------- #
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_default_path_byte_identical_lxc(mock_root, mock_run, tmp_path):
+    # Explicitly pin the default-path argv: tty=False, user=None, env=None must
+    # produce EXACTLY the pre-touch command (no env/runuser wrapping).
+    d = tmp_path / "mybox"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "lxc")):
+        exec_cmd("mybox", ["ls", "-la"], tty=False, user=None, env=None)
+    assert list(mock_run.call_args[0][0]) == [
+        "lxc-attach", "-n", "mybox", "--", "ls", "-la"]
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_env_prepends_in_guest_env(mock_root, mock_run, tmp_path):
+    d = tmp_path / "mybox"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "lxc")):
+        exec_cmd("mybox", ["printenv", "FOO"], env={"FOO": "bar", "BAZ": "qux"})
+    # env is set IN THE GUEST via an `env K=V …` prefix (NOT passed to the host
+    # subprocess.run, which would set it on lxc-attach itself).
+    assert list(mock_run.call_args[0][0]) == [
+        "lxc-attach", "-n", "mybox", "--",
+        "env", "FOO=bar", "BAZ=qux", "printenv", "FOO"]
+    # The host subprocess.run is NOT handed an env= kwarg.
+    assert "env" not in mock_run.call_args.kwargs
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_user_wraps_runuser(mock_root, mock_run, tmp_path):
+    d = tmp_path / "mybox"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "lxc")):
+        exec_cmd("mybox", ["whoami"], user="alice")
+    assert list(mock_run.call_args[0][0]) == [
+        "lxc-attach", "-n", "mybox", "--",
+        "runuser", "-u", "alice", "--", "whoami"]
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_user_and_env_compose_runuser_outside_env(
+        mock_root, mock_run, tmp_path):
+    # runuser wraps OUTSIDE env so `runuser` resolves on root's PATH and the env
+    # assignments apply to the target command (env innermost, runuser outermost).
+    d = tmp_path / "mybox"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "lxc")):
+        exec_cmd("mybox", ["printenv", "FOO"], user="alice", env={"FOO": "bar"})
+    assert list(mock_run.call_args[0][0]) == [
+        "lxc-attach", "-n", "mybox", "--",
+        "runuser", "-u", "alice", "--", "env", "FOO=bar", "printenv", "FOO"]
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_pve_lxc_threads_env_user(mock_root, mock_run, tmp_path):
+    # Same wrapping works on the pve-lxc backend (pct exec), inside the guest.
+    d = tmp_path / "100"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "pve")):
+        exec_cmd("box", ["id"], user="root", env={"K": "V"})
+    assert list(mock_run.call_args[0][0]) == [
+        "pct", "exec", "100", "--",
+        "runuser", "-u", "root", "--", "env", "K=V", "id"]
+
+
+@patch("kento.exec_cmd.subprocess.run", side_effect=_ok)
+@patch("kento.exec_cmd.require_root")
+def test_exec_tty_true_does_not_alter_argv(mock_root, mock_run, tmp_path):
+    # tty is honored only via inherited stdio (best-effort) and NEVER changes the
+    # in-guest argv (the documented limit — brief JC1). tty=True == default argv.
+    d = tmp_path / "mybox"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "lxc")):
+        exec_cmd("mybox", ["bash"], tty=True)
+    assert list(mock_run.call_args[0][0]) == [
+        "lxc-attach", "-n", "mybox", "--", "bash"]
+
+
+@patch("kento.exec_cmd.subprocess.run")
+@patch("kento.exec_cmd.require_root")
+def test_exec_returns_nonzero_without_raising(mock_root, mock_run, tmp_path):
+    # M13/§11.9: a non-zero exit is normal info — returned, NOT raised.
+    mock_run.return_value = subprocess.CompletedProcess([], 7)
+    d = tmp_path / "mybox"
+    d.mkdir()
+    with patch("kento.exec_cmd.resolve_any", return_value=(d, "lxc")):
+        rc = exec_cmd("mybox", ["grep", "x", "/nope"])
+    assert rc == 7

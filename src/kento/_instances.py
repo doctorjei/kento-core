@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from abc import ABC, abstractmethod
 from contextlib import AbstractContextManager
 from datetime import datetime
@@ -53,7 +54,7 @@ from kento._storage import StorageMode
 from kento.errors import InstanceNotFoundError, KentoError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from kento._network import GuestTarget, HostBinding
     from kento.errors import StateError
@@ -946,6 +947,43 @@ class Instance(ABC):
             report, domain=DiagnosisDomain.INSTANCE, subject=self.name,
         )
 
+    # ------------------------------------------------------------------- #
+    # M12 — attach: interactive console/TTY; ON THE BASE (§11.3, all modes).
+    # ------------------------------------------------------------------- #
+    def attach(self) -> None:
+        """Attach to the guest console/TTY — BLOCKS until detach (M12, §11.3).
+
+        On the BASE ``Instance`` because the capability is genuinely shared by
+        all four modes (§11.3): ``attach.attach`` already dispatches lxc-attach /
+        pct enter / qm terminal / VM serial-relay internally. This is an
+        INTERACTIVE method — it takes over the terminal, blocks for the duration
+        of the session, and returns when the user detaches (the detach
+        key-sequence is a terminal concern the runtime passes through; there is
+        no special library detach API in 1.0, §11.3).
+
+        ``-> None`` (the int→None mapping, brief JC3): ``attach.attach`` returns
+        the wrapped tool's exit code, but ``attach`` is an interactive console
+        session, NOT a status check — the exit code of ``lxc-attach``/``pct
+        enter``/``qm terminal`` after a manual detach is not a meaningful result
+        to the caller (a clean detach and a session that ran a failing last
+        command are indistinguishable here). The spec locks ``-> None``; we DROP
+        the exit code deliberately. A genuine *failure to attach at all* (no
+        serial socket, not a tty, can't connect) is surfaced by ``attach.attach``
+        as a typed ``StateError`` — that propagates, it is not swallowed.
+
+        Raises ``InstanceNotFoundError`` via ``_check_alive`` if the handle was
+        destroyed.
+        """
+        self._check_alive()
+        from kento import attach as attach_mod
+
+        # Drop the interactive session's exit code (§11.3: attach is a console,
+        # not a status check). Pass the raw mode as the namespace hint is not
+        # needed — attach.attach re-resolves from the name across both spaces;
+        # a destroyed/renamed name would raise, which _check_alive pre-empts for
+        # the dead-handle case and attach.attach's own resolve handles otherwise.
+        attach_mod.attach(self.name)
+
 
 # --------------------------------------------------------------------------- #
 # SystemContainer — the LXC backend (§11.0).
@@ -1023,6 +1061,124 @@ class SystemContainer(Instance):
             "block is read-only (get/list/refresh)."
         )
 
+    # ------------------------------------------------------------------- #
+    # M13 — exec: run a command in the guest, return its exit code (§11.3).
+    # ON SystemContainer ONLY (a VM has no in-guest agent; §11.3).
+    # ------------------------------------------------------------------- #
+    def exec(
+        self,
+        command: "Sequence[str]",
+        *,
+        tty: bool = False,
+        user: str | None = None,
+        env: "dict[str, str] | None" = None,
+    ) -> int:
+        """Run ``command`` in the guest, returning its exit code (M13, §11.3).
+
+        ON ``SystemContainer`` only (the base lacks it, and a VM has no in-guest
+        agent — §11.3). Wraps ``exec_cmd.exec_cmd`` (the operator-authorized
+        minimal touch threads ``tty``/``user``/``env`` through):
+
+        * ``tty`` — best-effort (``lxc-attach``/``pct exec`` inherit a pty from
+          this process's stdio; a pty cannot be fabricated when the caller has no
+          terminal — see ``exec_cmd`` for the honest limit).
+        * ``user`` — run as that guest user (``runuser -u <user> -- ``).
+        * ``env`` — set in the guest (in-guest ``env K=V … `` prefix).
+
+        Returns the command's exit code and does NOT raise on a non-zero code
+        (§11.9, M13: non-zero is normal information — ``grep`` returning 1 is a
+        result, not an exception — and the caller decides what it means). A
+        genuine inability to RUN the command (instance gone, ``require_root``,
+        empty command) still raises the runtime's typed error. ``exec_cmd``
+        raises ``ModeError`` for vm/pve-vm — unreachable here since ``exec`` lives
+        only on ``SystemContainer`` (LXC family), but it remains the backstop.
+
+        Raises ``InstanceNotFoundError`` via ``_check_alive`` on a dead handle.
+        """
+        self._check_alive()
+        from kento import exec_cmd as exec_cmd_mod
+
+        return exec_cmd_mod.exec_cmd(
+            self.name, list(command), tty=tty, user=user, env=env,
+        )
+
+    # ------------------------------------------------------------------- #
+    # M14 — logs: line-oriented journal stream (§11.3). ADDITIVE generator —
+    # does NOT wrap ``logs.logs`` (that streams to stdout + returns int; it is
+    # un-wrappable into an Iterator[str]). Reimplements the small LXC-only
+    # mode-dispatch with PIPED stdout, like Block 07's direct-podman query.
+    # ------------------------------------------------------------------- #
+    def logs(
+        self, *, follow: bool = False, lines: int | None = None,
+    ) -> "Iterator[str]":
+        """Line-oriented journal stream from the guest (M14, §11.3).
+
+        ON ``SystemContainer`` only (VM logs are unsupported today — §11.3).
+        Returns an ``Iterator[str]`` of decoded journal lines; ONE return type
+        covers both modes (§11.3):
+
+        * ``follow=False`` (default) — a FINITE snapshot of the journal *now*.
+          ``lines=N`` tails the last N entries (``journalctl -n N``); the
+          iterator ends at EOF. The caller does ``list(...)`` / ``"\\n".join(...)``.
+        * ``follow=True`` — an OPEN iterator (``journalctl -f``) that yields live
+          lines as they are written and does not naturally end. The caller
+          iterates and stops when it wants; closing the generator (``.close()`` /
+          GC / breaking out of the loop) terminates the ``journalctl -f`` child
+          so no follower process leaks (brief JC2).
+
+        ADDITIVE (does NOT touch ``logs.py``): ``logs.logs`` streams to inherited
+        stdout and returns an int — un-wrappable into an iterator — so this
+        reimplements the same LXC-only ``lxc-attach``/``pct exec journalctl``
+        dispatch with PIPED stdout (mirroring how Block 07's ``prune`` queried
+        podman directly). Lines are decoded UTF-8 with ``errors="replace"`` (a
+        log line is human text; a stray non-UTF-8 byte must not crash the stream,
+        and there is no raw-bytes API in 1.0 — §11.3 defers encoding).
+
+        ``_check_alive`` runs eagerly (a destroyed handle raises
+        ``InstanceNotFoundError`` at the call, not lazily on first ``next()``);
+        the subprocess is spawned lazily inside the generator so the child's
+        lifetime is bounded by iteration.
+        """
+        self._check_alive()
+        argv = self._logs_argv(follow=follow, lines=lines)
+        return _stream_lines(argv)
+
+    def _logs_argv(self, *, follow: bool, lines: int | None) -> list[str]:
+        """Build the host argv that runs ``journalctl`` in the guest (M14).
+
+        Mirrors ``logs.py``'s LXC-only dispatch (plain-lxc ``lxc-attach -n
+        <name>`` / pve-lxc ``pct exec <vmid>``), then appends ``journalctl`` with
+        the args derived from ``follow``/``lines``:
+
+        * ``follow=True``  -> ``-f`` (live tail; the open-iterator case).
+        * ``lines`` set    -> ``-n <N>`` (tail the last N — the spec's ``lines=N``
+          snapshot semantics; valid with or without ``-f``).
+
+        A negative ``lines`` is a ``ValidationError`` (``journalctl -n`` wants a
+        non-negative count; we reject at the boundary rather than emit a bad arg,
+        §2 principle 5). ``self._mode`` is ``"lxc"`` or ``"pve"`` here — a VM mode
+        cannot reach this method (``logs`` lives only on ``SystemContainer``).
+        """
+        if lines is not None and lines < 0:
+            from kento.errors import ValidationError
+
+            raise ValidationError(
+                f"logs(lines={lines}) must be >= 0 (journalctl -n takes a "
+                f"non-negative count)."
+            )
+        jargs: list[str] = []
+        if follow:
+            jargs.append("-f")
+        if lines is not None:
+            jargs += ["-n", str(lines)]
+
+        if self._mode == "pve":
+            # pve-lxc: the instance directory name IS the VMID (mirrors logs.py).
+            vmid = self._dir.name
+            return ["pct", "exec", vmid, "--", "journalctl", *jargs]
+        # plain lxc: the name is the container name.
+        return ["lxc-attach", "-n", self.name, "--", "journalctl", *jargs]
+
 
 # --------------------------------------------------------------------------- #
 # VirtualMachine — the QEMU/KVM backend (§11.0).
@@ -1090,6 +1246,135 @@ class VirtualMachine(Instance):
             "VirtualMachine.transient is built in Phase 4 (M27); this Phase-3 "
             "block is read-only (get/list/refresh)."
         )
+
+    # ------------------------------------------------------------------- #
+    # M17 — suspend: pause vCPUs to RAM; VM-only; self-update status (§11.4).
+    # ------------------------------------------------------------------- #
+    def suspend(self) -> None:
+        """Pause the VM's vCPUs to RAM (M17, §11.4) — wraps ``suspend.suspend``.
+
+        VM-only (this method lives only on ``VirtualMachine``). Wraps
+        ``suspend.suspend`` (QMP ``stop`` for plain vm / ``qm suspend`` for
+        pve-vm) — a *pause to RAM*, NOT a shutdown: the VM process keeps running
+        and its memory is retained. ``suspend.suspend`` raises ``StateError`` if
+        the VM is not running and ``SubprocessError`` if the QMP/qm call fails;
+        those propagate (no silent no-op, §2 principle 5).
+
+        Self-updates ``status`` to ``SUSPENDED`` (M17 — brief JC4): on success we
+        write the ``_status`` BACKING field directly (the public ``status`` is
+        getter-only — §11.2 M9). Unlike ``start``/``stop``, we set the LITERAL
+        ``Status.SUSPENDED`` rather than re-resolving via ``_resolve_status``,
+        because that resolver CANNOT see SUSPENDED yet (it wraps a plain
+        ``is_running`` bool that reports a paused VM as RUNNING — disclosed in
+        ``_resolve_status``'s own docstring, §7.3). Re-resolving would
+        incorrectly overwrite the just-set SUSPENDED with RUNNING; the literal is
+        the honest cached value after a successful suspend.
+        """
+        self._check_alive()
+        from kento import suspend as suspend_mod
+
+        suspend_mod.suspend(self.name)
+        self._status = Status.SUSPENDED
+
+    # ------------------------------------------------------------------- #
+    # M18 — resume: un-pause vCPUs; VM-only; self-update status (§11.4).
+    # ------------------------------------------------------------------- #
+    def resume(self) -> None:
+        """Un-pause the VM's vCPUs (M18, §11.4) — wraps ``suspend.resume``.
+
+        VM-only. Wraps ``suspend.resume`` (QMP ``cont`` / ``qm resume``). Mirrors
+        :meth:`suspend`: ``suspend.resume`` raises ``StateError`` (not running) /
+        ``SubprocessError`` (call failed), which propagate.
+
+        Self-updates ``status`` to ``RUNNING`` (M18 — brief JC4) by writing the
+        ``_status`` backing field with the LITERAL ``Status.RUNNING`` — the same
+        rationale as ``suspend``: ``_resolve_status`` already reports a paused VM
+        as RUNNING, so a literal RUNNING after a successful un-pause is correct
+        and avoids a redundant probe.
+        """
+        self._check_alive()
+        from kento import suspend as suspend_mod
+
+        suspend_mod.resume(self.name)
+        self._status = Status.RUNNING
+
+
+# --------------------------------------------------------------------------- #
+# Captured-line journal streamer (M14, §11.3) — ADDITIVE.
+#
+# A module-level generator that runs a ``journalctl`` argv with PIPED stdout and
+# yields decoded lines. Separated from the method so its process lifecycle is
+# self-contained and unit-testable. The cleanup contract (brief JC2): a
+# ``follow=True`` (``journalctl -f``) child must NOT leak when the caller stops
+# iterating early — closing the generator (``.close()`` / GC / a ``break`` out of
+# the for-loop, which Python turns into ``GeneratorExit``) terminates the child.
+# --------------------------------------------------------------------------- #
+
+
+def _stream_lines(argv: list[str]) -> "Iterator[str]":
+    """Yield decoded stdout lines from running ``argv``; clean up the child.
+
+    Spawns ``argv`` with ``stdout=PIPE`` (text mode, UTF-8, ``errors="replace"``
+    — a stray non-UTF-8 byte must not crash the stream; §11.3 defers a raw-bytes
+    API) and yields each line WITHOUT its trailing newline. The generator owns
+    the child's whole lifetime:
+
+    * Normal end (``follow=False``): stdout reaches EOF, the loop ends, we
+      ``wait()`` and return — a finite snapshot.
+    * Early stop (``follow=True`` or any ``break``/``.close()``/GC): Python raises
+      ``GeneratorExit`` into the generator at the suspended ``yield``. The
+      ``finally`` then TERMINATES the child (``terminate()`` -> short ``wait`` ->
+      ``kill()`` if it ignores SIGTERM) and closes the pipe, so no orphaned
+      ``journalctl -f`` follower is left running (brief JC2).
+
+    The ``finally`` runs on EVERY exit path (EOF, GeneratorExit, or an exception
+    propagating out), so the child and pipe are always reclaimed.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        # proc.stdout is a TextIO (text=True). Iterating it yields lines as they
+        # are flushed by the child — the live-tail behavior for ``-f``.
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            yield line.rstrip("\n")
+        # follow=False: child finished writing -> reap it (finite snapshot).
+        proc.wait()
+    finally:
+        _reap(proc)
+
+
+def _reap(proc: "subprocess.Popen") -> None:
+    """Terminate ``proc`` if still running and close its stdout pipe (no leak).
+
+    Idempotent / total: if the child already exited (the ``follow=False`` EOF
+    path already ``wait()``-ed), ``poll()`` is non-None and we only close the
+    pipe. For a still-running ``journalctl -f`` we SIGTERM it, give it a brief
+    moment, then SIGKILL if it ignored the term — so the follower can never
+    outlive the iterator. Any teardown error is swallowed (best-effort cleanup
+    must not mask the caller's own control flow / exception).
+    """
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    except Exception as exc:  # noqa: BLE001 — best-effort teardown
+        _instances_logger.warning("error reaping logs child: %s", exc)
+    finally:
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
 
 
 # --------------------------------------------------------------------------- #
