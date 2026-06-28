@@ -202,6 +202,26 @@ class TestCreate:
         assert (lxc_dir / "kento-name").read_text().strip() == "test"
         # LXC mode does not get a kento-mac file — MAC only makes sense for VMs.
         assert not (lxc_dir / "kento-mac").exists()
+        # hostname=None (legacy): no kento-hostname file; guest /etc/hostname = name.
+        assert not (lxc_dir / "kento-hostname").exists()
+        assert (lxc_dir / "upper" / "etc" / "hostname").read_text().strip() == "test"
+
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_hostname_persists_meta_and_injects_guest(self, mock_root,
+                                                      mock_layers, mock_run,
+                                                      tmp_path):
+        # An explicit hostname (Block 12, run 33 †): persist kento-hostname AND
+        # inject the guest /etc/hostname from the real hostname (before start).
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"):
+            create("myimage:latest", name="test", hostname="myhost", mode="lxc")
+        lxc_dir = tmp_path / "test"
+        assert (lxc_dir / "kento-hostname").read_text().strip() == "myhost"
+        assert (lxc_dir / "upper" / "etc" / "hostname").read_text().strip() == "myhost"
+        # name remains the identity; hostname is the distinct UTS name.
+        assert (lxc_dir / "kento-name").read_text().strip() == "test"
 
     @patch("kento.create.resolve_image_id", return_value="sha256:abc123")
     @patch("kento.create.subprocess.run")
