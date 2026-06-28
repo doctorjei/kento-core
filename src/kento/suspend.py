@@ -77,6 +77,38 @@ def qmp_command(sock_path, *commands, timeout: float = 10):
         sock.close()
 
 
+def qmp_hmp(sock_path, command_line: str, timeout: float = 10) -> str:
+    """Run one HMP (human-monitor) command over QMP, returning its text output.
+
+    QMP has no native ``hostfwd_add``/``hostfwd_remove`` — those are HMP monitor
+    commands — so the live ``forwards`` setter (§5.7C, VM-usermode) reaches them
+    through QMP's ``human-monitor-command`` bridge:
+    ``{"execute": "human-monitor-command", "arguments": {"command-line": ...}}``.
+
+    Wraps :func:`qmp_command` (same socket framing / capability negotiation) with
+    ONE such command. The HMP layer reports failures (e.g. ``hostfwd_add``
+    rejected because the host port is in use) as TEXT in the ``return`` value
+    rather than a QMP ``error`` object, so a non-empty return string is surfaced
+    to the caller as a failure (``hostfwd_add`` returns empty on success). A QMP
+    transport/protocol ``error`` is raised as ``ValueError`` via ``qmp_command``.
+
+    Returns the (stripped) HMP text output (empty string on success). Raises
+    ``OSError``/``ValueError`` on socket/protocol failure, ``ValueError`` if the
+    bridge command itself errored at the QMP layer.
+    """
+    (reply,) = qmp_command(
+        sock_path,
+        {"execute": "human-monitor-command",
+         "arguments": {"command-line": command_line}},
+        timeout=timeout,
+    )
+    if "error" in reply:
+        err = reply["error"]
+        desc = err.get("desc", err) if isinstance(err, dict) else err
+        raise ValueError(f"human-monitor-command rejected: {desc}")
+    return str(reply.get("return", "")).strip()
+
+
 def _send(sock, obj) -> None:
     """Serialize ``obj`` as a newline-terminated UTF-8 JSON line and send it."""
     sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))

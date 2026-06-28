@@ -964,7 +964,6 @@ from kento.errors import StateError  # noqa: E402
         ("environment", {}),
         ("nesting", True),
         ("name", "renamed"),
-        ("forwards", {}),
     ],
 )
 def test_getter_only_fields_reject_assignment(tmp_path, field, value):
@@ -982,13 +981,182 @@ def test_unprivileged_getter_only(tmp_path):
         inst.unprivileged = True
 
 
-def test_forwards_setter_deferred_to_phase5(tmp_path):
-    # M9 makes forwards LIVE-settable, but that is the Phase-5 network rework.
-    # In THIS block forwards is getter-only -> assignment raises AttributeError.
-    d = _make_lxc(tmp_path)
+# -- forwards setter: the ONE live-capable network settable (§5.7C / M9) -------
+
+
+def _forwards_lxc(tmp_path, port="8080:80", **meta):
+    """A bridged-static LXC dir with a kento-net IP + a kento-port (forwards)."""
+    base = {"kento-net-type": "bridge", "kento-bridge": "lxcbr0",
+            "kento-net": "ip=10.0.3.42/24\ngateway=10.0.3.1",
+            "kento-port": port}
+    base.update(meta)
+    return _make_lxc(tmp_path, **base)
+
+
+def test_forwards_setter_stopped_persists_only(tmp_path):
+    # STOPPED: persist via set_cmd(port=specs), update cache, NO live apply.
+    from kento import ForwardProtocol
+    d = _forwards_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
-    with pytest.raises(AttributeError):
+    new = {(ForwardProtocol.TCP, None, 9090): (None, 90),
+           (ForwardProtocol.UDP, None, 5353): (None, 53)}
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.run_install") as inst_add, \
+            patch("kento.portfwd.run_remove") as inst_rm:
+        inst.forwards = new
+    # Declarative full-set replace through set_cmd(port=...); no live firewall I/O.
+    assert mock_set.call_count == 1
+    assert mock_set.call_args.kwargs["port"] == ["9090:90", "5353:53/udp"]
+    inst_add.assert_not_called()
+    inst_rm.assert_not_called()
+    assert inst.forwards == new  # cache updated on success
+
+
+def test_forwards_setter_stopped_clear(tmp_path):
+    # STOPPED + empty value -> set_cmd(port=['']) (the clear sentinel).
+    d = _forwards_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
         inst.forwards = {}
+    assert mock_set.call_args.kwargs["port"] == [""]
+    assert inst.forwards == {}
+
+
+def test_forwards_setter_running_bridged_diff_apply(tmp_path):
+    # RUNNING bridged: diff against old {tcp 8080->80}; new adds udp 5353->53 and
+    # keeps tcp 8080 -> exactly one add (udp), zero removes; then persist.
+    from kento import ForwardProtocol
+    d = _forwards_lxc(tmp_path, port="8080:80")
+    inst = _snapshot(d, "lxc")
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80),
+           (ForwardProtocol.UDP, None, 5353): (None, 53)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento.portfwd.run_install") as run_install, \
+            patch("kento.portfwd.run_remove") as run_remove:
+        inst.forwards = new
+    # Only the NEW forward (udp 5353->53) is installed; the unchanged tcp is left.
+    run_remove.assert_not_called()
+    run_install.assert_called_once_with(
+        "nft", "10.0.3.42", ForwardProtocol.UDP, 5353, 53, inst.name)
+    # Persisted AFTER live apply (declarative full set).
+    assert mock_set.call_count == 1
+    assert inst.forwards == new
+
+
+def test_forwards_setter_running_removes_dropped(tmp_path):
+    # RUNNING: dropping a forward removes its rules; changing a target = remove+add.
+    from kento import ForwardProtocol
+    d = _forwards_lxc(tmp_path, port="8080:80\n9090:90")
+    inst = _snapshot(d, "lxc")
+    # Drop 9090; retarget 8080 from :80 to :8080.
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 8080)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd", return_value=0), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento.portfwd.run_install") as run_install, \
+            patch("kento.portfwd.run_remove") as run_remove:
+        inst.forwards = new
+    removed = {c.args[2] for c in run_remove.call_args_list}  # host_port arg
+    assert removed == {8080, 9090}  # 9090 dropped + 8080 retarget-remove
+    run_install.assert_called_once_with(
+        "nft", "10.0.3.42", ForwardProtocol.TCP, 8080, 8080, inst.name)
+
+
+def test_forwards_setter_running_rollback_on_failure(tmp_path):
+    # A failing live add unwinds every applied op (catch-reverse) and re-raises;
+    # state file is NOT persisted, cache unchanged.
+    from kento import ForwardProtocol
+    from kento.errors import SubprocessError
+    d = _forwards_lxc(tmp_path, port="8080:80")
+    inst = _snapshot(d, "lxc")
+    old = dict(inst.forwards)
+    new = {(ForwardProtocol.UDP, None, 5353): (None, 53)}  # remove 8080, add 5353
+    calls = []
+
+    def fake_remove(backend, proto, hport, name):
+        calls.append(("remove", hport))
+
+    def fake_install(backend, ip, proto, hport, gport, name):
+        calls.append(("add", hport))
+        raise SubprocessError("port in use")
+
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento.portfwd.run_install", side_effect=fake_install), \
+            patch("kento.portfwd.run_remove", side_effect=fake_remove):
+        with pytest.raises(SubprocessError):
+            inst.forwards = new
+    # remove(8080), add(5353)->fails, rollback re-adds 8080 (run_install again).
+    assert ("remove", 8080) in calls
+    assert ("add", 5353) in calls
+    mock_set.assert_not_called()  # persistence never reached on a live failure
+    assert inst.forwards == old   # cache unchanged
+
+
+def test_forwards_setter_running_ip_unknown_raises(tmp_path):
+    # RUNNING bridged but guest IP not resolvable (no kento-net, lxc-info fails):
+    # the live add raises StateError (never silent persist-only) -> rollback.
+    from kento import ForwardProtocol
+    d = _make_lxc(tmp_path, **{"kento-net-type": "bridge",
+                               "kento-bridge": "lxcbr0", "kento-port": "8080:80"})
+    inst = _snapshot(d, "lxc")
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80),
+           (ForwardProtocol.TCP, None, 9090): (None, 90)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento._instances._resolve_guest_ip", return_value=None):
+        with pytest.raises(StateError):
+            inst.forwards = new
+    mock_set.assert_not_called()
+
+
+def test_forwards_setter_running_vm_qmp(tmp_path):
+    # RUNNING usermode VM: live apply goes through QMP hostfwd_add (not firewall).
+    from kento import ForwardProtocol
+    d = _make_vm(tmp_path, **{"kento-net-type": "usermode",
+                              "kento-port": "8080:80"})
+    (d / "qmp.sock").write_text("")  # exists -> applier proceeds
+    inst = _snapshot(d, "vm")
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80),
+           (ForwardProtocol.UDP, None, 5353): (None, 53)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd", return_value=0), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.vm_hostfwd_add") as qadd, \
+            patch("kento.portfwd.vm_hostfwd_remove") as qrm:
+        inst.forwards = new
+    qrm.assert_not_called()
+    assert qadd.call_count == 1
+    # Called with (sock, proto, hport, gport) — the new udp forward.
+    args = qadd.call_args.args
+    assert args[1:] == (ForwardProtocol.UDP, 5353, 53)
+
+
+def test_forwards_setter_rejects_address_form(tmp_path):
+    # An address-bearing value is rejected up front (ForwardAddressNotImplemented),
+    # before any lock / probe / I/O (§5.7A — 1.0 has no per-address bind).
+    from kento import ForwardProtocol, ForwardAddressNotImplemented
+    d = _forwards_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    bad = {(ForwardProtocol.TCP, "127.0.0.1", 8080): (None, 80)}
+    with patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock") as lock:
+        with pytest.raises(ForwardAddressNotImplemented):
+            inst.forwards = bad
+    mock_set.assert_not_called()
+    lock.assert_not_called()  # validation precedes the lock
 
 
 # -- Settable setters: stopped-only guard via LIVE is_running probe -----------
