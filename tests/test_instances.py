@@ -752,7 +752,9 @@ def test_scrub_self_updates_status(tmp_path):
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     # Pretend it started life RUNNING in the cache; scrub re-resolves to STOPPED.
-    inst.status = Status.RUNNING
+    # status is getter-only (Block 11 M9) — seed the BACKING field the lifecycle
+    # methods own (public assignment now raises AttributeError; see the M9 tests).
+    inst._status = Status.RUNNING
     with patch("kento.reset.reset"), patch("kento.is_running", return_value=False):
         inst.scrub()
     assert inst.status is Status.STOPPED
@@ -935,3 +937,431 @@ def test_instance_diagnose_on_base_only(tmp_path):
     assert "diagnose" in Instance.__dict__
     assert "diagnose" not in SystemContainer.__dict__
     assert "diagnose" not in VirtualMachine.__dict__
+
+
+# =========================================================================== #
+# Block 11 — M9 settable-property mutation.
+#
+# The field model is now typed PROPERTIES backed by _-prefixed fields: getter-
+# only fields raise AttributeError on assignment; settable fields delegate to
+# set_cmd.set_cmd (mocked), lock-guarded, live-probe-gated, with catch-reverse.
+# All I/O (set_cmd / is_running / kento_lock) is mocked — no live process.
+# =========================================================================== #
+
+from kento.errors import StateError  # noqa: E402
+
+
+# -- Getter-only fields raise AttributeError on assignment (§11.2 M9) ---------
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("status", Status.RUNNING),
+        ("sources", ()),
+        ("platform_profile", None),
+        ("storage", StorageMode.OVERLAY),
+        ("created", datetime.now()),
+        ("environment", {}),
+        ("nesting", True),
+        ("name", "renamed"),
+        ("forwards", {}),
+    ],
+)
+def test_getter_only_fields_reject_assignment(tmp_path, field, value):
+    # Assigning a getter-only property raises AttributeError (no setter idiom).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with pytest.raises(AttributeError):
+        setattr(inst, field, value)
+
+
+def test_unprivileged_getter_only(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with pytest.raises(AttributeError):
+        inst.unprivileged = True
+
+
+def test_forwards_setter_deferred_to_phase5(tmp_path):
+    # M9 makes forwards LIVE-settable, but that is the Phase-5 network rework.
+    # In THIS block forwards is getter-only -> assignment raises AttributeError.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with pytest.raises(AttributeError):
+        inst.forwards = {}
+
+
+# -- Settable setters: stopped-only guard via LIVE is_running probe -----------
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("hostname", "newhost"),
+        ("network", NetworkConnection(mode=NetworkMode.DHCP,
+                                      link_config={"bridge": "br0"})),
+        ("lxc_args", ["lxc.foo = bar"]),
+    ],
+)
+def test_stopped_only_setters_raise_when_running(tmp_path, field, value):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(StateError):
+            setattr(inst, field, value)
+    # The stopped-only guard fired BEFORE any persistence.
+    mock_set.assert_not_called()
+
+
+def test_qemu_args_setter_raises_when_running(tmp_path):
+    d = _make_vm(tmp_path)
+    inst = _snapshot(d, "vm")
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(StateError):
+            inst.qemu_args = ["-foo"]
+    mock_set.assert_not_called()
+
+
+# -- hostname setter: delegates to set_cmd(hostname=), updates cache ----------
+
+
+def test_hostname_setter_persists_and_caches(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.hostname = "newname"
+    mock_set.assert_called_once_with(inst.name, hostname="newname")
+    assert inst.hostname == "newname"  # cache updated on success
+
+
+# -- network setter: faithful whole-value decomposition (JC3) -----------------
+
+
+def _net_call_kwargs(mock_set):
+    """The kwargs of the single set_cmd call (positional name dropped)."""
+    assert mock_set.call_count == 1
+    return mock_set.call_args.kwargs
+
+
+def test_network_setter_static_decomposition(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    conn = NetworkConnection(
+        mode=NetworkMode.STATIC,
+        link_config={"bridge": "br0"},
+        ip_config={"address": "10.0.0.5", "subnet": "24",
+                   "gateway": "10.0.0.1", "dns1": "1.1.1.1"},
+    )
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.network = conn
+    kw = _net_call_kwargs(mock_set)
+    assert kw == {"network": "bridge=br0", "ip": "10.0.0.5/24",
+                  "gateway": "10.0.0.1", "dns": "1.1.1.1"}
+    assert inst.network is conn
+
+
+def test_network_setter_dhcp_clears_static(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    conn = NetworkConnection(mode=NetworkMode.DHCP,
+                             link_config={"bridge": "br0"})
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.network = conn
+    kw = _net_call_kwargs(mock_set)
+    # DHCP: ip=dhcp clears static ip+gw; dns='' clears dns -> no stale lingers.
+    assert kw == {"network": "bridge=br0", "ip": "dhcp", "dns": ""}
+
+
+@pytest.mark.parametrize(
+    "mode, net_str",
+    [(NetworkMode.HOST, "host"),
+     (NetworkMode.USER, "usermode"),
+     (NetworkMode.DISABLED, "none")],
+)
+def test_network_setter_nonbridge_clears_l3(tmp_path, mode, net_str):
+    # HOST/USER/DISABLED: must clear stale static ip/gateway/dns (ip=dhcp, dns='').
+    maker = _make_vm if mode is NetworkMode.USER else _make_lxc
+    md = "vm" if mode is NetworkMode.USER else "lxc"
+    d = maker(tmp_path, **{"kento-mode": md})
+    inst = _snapshot(d, md)
+    conn = NetworkConnection(mode=mode)
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.network = conn
+    kw = _net_call_kwargs(mock_set)
+    assert kw == {"network": net_str, "ip": "dhcp", "dns": ""}
+
+
+def test_network_setter_passes_mac_when_present(tmp_path):
+    d = _make_vm(tmp_path)
+    inst = _snapshot(d, "vm")
+    conn = NetworkConnection(
+        mode=NetworkMode.USER,
+        link_config={"mac": "52:54:00:12:34:56"},
+    )
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.network = conn
+    kw = _net_call_kwargs(mock_set)
+    assert kw["mac"] == "52:54:00:12:34:56"
+
+
+def test_network_setter_rejects_dns2(tmp_path):
+    # dns2 cannot round-trip through set_cmd's single --dns -> reject (not drop).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    conn = NetworkConnection(
+        mode=NetworkMode.STATIC,
+        link_config={"bridge": "br0"},
+        ip_config={"address": "10.0.0.5", "subnet": "24", "dns1": "1.1.1.1",
+                   "dns2": "8.8.8.8"},
+    )
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(ValidationError, match="dns2"):
+            inst.network = conn
+    mock_set.assert_not_called()  # rejected before persistence
+
+
+# -- resources setter: Jei run-33 deferral (mode-appropriate running error) ---
+
+
+def test_resources_setter_stopped_persists(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.resources = {"memory": 2048, "cores": 4}
+    mock_set.assert_called_once_with(inst.name, memory=2048, cores=4)
+    assert inst.resources == {"memory": 2048, "cores": 4}
+
+
+@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
+def test_resources_setter_running_raises_state_error(tmp_path, mode):
+    # Jei run-33: running resources raises StateError for ALL modes this block.
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.pve_config_exists", return_value=True):
+        with pytest.raises(StateError) as exc:
+            inst.resources = {"memory": 2048}
+    mock_set.assert_not_called()
+    msg = str(exc.value)
+    # Capability-aware distinction kept VISIBLE in the message (not erased).
+    if mode in ("vm", "pve-vm"):
+        assert "hotplug" in msg
+    else:
+        assert "future release" in msg
+
+
+def test_resources_setter_rejects_unknown_key(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    # Decompose fails before lock/probe -> ValidationError, no set_cmd.
+    with patch("kento.set_cmd.set_cmd") as mock_set:
+        with pytest.raises(ValidationError, match="unsupported resources key"):
+            inst.resources = {"swap": 512}
+    mock_set.assert_not_called()
+
+
+def test_resources_setter_rejects_non_int(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with pytest.raises(ValidationError, match="must be an int"):
+        inst.resources = {"memory": "lots"}
+
+
+# -- lxc_args / qemu_args / extra_args setters --------------------------------
+
+
+def test_lxc_args_setter_replace(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.lxc_args = ["lxc.cap.drop = sys_admin"]
+    mock_set.assert_called_once_with(
+        inst.name, lxc_args=["lxc.cap.drop = sys_admin"])
+    assert inst.lxc_args == ("lxc.cap.drop = sys_admin",)
+
+
+def test_lxc_args_setter_empty_clears(tmp_path):
+    # An empty list reaches set_cmd as the CLEAR sentinel [""].
+    d = _make_lxc(tmp_path, **{"kento-lxc-args": "lxc.old = 1"})
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.lxc_args = []
+    mock_set.assert_called_once_with(inst.name, lxc_args=[""])
+    assert inst.lxc_args == ()
+
+
+def test_qemu_args_setter_replace(tmp_path):
+    d = _make_vm(tmp_path)
+    inst = _snapshot(d, "vm")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.qemu_args = ["-cpu host"]
+    mock_set.assert_called_once_with(inst.name, qemu_args=["-cpu host"])
+    assert inst.qemu_args == ("-cpu host",)
+
+
+def test_extra_args_setter_persists_pve_args_and_replaces_profile(tmp_path):
+    # extra_args -> set_cmd(pve_args=); cached platform_profile rebuilt coherently.
+    d = _make_for_mode(tmp_path, "pve")
+    inst = _snapshot(d, "pve")
+    assert inst.platform_profile.mode is PlatformMode.PVE
+    old_profile = inst.platform_profile
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", return_value=0) as mock_set, \
+            patch("kento.locking.kento_lock"):
+        inst.extra_args = ["lxc.cgroup2.devices.allow = c 10:200 rwm"]
+    mock_set.assert_called_once_with(
+        inst.name, pve_args=["lxc.cgroup2.devices.allow = c 10:200 rwm"])
+    # The getter + platform_profile.extra_args reflect the new value (coherent).
+    assert inst.extra_args == ("lxc.cgroup2.devices.allow = c 10:200 rwm",)
+    assert inst.platform_profile.extra_args == inst.extra_args
+    # Only extra_args changed; mode/mid preserved (dataclasses.replace).
+    assert inst.platform_profile.mode is old_profile.mode
+    assert inst.platform_profile.mid == old_profile.mid
+    # platform_profile itself stays getter-only.
+    with pytest.raises(AttributeError):
+        inst.platform_profile = old_profile
+
+
+# -- Lock held + live probe inside the lock (JC6) -----------------------------
+
+
+def test_setter_holds_kento_lock_around_set_cmd(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    order = []
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_lock():
+        order.append("lock-acquire")
+        yield
+        order.append("lock-release")
+
+    def fake_set(*a, **k):
+        order.append("set_cmd")
+        return 0
+
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", side_effect=fake_set), \
+            patch("kento.locking.kento_lock", fake_lock):
+        inst.hostname = "h"
+    # set_cmd runs strictly between lock acquire and release.
+    assert order == ["lock-acquire", "set_cmd", "lock-release"]
+
+
+def test_setter_live_probe_not_cached_status(tmp_path):
+    # The guard uses a LIVE is_running probe, NOT the cached status: a handle
+    # whose cached status is STOPPED but whose live probe says running raises.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst.status is Status.STOPPED  # cached
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(StateError):
+            inst.hostname = "h"
+    mock_set.assert_not_called()
+
+
+# -- Catch-and-reverse rollback on a simulated set_cmd failure (JC5) ----------
+
+
+def test_setter_catch_reverse_restores_on_failure(tmp_path):
+    # set_cmd raises on the FIRST (new) call -> setter re-invokes set_cmd with the
+    # OLD params (rollback) and re-raises the original error; cache unchanged.
+    d = _make_lxc(tmp_path, **{"hostname": "orig"})
+    inst = _snapshot(d, "lxc")
+    assert inst.hostname == "orig"
+
+    calls = []
+
+    def flaky_set(name, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise StateError("boom mid-write")
+        return 0  # the rollback re-invocation succeeds
+
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", side_effect=flaky_set), \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(StateError, match="boom mid-write"):
+            inst.hostname = "newhost"
+
+    # Two calls: the failed new write, then the rollback with the OLD value.
+    assert calls == [{"hostname": "newhost"}, {"hostname": "orig"}]
+    # Cache NOT updated (the setter only caches on success).
+    assert inst.hostname == "orig"
+
+
+def test_setter_rollback_failure_is_swallowed_original_reraised(tmp_path, caplog):
+    # If the rollback ITSELF fails, the ORIGINAL error still propagates and the
+    # rollback failure is logged (best-effort, mirrors create.py:_run_cleanup).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+
+    def always_fail(name, **kwargs):
+        raise StateError("primary failure")
+
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd", side_effect=always_fail), \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(StateError, match="primary failure"):
+            inst.hostname = "newhost"
+
+
+# -- Dead-handle guard on setters (§11.2 M7) ----------------------------------
+
+
+def test_setter_guards_dead_handle(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    inst._dead = True
+    with patch("kento.set_cmd.set_cmd") as mock_set:
+        with pytest.raises(InstanceNotFoundError):
+            inst.hostname = "h"
+    mock_set.assert_not_called()
+
+
+# -- ModeError from set_cmd propagates (e.g. qemu_args on LXC) -----------------
+
+
+def test_setter_propagates_set_cmd_mode_error(tmp_path):
+    # An invalid field-for-mode is set_cmd's own ModeError, surfaced not swallowed
+    # (it validates before mutating, so the rollback re-invoke also raises and is
+    # logged; the original ModeError propagates). Use a VALID-on-the-type setter
+    # (qemu_args exists on VirtualMachine) whose set_cmd raises ModeError.
+    d = _make_vm(tmp_path)
+    inst = _snapshot(d, "vm")
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.set_cmd.set_cmd",
+                  side_effect=ModeError("qemu-arg is VM-only")), \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(ModeError):
+            inst.qemu_args = ["-foo"]

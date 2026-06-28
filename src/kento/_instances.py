@@ -53,7 +53,10 @@ from kento._storage import StorageMode
 from kento.errors import InstanceNotFoundError, KentoError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from kento._network import GuestTarget, HostBinding
+    from kento.errors import StateError
 
 _instances_logger = logging.getLogger("kento")
 
@@ -158,23 +161,343 @@ class Instance(ABC):
     # raise, never silently no-op) instead of re-touching a removed directory.
     _dead: bool = False
 
-    # Cached snapshot fields (§11.0). Plain cached attributes set by the loader:
-    # access is variable-like (``inst.status``) and reads return the cached
-    # value with no I/O (§10.2). Settable PROPERTIES (M9) are a LATER block and
-    # convert specific fields non-breakingly; this read-only block does not
-    # pre-empt that shape.
-    name: str
-    hostname: str
-    sources: tuple[SourceReference, ...]
-    storage: StorageMode
-    network: NetworkConnection
-    forwards: dict["HostBinding", "GuestTarget"]
-    status: Status
-    resources: dict[str, int]
-    platform_profile: PlatformProfile
-    nesting: bool
-    created: datetime
-    environment: dict[str, str]
+    # Cached snapshot fields (§11.0, §11.2 M9). Block 11 reshapes the field model
+    # from plain attributes into TYPED PROPERTIES backed by ``_``-prefixed cached
+    # fields. The settable boundary is enforced BY THE TYPE (M9): a settable field
+    # exposes a setter; a getter-only field has NO setter, so assigning it raises
+    # ``AttributeError`` automatically (the no-setter idiom — clearer than a
+    # __setattr__ gate, which would also intercept the loader's own internal
+    # writes; explicit per-field properties keep internal writes on ``_field``).
+    #
+    # Reads return the cached backing value with NO I/O (§2 principle 2, §10.2);
+    # a *setter* DOES I/O + catch-reverse (expected per M9 — §2 governs reads).
+    # The loader sets the ``_``-prefixed backing fields; lifecycle methods that
+    # self-update ``status`` write the ``_status`` backing field (status is
+    # getter-only to the PUBLIC, but the lifecycle owns the backing value — the
+    # resolution of the "status is getter-only yet lifecycle-mutated" tension).
+    #
+    # Backing-field annotations (set by ``_load_snapshot`` / ``refresh``):
+    _name: str
+    _hostname: str
+    _sources: tuple[SourceReference, ...]
+    _storage: StorageMode
+    _network: NetworkConnection
+    _forwards: dict["HostBinding", "GuestTarget"]
+    _status: Status
+    _resources: dict[str, int]
+    _platform_profile: PlatformProfile
+    _nesting: bool
+    _created: datetime
+    _environment: dict[str, str]
+
+    # ------------------------------------------------------------------- #
+    # Getter-only properties (§11.2 M9): identity + observed + create-time
+    # fields. NO setter -> external assignment raises ``AttributeError``.
+    # ------------------------------------------------------------------- #
+    @property
+    def name(self) -> str:
+        """The instance name — identity, immutable (§11.0). Getter-only."""
+        return self._name
+
+    @property
+    def sources(self) -> "tuple[SourceReference, ...]":
+        """The boot-source locators — immutable (§11.0, §3.8). Getter-only."""
+        return self._sources
+
+    @property
+    def storage(self) -> StorageMode:
+        """Root-storage strategy — immutable (§8, §11.0). Getter-only."""
+        return self._storage
+
+    @property
+    def status(self) -> Status:
+        """Live lifecycle status — observed, never user-set (§7). Getter-only.
+
+        The lifecycle methods (``start``/``stop``/``scrub``) self-update the
+        cached value by writing the ``_status`` backing field; the public
+        property exposes no setter, so ``inst.status = X`` from outside raises
+        ``AttributeError`` (§11.2 M9: ``status`` is getter-only).
+        """
+        return self._status
+
+    @property
+    def platform_profile(self) -> PlatformProfile:
+        """Platform axis (STANDARD/PVE + vmid + pve-args) — immutable (§6).
+
+        Getter-only (§11.2 M9). The pass-through ``--pve-arg`` carried inside
+        (``extra_args``) IS settable, via the dedicated ``extra_args`` property;
+        the profile *object* itself is not reassignable.
+        """
+        return self._platform_profile
+
+    @property
+    def nesting(self) -> bool:
+        """Allow nested virtualization — create-time, immutable (§11.0)."""
+        return self._nesting
+
+    @property
+    def created(self) -> datetime:
+        """Creation time (container-dir mtime) — observed (§11.0). Getter-only."""
+        return self._created
+
+    @property
+    def environment(self) -> "dict[str, str]":
+        """Create-time environment (no ``set --env`` today, §11.0). Getter-only."""
+        return self._environment
+
+    @property
+    def forwards(self) -> "dict[HostBinding, GuestTarget]":
+        """Port-forward map (§5.7) — GETTER-ONLY in this block.
+
+        M9 makes ``forwards`` a LIVE settable field, but the live setter (nft/
+        iptables DNAT + QMP ``hostfwd_add``, protocol-aware multi-forward diff-
+        apply) is the Phase-5 network rework (§5.7C) — genuinely-new live runtime
+        code this additive block does not build. So ``forwards`` stays getter-only
+        here: assigning it raises ``AttributeError`` (the no-setter idiom). The
+        live setter lands with the Phase-5 MINOR; this is a DOCUMENTED incremental
+        gap, NOT a contradiction of M9's locked LIVE semantics.
+        """
+        return self._forwards
+
+    # ------------------------------------------------------------------- #
+    # Settable properties (§11.2 M9) — base fields shared by all kinds.
+    #
+    # Each setter follows the LOCKED M9 persist model: immediate-persist with
+    # per-set CATCH-AND-REVERSE rollback (no save()/staging). The write is
+    # serialized under ``kento_lock`` (excludes a concurrent ``start``); the
+    # stopped-only guard is a LIVE ``is_running`` probe (NOT the cached
+    # ``status``, which can be stale) taken INSIDE the lock (TOCTOU vs a
+    # concurrent start). Persistence is delegated to ``set_cmd.set_cmd`` — the
+    # SAME stopped-only mutation the ``kento set`` CLI uses (parity, no new live
+    # runtime code); the typed value is decomposed into ``set_cmd`` params here.
+    # ------------------------------------------------------------------- #
+    @property
+    def hostname(self) -> str:
+        return self._hostname
+
+    @hostname.setter
+    def hostname(self, value: str) -> None:
+        """Set the hostname — STOPPED-ONLY (§11.2 M9).
+
+        Persists ``kento-hostname`` (+ the guest ``/etc/hostname`` overlay drop-in)
+        via ``set_cmd(hostname=...)``. Running -> ``StateError`` (PVE/pct cannot
+        change a running CT's UTS name either — VERIFIED on blue, §11.2 M9). The
+        getter still falls back to ``name`` for a pre-back-fill instance (the
+        create-time write is the Phase-6 † back-fill, §11.0); a SET persists the
+        key, so a subsequent ``refresh()`` reads the new value honestly.
+        """
+        self._set_via_set_cmd(
+            field="hostname",
+            new_params={"hostname": value},
+            old_params={"hostname": self._hostname},
+            new_cached=value,
+            cache_attr="_hostname",
+        )
+
+    @property
+    def network(self) -> NetworkConnection:
+        return self._network
+
+    @network.setter
+    def network(self, value: NetworkConnection) -> None:
+        """Set the whole network attachment — STOPPED-ONLY (§11.2 M9, §5.7).
+
+        Assign a WHOLE typed ``NetworkConnection`` (typed-object stance; sub-edits
+        via ``dataclasses.replace``). The value is decomposed FAITHFULLY into
+        ``set_cmd`` network params (``network=``/``ip=``/``gateway=``/``dns=`` —
+        the exact strings ``set_cmd._parse_network_arg`` / its net params accept).
+        Stopped-only — file injection (networkd drop-ins + NIC conf) only applies
+        at guest boot, so a running instance raises ``StateError`` (the live-from-
+        outside path is Phase 5, §5.7C; ``forwards`` is the only live network
+        settable and it too defers). ``set_cmd`` enforces backend × mode validity
+        (e.g. usermode is VM-only) — an invalid combo raises its typed error
+        BEFORE any write, and the catch-reverse restores the prior value.
+        """
+        new_params = _network_to_set_cmd_params(value)
+        old_params = _network_to_set_cmd_params(self._network)
+        self._set_via_set_cmd(
+            field="network",
+            new_params=new_params,
+            old_params=old_params,
+            new_cached=value,
+            cache_attr="_network",
+        )
+
+    @property
+    def resources(self) -> "dict[str, int]":
+        return self._resources
+
+    @resources.setter
+    def resources(self, value: "dict[str, int]") -> None:
+        """Set the resource bag (memory/cores) (§11.2 M9; Jei run-33 deferral).
+
+        Assign a WHOLE ``dict[str, int]`` (open bag, §2 principle 8); ``memory``
+        (MiB) and ``cores`` are decomposed into ``set_cmd(memory=, cores=)``.
+
+        Live-ness (Jei run-33): M9 locks "memory/cores apply LIVE on a running
+        LXC/pve-lxc (cgroup/pct hotplug)", but that live path is genuinely-new
+        runtime code (``set_cmd`` is stopped-only; no hotplug primitive exists),
+        DEFERRED to Phase 6/E2E. So in THIS block a RUNNING instance raises
+        ``StateError`` for BOTH kinds, with a MODE-APPROPRIATE message:
+
+        * VM/pve-vm — "no live hotplug; stop first" (the PERMANENT M9 behavior:
+          the memfd is sized to memory at boot, so a VM can never hotplug here).
+        * LXC/pve-lxc — "stop first; live resource mutation lands in a future
+          release" (a DOCUMENTED incremental gap — the live cgroup/pct path slots
+          in HERE in Phase 6; see ``_resources_running_error`` for the seam).
+
+        A STOPPED instance persists via ``set_cmd`` for all four modes. The
+        capability-aware DISTINCTION (LXC-will-be-live vs VM-never) is kept VISIBLE
+        in the error message + the seam — the deferral does not erase it.
+        """
+        # Pre-decompose so a bad bag (non-int / unknown key) fails before the
+        # lock/probe — and reject the live case with a mode-appropriate message.
+        new_params = _resources_to_set_cmd_params(value)
+        old_params = _resources_to_set_cmd_params(self._resources)
+        self._set_via_set_cmd(
+            field="resources",
+            new_params=new_params,
+            old_params=old_params,
+            new_cached=dict(value),
+            cache_attr="_resources",
+            running_error=self._resources_running_error,
+        )
+
+    @property
+    def extra_args(self) -> "tuple[str, ...]":
+        """Platform pass-through (``--pve-arg``) — convenience view of
+        ``platform_profile.extra_args`` (§6, §11.2 M9). PVE-only.
+
+        M9 lists ``extra_args`` as a settable field, but it lives INSIDE the
+        getter-only ``platform_profile`` (the profile object is immutable). The
+        resolution (brief JC4): a dedicated settable ``extra_args`` property
+        whose getter mirrors ``platform_profile.extra_args`` and whose setter
+        persists ``kento-pve-args`` AND keeps ``_platform_profile`` coherent via
+        ``dataclasses.replace`` — ``platform_profile`` itself stays getter-only.
+        The only new public name in this block (a property on an existing class —
+        no ``__all__`` change), spec-sanctioned because M9 names ``extra_args``.
+        """
+        return self._platform_profile.extra_args
+
+    @extra_args.setter
+    def extra_args(self, value: "Sequence[str]") -> None:
+        """Set the ``--pve-arg`` pass-through — STOPPED-ONLY, PVE-only (§11.2 M9).
+
+        Assign the WHOLE list (declarative replace, mirroring ``kento set
+        --pve-arg``); persisted via ``set_cmd(pve_args=[...])``. Stopped-only —
+        the PVE ``.conf`` pass-through is consumed at boot. ``set_cmd`` enforces
+        PVE-only validity and the denylist (a non-PVE instance or a denylisted
+        arg raises BEFORE any write, and the catch-reverse restores the prior
+        value). On success the cached ``_platform_profile`` is rebuilt with the
+        new ``extra_args`` (``dataclasses.replace``) so the getter — and
+        ``platform_profile.extra_args`` — stay coherent without a re-query.
+        """
+        from dataclasses import replace
+
+        args = list(value)
+        new_profile = replace(self._platform_profile, extra_args=tuple(args))
+        self._set_via_set_cmd(
+            field="extra_args",
+            new_params={"pve_args": _set_cmd_list_arg(args)},
+            old_params={
+                "pve_args": _set_cmd_list_arg(
+                    list(self._platform_profile.extra_args)
+                )
+            },
+            new_cached=new_profile,
+            cache_attr="_platform_profile",
+        )
+
+    def _resources_running_error(self) -> "StateError":
+        """The mode-appropriate ``StateError`` for a running resources set.
+
+        Phase-6 SEAM (Jei run-33): when the live cgroup/pct hotplug path is built,
+        the LXC/pve-lxc branch here is where "apply live + persist" replaces the
+        raise; the VM/pve-vm branch stays a raise PERMANENTLY (memfd sized at
+        boot). Keeping the capability-aware distinction visible in the message is
+        required (it is not a license to drop it).
+        """
+        from kento.errors import StateError
+
+        if _is_vm_mode(self._mode):
+            return StateError(
+                f"cannot change resources on a running {type(self).__name__}: "
+                "a VM has no live memory/CPU hotplug (the memfd is sized to "
+                f"memory at boot). Stop it first: kento stop {self._name}"
+            )
+        # LXC / pve-lxc: live cgroup/pct mutation is a future release (Phase 6).
+        return StateError(
+            "cannot change resources on a running container yet: live resource "
+            "mutation on a running LXC/pve-lxc lands in a future release. Stop "
+            f"it first: kento stop {self._name}"
+        )
+
+    def _set_via_set_cmd(
+        self,
+        *,
+        field: str,
+        new_params: "dict[str, object]",
+        old_params: "dict[str, object]",
+        new_cached: object,
+        cache_attr: str,
+        running_error: "object | None" = None,
+    ) -> None:
+        """Persist a settable field via ``set_cmd``, lock-guarded + catch-reverse.
+
+        The shared engine for every base/subclass setter (§11.2 M9 persist model):
+
+        1. ``_check_alive`` (a destroyed handle is unusable, §11.2 M7).
+        2. Acquire ``kento_lock`` (excludes a concurrent ``start``; ``set_cmd``
+           does NOT take the lock itself, so one acquire here is deadlock-safe).
+        3. Take a LIVE ``is_running`` probe INSIDE the lock (NOT the cached
+           ``status``) and reject the stopped-only field on a running instance —
+           ``running_error()`` (resources' mode-appropriate message) or the
+           default ``StateError`` (lxc_args/qemu_args/network/hostname/...).
+        4. Call ``set_cmd.set_cmd(self._name, **new_params)``. ``set_cmd``
+           validates EVERY field BEFORE mutating anything, so bad input raises
+           with no partial write.
+        5. CATCH-AND-REVERSE: on any exception from ``set_cmd``, restore the prior
+           persisted state by re-invoking ``set_cmd`` with ``old_params`` (still
+           stopped -> valid), then re-raise the ORIGINAL error. This covers the
+           residual multi-write partial-failure that validate-first cannot (e.g.
+           a write that fails after an earlier field already landed). The reverse
+           is best-effort: if IT fails we log and still raise the original.
+        6. On success only, update the cached backing field — the snapshot stays
+           coherent with what was persisted (a getter never re-queries, §2).
+        """
+        self._check_alive()
+        from kento import is_running
+        from kento.errors import StateError
+        from kento.locking import kento_lock
+        from kento import set_cmd as set_cmd_mod
+
+        with kento_lock():
+            # LIVE probe inside the lock — the cached status may be stale, and a
+            # concurrent start is excluded by the lock we hold (TOCTOU-safe).
+            if is_running(self._dir, self._mode):
+                if running_error is not None:
+                    raise running_error()
+                raise StateError(
+                    f"cannot change {field} on a running "
+                    f"{type(self).__name__}: this setting only applies at the "
+                    f"guest's next boot. Stop it first: kento stop {self._name}"
+                )
+            try:
+                set_cmd_mod.set_cmd(self._name, **new_params)
+            except Exception:
+                # Catch-reverse: restore the prior persisted value, then re-raise
+                # the ORIGINAL error (mirrors create.py:_run_cleanup — best-effort
+                # rollback that never masks the real failure).
+                try:
+                    set_cmd_mod.set_cmd(self._name, **old_params)
+                except Exception as reverse_err:  # noqa: BLE001 — best-effort
+                    _instances_logger.warning(
+                        "rollback of %s on %s failed: %s",
+                        field, self._name, reverse_err,
+                    )
+                raise
+            # Success: the persisted state matches new_params -> update the cache.
+            setattr(self, cache_attr, new_cached)
 
     # ------------------------------------------------------------------- #
     # create / transient — the abstract contract (§10.1, §11.0).
@@ -364,7 +687,7 @@ class Instance(ABC):
         from kento import start as start_mod
 
         start_mod.start(self.name, container_dir=self._dir, mode=self._mode)
-        self.status = _resolve_status(self._dir, self._mode)
+        self._status = _resolve_status(self._dir, self._mode)
 
     # ------------------------------------------------------------------- #
     # M6 — stop: graceful-or-forced shutdown (§11.2, LOCKED).
@@ -410,7 +733,7 @@ class Instance(ABC):
                 self.name, force=True,
                 container_dir=self._dir, mode=self._mode,
             )
-            self.status = _resolve_status(self._dir, self._mode)
+            self._status = _resolve_status(self._dir, self._mode)
             return
 
         # Both remaining paths begin with a genuine graceful (no-kill) stop.
@@ -431,12 +754,12 @@ class Instance(ABC):
             else:
                 # Graceful only: NEVER kill -> report it is still running. Resolve
                 # status first so the handle reflects the still-running reality.
-                self.status = _resolve_status(self._dir, self._mode)
+                self._status = _resolve_status(self._dir, self._mode)
                 from kento.errors import StopTimeout
 
                 raise StopTimeout("cannot stop; try force")
 
-        self.status = _resolve_status(self._dir, self._mode)
+        self._status = _resolve_status(self._dir, self._mode)
 
     # ------------------------------------------------------------------- #
     # M7 — destroy: stop (if needed) + remove instance + writable layer (§11.2).
@@ -488,7 +811,7 @@ class Instance(ABC):
         from kento import reset as reset_mod
 
         reset_mod.reset(self.name, container_dir=self._dir, mode=self._mode)
-        self.status = _resolve_status(self._dir, self._mode)
+        self._status = _resolve_status(self._dir, self._mode)
 
     # ------------------------------------------------------------------- #
     # M3 — adopt: heal an orphaned PVE instance; classmethod (§11.1, §11.9).
@@ -634,17 +957,49 @@ class SystemContainer(Instance):
 
     Adds the LXC backend-specific cached fields to the base §11.0 set:
 
-    * ``unprivileged`` — ``kento-unprivileged``; create-time (immutable).
-    * ``lxc_args`` — ``kento-lxc-args`` (``--lxc-arg``); settable in a later
-      block (read-only here).
+    * ``unprivileged`` — ``kento-unprivileged``; create-time (immutable) —
+      getter-only (§11.2 M9).
+    * ``lxc_args`` — ``kento-lxc-args`` (``--lxc-arg``); SETTABLE, stopped-only
+      (§11.2 M9 — config consumed at boot).
 
     ``nesting`` lives on the BASE (run 30). ``apparmor`` is intentionally NOT a
     field — it is the ambient ``KENTO_APPARMOR_PROFILE`` env hatch, already
     inspectable via ``diagnose`` (§11.0 ‡).
     """
 
-    unprivileged: bool
-    lxc_args: tuple[str, ...]
+    # Backing fields (§11.2 M9) — set by the loader; exposed via properties.
+    _unprivileged: bool
+    _lxc_args: tuple[str, ...]
+
+    @property
+    def unprivileged(self) -> bool:
+        """Unprivileged (idmap) backend — create-time, immutable. Getter-only."""
+        return self._unprivileged
+
+    @property
+    def lxc_args(self) -> "tuple[str, ...]":
+        return self._lxc_args
+
+    @lxc_args.setter
+    def lxc_args(self, value: "Sequence[str]") -> None:
+        """Set the ``--lxc-arg`` pass-through — STOPPED-ONLY (§11.2 M9).
+
+        Assign the WHOLE list (declarative replace, mirroring ``kento set
+        --lxc-arg``); persisted via ``set_cmd(lxc_args=[...])``. Stopped-only —
+        the native LXC ``config`` is consumed at boot, so a running instance
+        raises ``StateError``. ``set_cmd`` enforces plain-LXC-only validity and
+        the structural-line denylist (an invalid arg raises BEFORE any write).
+        An empty list CLEARS the pass-through (``set_cmd``'s clear sentinel). The
+        cached value is normalized to a ``tuple`` (the field's immutable type).
+        """
+        args = list(value)
+        self._set_via_set_cmd(
+            field="lxc_args",
+            new_params={"lxc_args": _set_cmd_list_arg(args)},
+            old_params={"lxc_args": _set_cmd_list_arg(list(self._lxc_args))},
+            new_cached=tuple(args),
+            cache_attr="_lxc_args",
+        )
 
     @classmethod
     def create(cls, *args, **kwargs) -> "SystemContainer":
@@ -679,15 +1034,40 @@ class VirtualMachine(Instance):
 
     Adds the VM backend-specific cached field to the base §11.0 set:
 
-    * ``qemu_args`` — ``kento-qemu-args`` (``--qemu-arg``); settable in a later
-      block (read-only here).
+    * ``qemu_args`` — ``kento-qemu-args`` (``--qemu-arg``); SETTABLE, stopped-only
+      (§11.2 M9 — argv consumed at boot).
 
     ``nesting`` lives on the BASE (run 30; VM nested-virt CPU features).
     ``kernel``/``initramfs``/``machine`` are image-contract constants, NOT fields
     (M16, §11.0).
     """
 
-    qemu_args: tuple[str, ...]
+    # Backing field (§11.2 M9) — set by the loader; exposed via the property.
+    _qemu_args: tuple[str, ...]
+
+    @property
+    def qemu_args(self) -> "tuple[str, ...]":
+        return self._qemu_args
+
+    @qemu_args.setter
+    def qemu_args(self, value: "Sequence[str]") -> None:
+        """Set the ``--qemu-arg`` pass-through — STOPPED-ONLY (§11.2 M9).
+
+        Assign the WHOLE list (declarative replace, mirroring ``kento set
+        --qemu-arg``); persisted via ``set_cmd(qemu_args=[...])``. Stopped-only —
+        the QEMU argv is consumed at boot, so a running instance raises
+        ``StateError``. ``set_cmd`` enforces VM-only validity and the argv
+        denylist (an invalid arg raises BEFORE any write). An empty list CLEARS
+        the pass-through. The cached value is normalized to a ``tuple``.
+        """
+        args = list(value)
+        self._set_via_set_cmd(
+            field="qemu_args",
+            new_params={"qemu_args": _set_cmd_list_arg(args)},
+            old_params={"qemu_args": _set_cmd_list_arg(list(self._qemu_args))},
+            new_cached=tuple(args),
+            cache_attr="_qemu_args",
+        )
 
     @classmethod
     def create(cls, *args, **kwargs) -> "VirtualMachine":
@@ -710,6 +1090,136 @@ class VirtualMachine(Instance):
             "VirtualMachine.transient is built in Phase 4 (M27); this Phase-3 "
             "block is read-only (get/list/refresh)."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Typed-value -> set_cmd-param decomposition (§11.2 M9 setters).
+#
+# The setters take a WHOLE typed value (NetworkConnection / dict / Sequence) and
+# decompose it into the EXACT ``set_cmd.set_cmd`` keyword params (the inverse of
+# the loader's ``_load_*`` mappings). Getting the param strings right is JC3 — a
+# wrong mapping silently mis-persists. ``set_cmd`` then validates + writes.
+# --------------------------------------------------------------------------- #
+
+
+def _set_cmd_list_arg(args: list[str]) -> list[str]:
+    """Normalize a pass-through list for ``set_cmd``'s replace/clear sentinel.
+
+    ``set_cmd`` reads a list arg via ``_classify_list``: ``None`` => skip (we
+    never want skip — a declarative set always acts), ``[non-empty...]`` =>
+    REPLACE, ``[]`` or all-empty => CLEAR. A whole-list assignment of ``[]`` must
+    therefore reach ``set_cmd`` as the CLEAR sentinel ``[""]`` (an all-empty
+    list), NOT ``[]`` — both classify as clear, but ``[""]`` is the explicit form
+    create.py/the CLI emit. A non-empty list passes through verbatim.
+    """
+    return args if args else [""]
+
+
+def _network_to_set_cmd_params(conn: "NetworkConnection") -> "dict[str, object]":
+    """Decompose a ``NetworkConnection`` into ``set_cmd`` net params (§5, M9).
+
+    The inverse of ``_load_network`` — map the typed ``NetworkMode`` + the two
+    L2/L3 maps back to the exact ``set_cmd`` keyword params
+    (``network``/``ip``/``gateway``/``dns``/``mac``), the strings
+    ``_parse_network_arg`` and the net-delta path consume.
+
+    DECLARATIVE WHOLE-VALUE set (M9: assign a whole new ``NetworkConnection``).
+    ``set_cmd`` does an RMW MERGE — it overwrites ONLY the params you pass and
+    leaves the rest at their current on-disk value. So to make the assignment
+    truly replace the prior state we pass the FULL param set every time,
+    explicitly clearing fields the new value doesn't define (else a switch from
+    STATIC -> HOST/DHCP would leave a stale static ip/gateway/dns on disk):
+
+    * ``DHCP``   -> ``network="bridge[=name]"``, ``ip="dhcp"`` (clears ip+gw),
+      ``dns=""`` (clears dns — ``ip="dhcp"`` does NOT touch dns).
+    * ``STATIC`` -> ``network="bridge[=name]"``, ``ip="address[/subnet]"``,
+      ``gateway=<gw or "">``, ``dns=<dns1 or "">``.
+    * ``USER``   -> ``network="usermode"``,  ``ip="dhcp"``, ``dns=""``.
+    * ``HOST``   -> ``network="host"``,       ``ip="dhcp"``, ``dns=""``.
+    * ``DISABLED`` -> ``network="none"``,     ``ip="dhcp"``, ``dns=""``.
+
+    ``ip="dhcp"`` is safe for the non-bridge modes: ``set_cmd`` sets the resolved
+    ``new["ip"]=None`` for ``dhcp``, so its "``--ip`` requires bridge" guard does
+    NOT fire (it checks ``new["ip"] is not None``); it simply means "no static
+    address", which is exactly the non-bridge reality. ``""`` is ``set_cmd``'s
+    clear sentinel (``x or None`` -> None) for ``gateway``/``dns``.
+
+    ``mac`` (``link_config[mac]``) is passed when present — VM-only in
+    ``set_cmd``; on an LXC instance ``set_cmd`` raises ``ModeError`` (a mac on a
+    plain-LXC NIC IS invalid), which propagates rather than being silently
+    dropped. ``dns2`` cannot round-trip (``set_cmd`` has a single ``--dns``) — a
+    value carrying ``dns2`` is REJECTED with ``ValidationError`` rather than
+    silently losing it (gate C). ``searchdomain`` is not in the typed model
+    (§5.3) and is intentionally absent here.
+    """
+    from kento.errors import ValidationError
+
+    mode = conn.mode
+    bridge = conn.link_config.get("bridge")
+    bridge_arg = f"bridge={bridge}" if bridge else "bridge"
+    mac = conn.link_config.get("mac")
+
+    if "dns2" in conn.ip_config:
+        raise ValidationError(
+            "NetworkConnection.ip_config carries 'dns2', but the persistence "
+            "layer (set_cmd) supports a single DNS server. Drop 'dns2' (a "
+            "second resolver is not yet round-trippable through `kento set`)."
+        )
+
+    if mode is NetworkMode.STATIC:
+        params: dict[str, object] = {"network": bridge_arg}
+        address = conn.ip_config.get("address")
+        subnet = conn.ip_config.get("subnet")
+        if address is not None:
+            params["ip"] = f"{address}/{subnet}" if subnet else address
+        params["gateway"] = conn.ip_config.get("gateway") or ""
+        params["dns"] = conn.ip_config.get("dns1") or ""
+    else:
+        # DHCP / USER / HOST / DISABLED: no static L3. Clear ip+gateway (ip=dhcp)
+        # and dns explicitly so a prior STATIC value does not linger on disk.
+        network = {
+            NetworkMode.DHCP: bridge_arg,
+            NetworkMode.USER: "usermode",
+            NetworkMode.HOST: "host",
+            NetworkMode.DISABLED: "none",
+        }[mode]
+        params = {"network": network, "ip": "dhcp", "dns": ""}
+
+    if mac is not None:
+        params["mac"] = mac
+    return params
+
+
+def _resources_to_set_cmd_params(resources: "dict[str, int]") -> "dict[str, object]":
+    """Decompose the ``resources`` bag into ``set_cmd(memory=, cores=)`` (M9).
+
+    The inverse of ``_load_resources``: ``memory`` (MiB) and ``cores`` map to the
+    ``set_cmd`` scalar params; any other key is rejected (the bag is open at the
+    type level, §2 principle 8, but only memory/cores are persistable today — an
+    unknown key would silently vanish, so we fail loud per §2 principle 5). A
+    non-int value is likewise a typed ``ValidationError``. Only the keys PRESENT
+    in the bag are passed (an absent key => ``None`` => left unchanged by
+    ``set_cmd``); this is a declarative set of the named resources.
+    """
+    from kento.errors import ValidationError
+
+    known = {"memory", "cores"}
+    unknown = set(resources) - known
+    if unknown:
+        raise ValidationError(
+            f"unsupported resources key(s) {sorted(unknown)!r}; only "
+            f"{sorted(known)!r} are settable."
+        )
+    params: dict[str, object] = {}
+    for key in ("memory", "cores"):
+        if key in resources:
+            value = resources[key]
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValidationError(
+                    f"resources[{key!r}] must be an int, got {value!r}."
+                )
+            params[key] = value
+    return params
 
 
 # --------------------------------------------------------------------------- #
@@ -757,30 +1267,35 @@ def _load_snapshot(container_dir: Path, mode: str) -> Instance:
     inst._dir = container_dir
     inst._mode = mode
 
+    # The loader writes the ``_``-prefixed BACKING fields directly (Block 11): the
+    # public ``name``/``status``/... are now getter-only properties (no setter), so
+    # ``inst.name = ...`` would raise ``AttributeError``. Settable fields likewise
+    # have their backing field set here — the setter is for EXTERNAL mutation.
     name = _read_meta(container_dir, "kento-name") or container_dir.name
-    inst.name = name
+    inst._name = name
     # † hostname: load the hostname key, fallback to name. The create-WRITE
     # back-fill is Phase 6 (a live-path change); the read-fallback is correct
     # now — a pre-back-fill instance has no hostname key, so name is the honest
-    # value (§11.0 †).
-    inst.hostname = _read_meta(container_dir, "hostname") or name
-    inst.sources = _load_sources(container_dir)
-    inst.storage = _load_storage(container_dir)
-    inst.network = _load_network(container_dir)
-    inst.forwards = _load_forwards(container_dir)
-    inst.status = _resolve_status(container_dir, mode)
-    inst.resources = _load_resources(container_dir)
-    inst.platform_profile = _load_platform_profile(container_dir, mode)
-    inst.nesting = (_read_meta(container_dir, "kento-nesting") == "1")
-    inst.created = _load_created(container_dir)
-    inst.environment = _load_environment(container_dir)
+    # value (§11.0 †). A SET persists kento-hostname, so a later refresh reads it.
+    inst._hostname = _read_meta(container_dir, "hostname") or name
+    inst._sources = _load_sources(container_dir)
+    inst._storage = _load_storage(container_dir)
+    inst._network = _load_network(container_dir)
+    inst._forwards = _load_forwards(container_dir)
+    inst._status = _resolve_status(container_dir, mode)
+    inst._resources = _load_resources(container_dir)
+    inst._platform_profile = _load_platform_profile(container_dir, mode)
+    inst._nesting = (_read_meta(container_dir, "kento-nesting") == "1")
+    inst._created = _load_created(container_dir)
+    inst._environment = _load_environment(container_dir)
 
-    # Subclass-specific fields.
+    # Subclass-specific fields (backing fields; ``unprivileged`` is getter-only,
+    # ``lxc_args``/``qemu_args`` are settable in Block 11 — both backed by ``_``).
     if isinstance(inst, SystemContainer):
-        inst.unprivileged = (_read_meta(container_dir, "kento-unprivileged") == "1")
-        inst.lxc_args = _load_passthrough(container_dir, "kento-lxc-args")
+        inst._unprivileged = (_read_meta(container_dir, "kento-unprivileged") == "1")
+        inst._lxc_args = _load_passthrough(container_dir, "kento-lxc-args")
     else:  # VirtualMachine
-        inst.qemu_args = _load_passthrough(container_dir, "kento-qemu-args")
+        inst._qemu_args = _load_passthrough(container_dir, "kento-qemu-args")
 
     return inst
 
