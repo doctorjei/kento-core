@@ -2182,11 +2182,36 @@ def test_attach_is_on_base_instance():
 
 
 def test_attach_drops_nonzero_exit_code(tmp_path):
-    # Even a non-zero runtime return is dropped — attach is not a status check.
+    # The method's RETURN is still None — attach is not a status check.
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     with patch("kento.attach.attach", return_value=3):
         assert inst.attach() is None
+
+
+def test_attach_exit_code_none_before_attach(tmp_path):
+    # Jei-ruled M12 refinement: the code property is None until attach runs.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst.attach_exit_code is None
+
+
+def test_attach_stores_wrapped_exit_code(tmp_path):
+    # The wrapped tool's returncode is captured on the handle (not returned).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.attach.attach", return_value=7):
+        result = inst.attach()
+    assert result is None
+    assert inst.attach_exit_code == 7
+
+
+def test_attach_exit_code_is_read_only(tmp_path):
+    # Getter-only (§11.2 M9): assigning the public property raises.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with pytest.raises(AttributeError):
+        inst.attach_exit_code = 0
 
 
 def test_attach_dead_handle_raises(tmp_path):
@@ -2307,6 +2332,50 @@ def test_logs_negative_lines_rejected(tmp_path):
     inst = _snapshot(d, "lxc")
     with pytest.raises(ValidationError, match="must be >= 0"):
         inst._logs_argv(follow=False, lines=-1)
+
+
+def test_logs_argv_default_args_byte_identical(tmp_path):
+    # Jei-ruled M14 refinement: args=() (default) is byte-identical to before.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst._logs_argv(follow=False, lines=None, args=()) == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl"]
+
+
+def test_logs_argv_passthrough_args_appended(tmp_path):
+    # Arbitrary journalctl args are appended verbatim AFTER follow/lines flags.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert inst._logs_argv(
+        follow=True, lines=10, args=["--since", "yesterday", "-u", "sshd"],
+    ) == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl",
+        "-f", "-n", "10", "--since", "yesterday", "-u", "sshd"]
+
+
+def test_logs_argv_passthrough_pve_lxc(tmp_path):
+    d = _make_for_mode(tmp_path, "pve")  # dir name "200" IS the vmid
+    inst = _snapshot(d, "pve")
+    assert inst._logs_argv(
+        follow=False, lines=None, args=["--since", "10:00"],
+    ) == [
+        "pct", "exec", "200", "--", "journalctl", "--since", "10:00"]
+
+
+def test_logs_args_reach_subprocess(tmp_path):
+    # End-to-end: logs(args=...) threads the pass-through into the spawned argv.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    captured = {}
+
+    def fake_stream(argv):
+        captured["argv"] = argv
+        return iter(())
+
+    with patch("kento._instances._stream_lines", fake_stream):
+        list(inst.logs(args=["--grep", "boom"]))
+    assert captured["argv"] == [
+        "lxc-attach", "-n", inst.name, "--", "journalctl", "--grep", "boom"]
 
 
 def test_logs_dead_handle_raises(tmp_path):

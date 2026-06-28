@@ -163,6 +163,13 @@ class Instance(ABC):
     # raise, never silently no-op) instead of re-touching a removed directory.
     _dead: bool = False
 
+    # Last wrapped-attach exit code (M12 refinement, Jei-ruled): ``attach()``
+    # returns ``None`` (it is a console session, not a status check), but the
+    # wrapped tool's returncode is CAPTURED and stored here for callers that want
+    # it after the fact (plus logged). Class-level ``None`` default = "attach has
+    # not run on this handle yet"; ``attach`` sets the INSTANCE attribute.
+    _attach_exit_code: int | None = None
+
     # Cached snapshot fields (§11.0, §11.2 M9). Block 11 reshapes the field model
     # from plain attributes into TYPED PROPERTIES backed by ``_``-prefixed cached
     # fields. The settable boundary is enforced BY THE TYPE (M9): a settable field
@@ -1376,12 +1383,16 @@ class Instance(ABC):
         ``-> None`` (the int→None mapping, brief JC3): ``attach.attach`` returns
         the wrapped tool's exit code, but ``attach`` is an interactive console
         session, NOT a status check — the exit code of ``lxc-attach``/``pct
-        enter``/``qm terminal`` after a manual detach is not a meaningful result
-        to the caller (a clean detach and a session that ran a failing last
-        command are indistinguishable here). The spec locks ``-> None``; we DROP
-        the exit code deliberately. A genuine *failure to attach at all* (no
-        serial socket, not a tty, can't connect) is surfaced by ``attach.attach``
-        as a typed ``StateError`` — that propagates, it is not swallowed.
+        enter``/``qm terminal`` after a manual detach is not a meaningful return
+        value to the caller (a clean detach and a session that ran a failing last
+        command are indistinguishable here). The spec locks ``-> None``, so the
+        method does NOT return it. But the code is NOT thrown away (Jei-ruled M12
+        refinement): it is CAPTURED on the handle as :attr:`attach_exit_code` (a
+        read-only property, ``None`` until ``attach`` runs) and logged, so a
+        caller that wants it can read it after the fact. A genuine *failure to
+        attach at all* (no serial socket, not a tty, can't connect) is surfaced by
+        ``attach.attach`` as a typed ``StateError`` — that propagates, it is not
+        swallowed (and leaves ``attach_exit_code`` unchanged).
 
         Raises ``InstanceNotFoundError`` via ``_check_alive`` if the handle was
         destroyed.
@@ -1389,12 +1400,29 @@ class Instance(ABC):
         self._check_alive()
         from kento import attach as attach_mod
 
-        # Drop the interactive session's exit code (§11.3: attach is a console,
-        # not a status check). Pass the raw mode as the namespace hint is not
-        # needed — attach.attach re-resolves from the name across both spaces;
-        # a destroyed/renamed name would raise, which _check_alive pre-empts for
-        # the dead-handle case and attach.attach's own resolve handles otherwise.
-        attach_mod.attach(self.name)
+        # Run the interactive session. The wrapped tool's exit code is not the
+        # method's RETURN value (§11.3: attach is a console, not a status check),
+        # but we STORE it on the handle + log it (Jei-ruled refinement) so it is
+        # not lost. Pass only the name — attach.attach re-resolves across both
+        # namespaces; the dead-handle case is pre-empted by _check_alive above.
+        code = attach_mod.attach(self.name)
+        self._attach_exit_code = code
+        _instances_logger.info(
+            "attach session for %s exited with code %s", self.name, code,
+        )
+
+    @property
+    def attach_exit_code(self) -> int | None:
+        """The wrapped tool's exit code from the last :meth:`attach` (M12).
+
+        ``None`` until ``attach`` has run on this handle; afterward it is the
+        ``lxc-attach``/``pct enter``/``qm terminal``/serial-relay returncode from
+        the most recent attach session. Read-only (getter-only — §11.2 M9). The
+        code is informational: ``attach`` itself returns ``None`` (a console
+        session is not a status check), but the code is preserved here for callers
+        that want it (Jei-ruled M12 refinement).
+        """
+        return self._attach_exit_code
 
 
 # --------------------------------------------------------------------------- #
@@ -1600,7 +1628,11 @@ class SystemContainer(Instance):
     # mode-dispatch with PIPED stdout, like Block 07's direct-podman query.
     # ------------------------------------------------------------------- #
     def logs(
-        self, *, follow: bool = False, lines: int | None = None,
+        self,
+        *,
+        follow: bool = False,
+        lines: int | None = None,
+        args: "Sequence[str]" = (),
     ) -> "Iterator[str]":
         """Line-oriented journal stream from the guest (M14, §11.3).
 
@@ -1617,6 +1649,14 @@ class SystemContainer(Instance):
           GC / breaking out of the loop) terminates the ``journalctl -f`` child
           so no follower process leaks (brief JC2).
 
+        ``args`` (Jei-ruled M14 refinement — preserve the CLI's journalctl
+        pass-through): an OPTIONAL sequence of extra ``journalctl`` arguments
+        appended verbatim after the ``follow``/``lines`` flags (e.g.
+        ``("--since", "yesterday")``, ``("-u", "sshd")``). ``follow``/``lines``
+        stay typed conveniences; with ``args=()`` (the default) the invocation is
+        BYTE-IDENTICAL to before. ``args`` is the raw pass-through escape hatch for
+        the full journalctl surface the typed flags do not model.
+
         ADDITIVE (does NOT touch ``logs.py``): ``logs.logs`` streams to inherited
         stdout and returns an int — un-wrappable into an iterator — so this
         reimplements the same LXC-only ``lxc-attach``/``pct exec journalctl``
@@ -1631,19 +1671,23 @@ class SystemContainer(Instance):
         lifetime is bounded by iteration.
         """
         self._check_alive()
-        argv = self._logs_argv(follow=follow, lines=lines)
+        argv = self._logs_argv(follow=follow, lines=lines, args=args)
         return _stream_lines(argv)
 
-    def _logs_argv(self, *, follow: bool, lines: int | None) -> list[str]:
+    def _logs_argv(
+        self, *, follow: bool, lines: int | None, args: "Sequence[str]" = (),
+    ) -> list[str]:
         """Build the host argv that runs ``journalctl`` in the guest (M14).
 
         Mirrors ``logs.py``'s LXC-only dispatch (plain-lxc ``lxc-attach -n
         <name>`` / pve-lxc ``pct exec <vmid>``), then appends ``journalctl`` with
-        the args derived from ``follow``/``lines``:
+        the args derived from ``follow``/``lines`` and finally the verbatim
+        ``args`` pass-through:
 
         * ``follow=True``  -> ``-f`` (live tail; the open-iterator case).
         * ``lines`` set    -> ``-n <N>`` (tail the last N — the spec's ``lines=N``
           snapshot semantics; valid with or without ``-f``).
+        * ``args``         -> appended verbatim (the journalctl pass-through).
 
         A negative ``lines`` is a ``ValidationError`` (``journalctl -n`` wants a
         non-negative count; we reject at the boundary rather than emit a bad arg,
@@ -1662,6 +1706,7 @@ class SystemContainer(Instance):
             jargs.append("-f")
         if lines is not None:
             jargs += ["-n", str(lines)]
+        jargs += list(args)  # verbatim journalctl pass-through (Jei-ruled M14)
 
         if self._mode == "pve":
             # pve-lxc: the instance directory name IS the VMID (mirrors logs.py).
