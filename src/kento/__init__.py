@@ -77,6 +77,8 @@ __all__ = [
     "next_instance_name", "pve_config_exists", "is_running",
     "resolve_container", "resolve_in_namespace", "resolve_any",
     "check_name_conflict", "LXC_BASE", "VM_BASE",
+    # module-level diagnosis entry point (Block 10 — global host+images+instances)
+    "diagnose",
 ]
 
 LXC_BASE = Path("/var/lib/lxc")
@@ -524,3 +526,54 @@ def check_name_conflict(name: str, target_namespace: str) -> bool:
     else:
         other_base = LXC_BASE
     return _scan_namespace(name, other_base) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Module-level diagnosis entry point — ``kento.diagnose()`` (Block 10, §11.8 D3).
+#
+# The global, host-wide diagnostic op: HOST checks + every image + every
+# instance (both namespaces), mirroring the future ``kento.version()`` — a
+# property of the library, not of a single handle. It is what ``kento diagnose``
+# (no name) maps to. Companions ``instance.diagnose()`` / ``image.diagnose()``
+# narrow to one domain/subject; this returns ALL findings (all three domains).
+#
+# THE NAME-COLLISION FOOT-GUN (gate C) — and why the import order below matters.
+# There is a sibling SUBMODULE ``kento/diagnose.py`` (the procedural runtime;
+# the CLI does ``from kento.diagnose import run_diagnostics``). On first import,
+# Python binds the submodule as the parent package's ``diagnose`` attribute.
+# Defining a top-level ``def diagnose`` here would normally be CLOBBERED right
+# back by any later ``from kento.diagnose import ...`` that triggers a FRESH
+# import of the submodule (a fresh import re-sets the parent attr to the module).
+#
+# Resolution (verified against real CPython, both import orders): import the
+# submodule into ``sys.modules`` FIRST (the line below), THEN bind the function.
+# Once the submodule is cached in ``sys.modules``, a subsequent
+# ``from kento.diagnose import run_diagnostics`` finds the cached module and does
+# NOT re-run the import machinery, so it does NOT re-set ``kento.diagnose`` — the
+# function binding survives. ``kento.diagnose`` is the function; ``kento.diagnose
+# .run_diagnostics`` still resolves through the cached submodule. The regression
+# test (test_diagnose_module / test_instances) pins BOTH orders.
+# --------------------------------------------------------------------------- #
+from kento import diagnose as _diagnose_submodule  # noqa: E402,F401  (cache it FIRST)
+
+
+def diagnose() -> "Diagnosis":  # noqa: F821  (Diagnosis re-exported above)
+    """Run the global, host-wide diagnostic scan (§11.8 D3 b).
+
+    Runs the existing ``kento.diagnose.run_diagnostics()`` (the whole-host scan:
+    HOST pre-flight checks + every image + every instance across both
+    namespaces, read-only / silent — it REPORTS, never reaps) and projects ALL
+    flat findings into a typed :class:`Diagnosis` (all three domains —
+    INSTANCE / IMAGE / HOST). This is the module-level companion to
+    ``instance.diagnose()`` (one instance's INSTANCE findings) and
+    ``image.diagnose()`` (the IMAGE domain); it mirrors the future
+    ``kento.version()`` as a property of the library, and is what ``kento
+    diagnose`` (no instance argument) maps to.
+
+    Performs I/O (the scan) via an explicit module-level call (§2 principle 2);
+    the returned ``Diagnosis`` is an inert value type.
+    """
+    from kento._diagnosis import diagnosis_from_report
+
+    report = _diagnose_submodule.run_diagnostics(None)
+    return diagnosis_from_report(report)

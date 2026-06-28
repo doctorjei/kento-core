@@ -330,3 +330,223 @@ def test_reclaim_report_is_frozen():
     r = ReclaimReport(dry_run=True)
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.dry_run = False  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# Block 10 — the pure mapper: run_diagnostics result dict -> Diagnosis.
+#
+# The mapper is the ONE place the flat procedural findings become the typed
+# domain model (§11.8 D3): category->domain, severity->CheckLevel, scope->
+# subject. Pure / no I/O — fed plain dicts in the run_diagnostics shape.
+# --------------------------------------------------------------------------- #
+
+from kento._diagnosis import (  # noqa: E402  (Block-10 internal helpers)
+    _CATEGORY_TO_DOMAIN,
+    _SEVERITY_TO_LEVEL,
+    _domain_for_category,
+    _subject_for_finding,
+    diagnosis_from_report,
+)
+
+
+def _raw(category, severity, scope, message="m", remediation=None):
+    """A flat run_diagnostics finding dict (the exact runtime shape)."""
+    return {
+        "category": category,
+        "severity": severity,
+        "scope": scope,
+        "message": message,
+        "remediation": remediation,
+    }
+
+
+def _report(*findings):
+    return {
+        "checks": list(findings),
+        "problem_count": sum(1 for f in findings
+                             if f["severity"] in ("warn", "error")),
+        "instances_scanned": 0,
+    }
+
+
+# -- category -> domain (the single source of truth, §11.8 D3) ----------------
+
+
+def test_category_domain_map_covers_all_nine_runtime_categories():
+    # The nine categories the runtime emits, mapped to the three domains.
+    assert _CATEGORY_TO_DOMAIN == {
+        "status": DiagnosisDomain.INSTANCE,
+        "network": DiagnosisDomain.INSTANCE,
+        "mount": DiagnosisDomain.INSTANCE,
+        "portfwd": DiagnosisDomain.INSTANCE,
+        "cloudinit": DiagnosisDomain.INSTANCE,
+        "hold": DiagnosisDomain.IMAGE,
+        "apparmor": DiagnosisDomain.HOST,
+        "vmid": DiagnosisDomain.HOST,
+        "orphan": DiagnosisDomain.HOST,
+    }
+
+
+@pytest.mark.parametrize("category,domain", [
+    ("status", DiagnosisDomain.INSTANCE),
+    ("network", DiagnosisDomain.INSTANCE),
+    ("mount", DiagnosisDomain.INSTANCE),
+    ("portfwd", DiagnosisDomain.INSTANCE),
+    ("cloudinit", DiagnosisDomain.INSTANCE),
+    ("hold", DiagnosisDomain.IMAGE),
+    ("apparmor", DiagnosisDomain.HOST),
+    ("vmid", DiagnosisDomain.HOST),
+    ("orphan", DiagnosisDomain.HOST),
+])
+def test_domain_for_category_known(category, domain):
+    assert _domain_for_category(category) is domain
+
+
+def test_domain_for_unknown_category_defaults_host_total(caplog):
+    # An unknown/future category must NOT crash — defaults to HOST with a log.
+    import logging
+    with caplog.at_level(logging.WARNING, logger="kento"):
+        assert _domain_for_category("brand-new-check") is DiagnosisDomain.HOST
+    assert any("unrecognized diagnose category" in r.message
+               for r in caplog.records)
+
+
+# -- severity -> CheckLevel (warn -> WARNING; unknown -> INFO, total) ---------
+
+
+def test_severity_to_level_map():
+    assert _SEVERITY_TO_LEVEL == {
+        "ok": CheckLevel.OK,
+        "info": CheckLevel.INFO,
+        "warn": CheckLevel.WARNING,   # the wire word maps to the library word
+        "error": CheckLevel.ERROR,
+    }
+
+
+def test_warn_maps_to_warning_not_a_literal_warning_string():
+    d = diagnosis_from_report(_report(_raw("orphan", "warn", "ghost")))
+    assert d.findings[0].level is CheckLevel.WARNING
+
+
+def test_unknown_severity_defaults_info_total(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="kento"):
+        d = diagnosis_from_report(_report(_raw("apparmor", "weird", "host")))
+    assert d.findings[0].level is CheckLevel.INFO
+    assert any("unrecognized diagnose severity" in r.message
+               for r in caplog.records)
+
+
+# -- subject derivation (§11.8 D3, brief #2) ---------------------------------
+
+
+def test_subject_host_apparmor_and_vmid_are_none():
+    # scope=="host" => subject None (about the host, not a named subject).
+    assert _subject_for_finding(DiagnosisDomain.HOST, "host", "apparmor") is None
+    assert _subject_for_finding(DiagnosisDomain.HOST, "host", "vmid") is None
+
+
+def test_subject_instance_findings_carry_the_instance_name():
+    for cat in ("status", "network", "mount", "portfwd", "cloudinit"):
+        assert _subject_for_finding(
+            DiagnosisDomain.INSTANCE, "mybox", cat) == "mybox"
+
+
+def test_subject_host_orphan_carries_instance_name():
+    # orphan is HOST domain but its runtime scope IS the instance name — carried
+    # through (subject != None is allowed for HOST; brief #2).
+    assert _subject_for_finding(
+        DiagnosisDomain.HOST, "ghost", "orphan") == "ghost"
+
+
+def test_subject_image_hold_is_none_no_message_parsing():
+    # hold findings have scope "host"; the image ref is only in the message text
+    # (not parsed) -> subject None (documented limitation; brief #2).
+    assert _subject_for_finding(DiagnosisDomain.IMAGE, "host", "hold") is None
+
+
+# -- the full mapper: a representative mixed report ---------------------------
+
+
+def test_mapper_translates_every_field_faithfully():
+    d = diagnosis_from_report(_report(
+        _raw("status", "ok", "mybox", "running"),
+        _raw("orphan", "warn", "ghost", "config gone", "kento adopt ghost"),
+        _raw("apparmor", "error", "host", "parser missing", "install it"),
+        _raw("hold", "ok", "host", "no stale holds"),
+    ))
+    by_check = {f.check: f for f in d.findings}
+    # category carried verbatim into check.
+    assert set(by_check) == {"status", "orphan", "apparmor", "hold"}
+    # status: INSTANCE, subject=name, OK, remediation carried (None).
+    s = by_check["status"]
+    assert (s.domain, s.subject, s.level, s.remediation) == (
+        DiagnosisDomain.INSTANCE, "mybox", CheckLevel.OK, None)
+    # orphan: HOST domain, subject = the instance name, WARNING, remediation.
+    o = by_check["orphan"]
+    assert (o.domain, o.subject, o.level, o.remediation) == (
+        DiagnosisDomain.HOST, "ghost", CheckLevel.WARNING, "kento adopt ghost")
+    # apparmor: HOST, subject None, ERROR.
+    a = by_check["apparmor"]
+    assert (a.domain, a.subject, a.level) == (
+        DiagnosisDomain.HOST, None, CheckLevel.ERROR)
+    # hold: IMAGE, subject None.
+    h = by_check["hold"]
+    assert (h.domain, h.subject, h.level) == (
+        DiagnosisDomain.IMAGE, None, CheckLevel.OK)
+    # derived ok/problems honor the mapped levels.
+    assert d.ok is False
+    assert {f.check for f in d.problems} == {"orphan", "apparmor"}
+
+
+def test_mapper_empty_report_is_empty_diagnosis():
+    d = diagnosis_from_report({"checks": []})
+    assert d.findings == ()
+    assert d.ok is True
+
+
+def test_mapper_missing_keys_are_tolerated():
+    # A finding missing optional keys still maps (message/remediation default).
+    d = diagnosis_from_report({"checks": [{"category": "vmid",
+                                           "severity": "info", "scope": "host"}]})
+    f = d.findings[0]
+    assert f.message == "" and f.remediation is None
+    assert f.domain is DiagnosisDomain.HOST and f.subject is None
+
+
+# -- the optional narrowing filters (domain / subject) -----------------------
+
+
+def test_filter_by_domain_keeps_only_that_domain():
+    rep = _report(
+        _raw("status", "ok", "mybox"),
+        _raw("hold", "ok", "host"),
+        _raw("apparmor", "ok", "host"),
+    )
+    d = diagnosis_from_report(rep, domain=DiagnosisDomain.IMAGE)
+    assert [f.check for f in d.findings] == ["hold"]
+
+
+def test_filter_by_domain_and_subject_drops_other_instances():
+    # instance.diagnose filters on BOTH domain==INSTANCE AND subject==name, so a
+    # foreign instance's INSTANCE finding AND a foreign orphan(HOST) both drop.
+    rep = _report(
+        _raw("status", "ok", "mybox"),
+        _raw("network", "ok", "other"),       # different INSTANCE subject
+        _raw("orphan", "warn", "mybox"),       # HOST domain — dropped by domain
+        _raw("apparmor", "ok", "host"),        # HOST — dropped by domain
+    )
+    d = diagnosis_from_report(
+        rep, domain=DiagnosisDomain.INSTANCE, subject="mybox")
+    assert [f.check for f in d.findings] == ["status"]
+    assert all(f.subject == "mybox" for f in d.findings)
+
+
+def test_no_filters_keeps_all_findings():
+    rep = _report(
+        _raw("status", "ok", "mybox"),
+        _raw("hold", "ok", "host"),
+        _raw("apparmor", "ok", "host"),
+    )
+    d = diagnosis_from_report(rep)
+    assert len(d.findings) == 3
