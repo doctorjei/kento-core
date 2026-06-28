@@ -211,7 +211,16 @@ def _format_human(data: dict, verbose: bool, *,
     if "vmid" in data:
         lines.append(f"VMID:       {data['vmid']}")
     if "port" in data:
-        lines.append(f"Port:       {data['port']}")
+        # kento-port may now hold N forward specs (one per line, §5.7A). The
+        # JSON wire keeps the raw string verbatim (Phase 6 owns any projection);
+        # the human display lists each forward so N lines don't print mangled.
+        port_specs = [s for s in str(data["port"]).splitlines() if s.strip()]
+        if len(port_specs) <= 1:
+            lines.append(f"Port:       {data['port']}")
+        else:
+            lines.append(f"Port:       {port_specs[0]}")
+            for spec in port_specs[1:]:
+                lines.append(f"            {spec}")
     if "network" in data:
         lines.append(f"Network:    {data['network']}")
     if "mac" in data:

@@ -42,6 +42,92 @@ kento_nat_backend() {
 # Guard: once $CONTAINER_DIR/kento-portfwd-active exists the hook has already
 # installed rules for this boot, so subsequent invocations are no-ops.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Parse the kento-port spec file (§5.7A) into normalized forward records.
+#
+# Reads $1 (the kento-port path) and echoes one record per VALID forward:
+#   "<proto> <hport> <gport>"   (proto = tcp|udp; ports integers in 1..65535)
+#
+# 1.0 only ever WRITES the 2-element form `hostPort:guestPort[/protocol]`, so
+# the parse is: strip a trailing `/proto` (default tcp), then split the two
+# ports on a single `:`. A line with MORE than two colon-separated elements is
+# a 3/4-element address form (`hostIP:hostPort:...`) which 1.0 never writes and
+# the hook does not yet support — it is skipped with a log (the Python boundary
+# raises ForwardAddressNotImplemented before such a line is ever persisted).
+# This also reproduces F19 hardening: a tampered/corrupt line is rejected
+# rather than flowing into `nft add rule ...` as shell-expanded text.
+# ---------------------------------------------------------------------------
+parse_port_specs() {
+    _pp_file="$1"
+    while IFS= read -r _pp_line || [ -n "$_pp_line" ]; do
+        # Trim surrounding whitespace.
+        _pp_spec=$(printf '%s' "$_pp_line" | tr -d '[:space:]')
+        [ -n "$_pp_spec" ] || continue
+
+        # Split off an optional "/protocol" suffix (default tcp).
+        _pp_proto=tcp
+        case "$_pp_spec" in
+            */*)
+                _pp_proto="${_pp_spec##*/}"
+                _pp_spec="${_pp_spec%/*}"
+                ;;
+        esac
+        case "$_pp_proto" in
+            tcp|udp) : ;;
+            *)
+                echo "kento-hook: unsupported protocol '$_pp_proto' in kento-port (expected tcp/udp) -- skipping that forward" >&2
+                continue
+                ;;
+        esac
+
+        # The remaining body must be exactly two integer ports (1.0 form).
+        # Reject anything else: non-numeric chars, 3+-colon address forms,
+        # empty port, or a lone token.
+        case "$_pp_spec" in
+            *[!0-9:]*)  echo "kento-hook: invalid kento-port entry '$_pp_line' -- skipping that forward" >&2; continue ;;
+            *:*:*)      echo "kento-hook: address-form kento-port entry '$_pp_line' not yet supported -- skipping that forward" >&2; continue ;;
+            :*|*:)      echo "kento-hook: invalid kento-port entry '$_pp_line' -- skipping that forward" >&2; continue ;;
+            *:*)        : ;;
+            *)          echo "kento-hook: invalid kento-port entry '$_pp_line' -- skipping that forward" >&2; continue ;;
+        esac
+        _pp_hp="${_pp_spec%%:*}"
+        _pp_gp="${_pp_spec##*:}"
+        _pp_ok=1
+        for _pp_p in "$_pp_hp" "$_pp_gp"; do
+            if ! [ "$_pp_p" -ge 1 ] 2>/dev/null || ! [ "$_pp_p" -le 65535 ] 2>/dev/null; then
+                echo "kento-hook: port $_pp_p out of range 1..65535 in kento-port -- skipping that forward" >&2
+                _pp_ok=0
+                break
+            fi
+        done
+        [ "$_pp_ok" -eq 1 ] || continue
+        printf '%s %s %s\n' "$_pp_proto" "$_pp_hp" "$_pp_gp"
+    done < "$_pp_file"
+}
+
+# ---------------------------------------------------------------------------
+# Install the DNAT triplet (prerouting + output + hairpin masquerade) for ONE
+# forward against a resolved container IP, using the resolved backend. The rule
+# comment is `kento:NAME:proto:hport` so a single forward's rules are locatable
+# (Block 15 live removal); the post-stop teardown still matches all of an
+# instance's rules by the `kento:NAME:` prefix.
+#   $1 backend (nft|iptables)  $2 ip  $3 proto  $4 hport  $5 gport  $6 name
+# ---------------------------------------------------------------------------
+install_forward_rules() {
+    _if_backend="$1"; _if_ip="$2"; _if_proto="$3"
+    _if_hp="$4"; _if_gp="$5"; _if_name="$6"
+    _if_comment="kento:${_if_name}:${_if_proto}:${_if_hp}"
+    if [ "$_if_backend" = nft ]; then
+        nft add rule ip kento prerouting "$_if_proto" dport "$_if_hp" dnat to "${_if_ip}:${_if_gp}" comment "\"${_if_comment}\""
+        nft add rule ip kento output "$_if_proto" dport "$_if_hp" dnat to "${_if_ip}:${_if_gp}" comment "\"${_if_comment}\""
+        nft add rule ip kento postrouting ip saddr 127.0.0.0/8 ip daddr "${_if_ip}" "$_if_proto" dport "$_if_gp" masquerade comment "\"${_if_comment}\""
+    else
+        iptables -t nat -A PREROUTING -p "$_if_proto" --dport "$_if_hp" -j DNAT --to-destination "${_if_ip}:${_if_gp}" -m comment --comment "${_if_comment}"
+        iptables -t nat -A OUTPUT -p "$_if_proto" --dport "$_if_hp" -j DNAT --to-destination "${_if_ip}:${_if_gp}" -m comment --comment "${_if_comment}"
+        iptables -t nat -A POSTROUTING -s 127.0.0.0/8 -d "${_if_ip}" -p "$_if_proto" --dport "$_if_gp" -j MASQUERADE -m comment --comment "${_if_comment}"
+    fi
+}
+
 setup_port_forwarding() {
     CONTAINER_ID_ARG="$1"  # container name (plain LXC) or VMID (PVE)
 
@@ -51,33 +137,13 @@ setup_port_forwarding() {
     # Already configured for this boot (another hook point beat us to it)?
     [ -f "$CONTAINER_DIR/kento-portfwd-active" ] && return 0
 
-    PORT_SPEC=$(cat "$PORT_FILE" | tr -d '[:space:]')
-
-    # F19: validate PORT_SPEC before feeding into nft. kento's CLI
-    # validates --port at create time, but kento-port is a plain file on
-    # disk; a tampered/corrupted value here would otherwise flow straight
-    # into `nft add rule ... dport "$HOST_PORT"` as shell-expanded text.
-    # Require strictly HOST:GUEST where both are integers in [1, 65535].
-    _kento_port_valid=1
-    case "$PORT_SPEC" in
-        *[!0-9:]*)      _kento_port_valid=0 ;;
-        *:*:*)          _kento_port_valid=0 ;;
-        :*|*:)          _kento_port_valid=0 ;;
-        *:*)            : ;;
-        *)              _kento_port_valid=0 ;;
-    esac
-    if [ "$_kento_port_valid" -eq 0 ]; then
-        echo "kento-hook: invalid kento-port $PORT_SPEC (expected HOST:GUEST integers) -- skipping port forwarding" >&2
+    # Parse N forward specs (§5.7A). Each valid line -> "proto hport gport".
+    # Invalid/address-form lines are skipped-with-log inside parse_port_specs.
+    FORWARDS=$(parse_port_specs "$PORT_FILE")
+    if [ -z "$FORWARDS" ]; then
+        echo "kento-hook: no valid forwards in kento-port -- skipping port forwarding" >&2
         return 0
     fi
-    HOST_PORT="${PORT_SPEC%%:*}"
-    GUEST_PORT="${PORT_SPEC##*:}"
-    for _kp in "$HOST_PORT" "$GUEST_PORT"; do
-        if ! [ "$_kp" -ge 1 ] 2>/dev/null || ! [ "$_kp" -le 65535 ] 2>/dev/null; then
-            echo "kento-hook: port $_kp out of range 1..65535 in kento-port -- skipping port forwarding" >&2
-            return 0
-        fi
-    done
 
     # Discover container IP: static (kento-net) fast path, or DHCP
     # discovery via lxc-info in a detached background worker.
@@ -123,19 +189,27 @@ setup_port_forwarding() {
     fi
 
     if [ -n "$CONTAINER_IP" ]; then
-        if [ "$BACKEND" = nft ]; then
-            nft add rule ip kento prerouting tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
-            nft add rule ip kento output tcp dport "$HOST_PORT" dnat to "${CONTAINER_IP}:${GUEST_PORT}" comment "\"kento:${NAME}\""
-            nft add rule ip kento postrouting ip saddr 127.0.0.0/8 ip daddr "${CONTAINER_IP}" tcp dport "$GUEST_PORT" masquerade comment "\"kento:${NAME}\""
-        else
-            # iptables fallback: append to the standard nat-table chains.
-            # Rules are comment-tagged "kento:NAME" so post-stop can find and
-            # delete exactly the rules this instance installed.
-            iptables -t nat -A PREROUTING -p tcp --dport "$HOST_PORT" -j DNAT --to-destination "${CONTAINER_IP}:${GUEST_PORT}" -m comment --comment "kento:${NAME}"
-            iptables -t nat -A OUTPUT -p tcp --dport "$HOST_PORT" -j DNAT --to-destination "${CONTAINER_IP}:${GUEST_PORT}" -m comment --comment "kento:${NAME}"
-            iptables -t nat -A POSTROUTING -s 127.0.0.0/8 -d "${CONTAINER_IP}" -p tcp --dport "$GUEST_PORT" -j MASQUERADE -m comment --comment "kento:${NAME}"
-        fi
-        echo "${HOST_PORT}:${GUEST_PORT}:${CONTAINER_IP}" > "$CONTAINER_DIR/kento-portfwd-active"
+        # Static IP: install all N forwards synchronously. Iterate in the MAIN
+        # shell (IFS=newline for-loop, not a `... | while` pipe) so a failing
+        # rule install still trips `set -e` and aborts start — preserving the
+        # pre-multi behavior where an unguarded rule failure failed the hook.
+        # The active marker records ONE line per installed forward
+        # ("hport:gport:ip:proto") so teardown/diagnostics see the full set; the
+        # backend marker records the resolved backend once.
+        : > "$CONTAINER_DIR/kento-portfwd-active"
+        _oldifs=$IFS
+        IFS='
+'
+        for _rec in $FORWARDS; do
+            IFS=$_oldifs
+            # shellcheck disable=SC2086
+            set -- $_rec
+            install_forward_rules "$BACKEND" "$CONTAINER_IP" "$1" "$2" "$3" "$NAME"
+            echo "$2:$3:${CONTAINER_IP}:$1" >> "$CONTAINER_DIR/kento-portfwd-active"
+            IFS='
+'
+        done
+        IFS=$_oldifs
         echo "$BACKEND" > "$CONTAINER_DIR/kento-portfwd-backend"
     else
         # DHCP path — detach a worker that polls lxc-info and installs
@@ -144,14 +218,20 @@ setup_port_forwarding() {
         # the worker need not re-detect).
         CONTAINER_ID="${LXC_NAME:-$CONTAINER_ID_ARG}"
         WORKER="$CONTAINER_DIR/kento-portfwd-worker.sh"
+        # FORWARDS (one "proto hport gport" record per line) is baked into the
+        # worker verbatim — its embedded newlines survive the double-quoted
+        # heredoc expansion, so the worker iterates the same N forwards once the
+        # DHCP address appears. Rule commands are RE-IMPLEMENTED here rather than
+        # sourced (the worker is a standalone detached script); they mirror
+        # install_forward_rules exactly, including the kento:NAME:proto:hport
+        # comment.
         cat > "$WORKER" <<WORKER_EOF
 #!/bin/sh
 CID="$CONTAINER_ID"
 NAME="$NAME"
-HOST_PORT="$HOST_PORT"
-GUEST_PORT="$GUEST_PORT"
 CONTAINER_DIR="$CONTAINER_DIR"
 BACKEND="$BACKEND"
+FORWARDS="$FORWARDS"
 # Bail out if rules already installed (e.g. another hook raced ahead).
 [ -f "\$CONTAINER_DIR/kento-portfwd-active" ] && exit 0
 # Bail out if the container was stopped while we were being launched —
@@ -184,26 +264,39 @@ fi
 # before we commit rules. Without this, a late worker could install
 # orphan DNAT/masquerade rules into the shared table for a dead container.
 [ -f "\$CONTAINER_DIR/kento-portfwd-cancel" ] && exit 0
-if [ "\$BACKEND" = nft ]; then
-    nft add rule ip kento prerouting tcp dport "\$HOST_PORT" \\
-        dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
-    nft add rule ip kento output tcp dport "\$HOST_PORT" \\
-        dnat to "\$IP:\$GUEST_PORT" comment "\"kento:\$NAME\""
-    nft add rule ip kento postrouting ip saddr 127.0.0.0/8 \\
-        ip daddr "\$IP" tcp dport "\$GUEST_PORT" \\
-        masquerade comment "\"kento:\$NAME\""
-else
-    iptables -t nat -A PREROUTING -p tcp --dport "\$HOST_PORT" \\
-        -j DNAT --to-destination "\$IP:\$GUEST_PORT" \\
-        -m comment --comment "kento:\$NAME"
-    iptables -t nat -A OUTPUT -p tcp --dport "\$HOST_PORT" \\
-        -j DNAT --to-destination "\$IP:\$GUEST_PORT" \\
-        -m comment --comment "kento:\$NAME"
-    iptables -t nat -A POSTROUTING -s 127.0.0.0/8 -d "\$IP" \\
-        -p tcp --dport "\$GUEST_PORT" -j MASQUERADE \\
-        -m comment --comment "kento:\$NAME"
-fi
-echo "\$HOST_PORT:\$GUEST_PORT:\$IP" > "\$CONTAINER_DIR/kento-portfwd-active"
+: > "\$CONTAINER_DIR/kento-portfwd-active"
+_oldifs=\$IFS
+IFS='
+'
+for _rec in \$FORWARDS; do
+    IFS=\$_oldifs
+    set -- \$_rec
+    _proto="\$1"; _hp="\$2"; _gp="\$3"
+    _comment="kento:\${NAME}:\${_proto}:\${_hp}"
+    if [ "\$BACKEND" = nft ]; then
+        nft add rule ip kento prerouting "\$_proto" dport "\$_hp" \\
+            dnat to "\$IP:\$_gp" comment "\"\$_comment\""
+        nft add rule ip kento output "\$_proto" dport "\$_hp" \\
+            dnat to "\$IP:\$_gp" comment "\"\$_comment\""
+        nft add rule ip kento postrouting ip saddr 127.0.0.0/8 \\
+            ip daddr "\$IP" "\$_proto" dport "\$_gp" \\
+            masquerade comment "\"\$_comment\""
+    else
+        iptables -t nat -A PREROUTING -p "\$_proto" --dport "\$_hp" \\
+            -j DNAT --to-destination "\$IP:\$_gp" \\
+            -m comment --comment "\$_comment"
+        iptables -t nat -A OUTPUT -p "\$_proto" --dport "\$_hp" \\
+            -j DNAT --to-destination "\$IP:\$_gp" \\
+            -m comment --comment "\$_comment"
+        iptables -t nat -A POSTROUTING -s 127.0.0.0/8 -d "\$IP" \\
+            -p "\$_proto" --dport "\$_gp" -j MASQUERADE \\
+            -m comment --comment "\$_comment"
+    fi
+    echo "\$_hp:\$_gp:\$IP:\$_proto" >> "\$CONTAINER_DIR/kento-portfwd-active"
+    IFS='
+'
+done
+IFS=\$_oldifs
 echo "\$BACKEND" > "\$CONTAINER_DIR/kento-portfwd-backend"
 WORKER_EOF
         chmod +x "$WORKER"
@@ -482,24 +575,31 @@ case "$HOOK_TYPE" in
             # delete the first matching rule until none remain.
             for chain in PREROUTING OUTPUT POSTROUTING; do
                 while :; do
-                    # iptables renders the tag as `/* kento:NAME */`
-                    # (space-delimited). Anchor to a trailing boundary so
-                    # `kento:web` does NOT match `kento:web2`'s rule; NAME is
-                    # regex-escaped (NAME_RE) so a name's `.` is a literal dot.
+                    # The per-forward comment is now `kento:NAME:proto:hport`
+                    # (Block 14); pre-14 rules carried the bare `kento:NAME`.
+                    # Match `kento:NAME` followed by `:` (the new suffix) OR a
+                    # space / end-of-field (the legacy bare form) so BOTH are
+                    # torn down while `kento:web` still never matches
+                    # `kento:web2` (the char after the name must be `:`, space,
+                    # or boundary — never a digit). NAME is regex-escaped
+                    # (NAME_RE) so a name's `.` is a literal dot.
                     n=$(iptables -t nat -L "$chain" --line-numbers -n 2>/dev/null \
-                        | grep -E "kento:${NAME_RE}( |\$)" | head -1 | awk '{print $1}')
+                        | grep -E "kento:${NAME_RE}(:| |\$)" | head -1 | awk '{print $1}')
                     [ -n "$n" ] || break
                     iptables -t nat -D "$chain" "$n" 2>/dev/null || break
                 done
             done
         else
             for chain in prerouting output postrouting; do
-                # nft renders the tag as `comment "kento:NAME"`. Match the
-                # full quoted token so `kento:web` does NOT also delete
-                # `kento:web2`'s rule (prefix collision); NAME is regex-escaped
-                # (NAME_RE) so a name's `.` is a literal dot, not a wildcard.
+                # nft renders the tag as `comment "kento:NAME:proto:hport"`
+                # (Block 14); pre-14 rules were the bare `comment "kento:NAME"`.
+                # Match `kento:NAME` followed by `:` (the new suffix) OR the
+                # closing `"` (the legacy bare token) so BOTH are deleted while
+                # `kento:web` still never matches `kento:web2` (the next char is
+                # `:` or `"`, never a digit). NAME is regex-escaped (NAME_RE) so
+                # a name's `.` is a literal dot, not a wildcard.
                 nft -a list chain ip kento "$chain" 2>/dev/null \
-                    | grep -E "comment \"kento:${NAME_RE}\"( |\$)" | \
+                    | grep -E "comment \"kento:${NAME_RE}(:|\")" | \
                     awk '{print $NF}' | while read -r handle; do
                         nft delete rule ip kento "$chain" handle "$handle" 2>/dev/null || true
                     done

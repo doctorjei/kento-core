@@ -982,6 +982,22 @@ class TestGenerateQmArgs:
         args = generate_qm_args(tmp_path, memory=512, kvm=True)
         assert "hostfwd=tcp:127.0.0.1:10025-:2222" in args
 
+    def test_usermode_n_forwards_protocol_aware(self, tmp_path):
+        """N kento-port lines -> one comma-joined hostfwd= per spec on a single
+        -netdev, protocol-aware. The whole -netdev value stays one whitespace-
+        free qm token (qm whitespace-tokenizes the args: line)."""
+        (tmp_path / "kento-port").write_text("10025:2222\n5353:53/udp\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        expected = (
+            "-netdev user,id=net0,"
+            "hostfwd=tcp:127.0.0.1:10025-:2222,"
+            "hostfwd=udp:127.0.0.1:5353-:53"
+        )
+        assert expected in args
+        # The netdev value (after "-netdev ") must contain no whitespace.
+        netdev_val = expected[len("-netdev "):]
+        assert not any(c.isspace() for c in netdev_val)
+
 
 class TestGeneratePveConfigPassthrough:
     """B3: kento-pve-args lines appended verbatim to pve-lxc config."""

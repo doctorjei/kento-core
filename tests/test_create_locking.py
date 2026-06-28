@@ -145,7 +145,7 @@ def test_create_port_written_atomically_with_allocation(tmp_path):
     def fake_lock():
         return _RecordingLock(original_kento_lock())
 
-    def fake_allocate_port():
+    def fake_allocate_port(exclude=None):
         events.append("allocate_port")
         return 10066
 

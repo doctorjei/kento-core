@@ -2015,6 +2015,106 @@ class TestLxcPortForwarding:
         port = (lxc_base / "test" / "kento-port").read_text().strip()
         assert port == "10022:22"
 
+    # --- Block 14: multi-forward AT REST -------------------------------------
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_list_writes_n_lines(self, mock_root, mock_layers,
+                                           mock_run, mock_free, tmp_path):
+        """create(port=[a, b, c/udp]) writes one §5.7A spec line per forward."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="lxc",
+                   port=["8080:80", "8443:443", "5353:53/udp"],
+                   net_type="bridge", bridge="lxcbr0")
+
+        lines = (tmp_path / "test" / "kento-port").read_text().splitlines()
+        assert lines == ["8080:80", "8443:443", "5353:53/udp"]
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_single_string_back_compat(self, mock_root, mock_layers,
+                                                 mock_run, mock_free, tmp_path):
+        """A single str (un-re-pointed CLI) still writes exactly one line."""
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test", mode="lxc",
+                   port="10022:22", net_type="bridge", bridge="lxcbr0")
+
+        assert (tmp_path / "test" / "kento-port").read_text() == "10022:22\n"
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_duplicate_rejected(self, mock_root, mock_layers, tmp_path):
+        """A duplicate (proto, host_port) in the list fails fast (no mutation)."""
+        from kento.errors import ValidationError
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            with pytest.raises(ValidationError, match="duplicate"):
+                create("myimage:latest", name="test", mode="lxc",
+                       port=["8080:80", "8080:90"],
+                       net_type="bridge", bridge="lxcbr0")
+        # tcp:8080 vs udp:8080 do NOT collide (separate port spaces).
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test2"), \
+             patch("kento.vm._port_is_free", return_value=True), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento._bridge_exists", return_value=True):
+            create("myimage:latest", name="test2", mode="lxc",
+                   port=["8080:80", "8080:80/udp"],
+                   net_type="bridge", bridge="lxcbr0")
+        assert (tmp_path / "test2" / "kento-port").read_text().splitlines() == [
+            "8080:80", "8080:80/udp"]
+
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_address_form_raises(self, mock_root, mock_layers,
+                                           tmp_path):
+        """A 3/4-element address form raises at the boundary (1.0 never writes)."""
+        from kento._network import ForwardAddressNotImplemented
+        with patch("kento.create.LXC_BASE", tmp_path), \
+             patch("kento.create.upper_base", return_value=tmp_path / "test"), \
+             patch("kento._bridge_exists", return_value=True):
+            with pytest.raises(ForwardAddressNotImplemented):
+                create("myimage:latest", name="test", mode="lxc",
+                       port=["127.0.0.1:8080:80"],
+                       net_type="bridge", bridge="lxcbr0")
+        assert not (tmp_path / "test" / "kento-port").exists()
+
+    @patch("kento.vm._port_is_free", return_value=True)
+    @patch("kento.create.subprocess.run")
+    @patch("kento.create.resolve_layers", return_value="/a:/b")
+    @patch("kento.create.require_root")
+    def test_lxc_port_multi_auto_no_collision(self, mock_root, mock_layers,
+                                               mock_run, mock_free, tmp_path):
+        """Two 'auto' forwards in one create allocate DISTINCT host ports."""
+        lxc_base = tmp_path / "lxc"
+        lxc_base.mkdir()
+        vm_base = tmp_path / "vm"
+        vm_base.mkdir()
+        with patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.upper_base", return_value=lxc_base / "test"), \
+             patch("kento._bridge_exists", return_value=True), \
+             patch("kento.vm.VM_BASE", vm_base), \
+             patch("kento.LXC_BASE", lxc_base):
+            create("myimage:latest", name="test", mode="lxc",
+                   port=["auto", "auto", "9000:90"],
+                   net_type="bridge", bridge="lxcbr0")
+
+        lines = (lxc_base / "test" / "kento-port").read_text().splitlines()
+        # Two distinct auto host ports + the concrete one; all host ports unique.
+        host_ports = [int(ln.split(":")[0]) for ln in lines]
+        assert len(host_ports) == 3
+        assert len(set(host_ports)) == 3
+        assert 9000 in host_ports
+
 
 class TestCloudInitMode:
     """Tests for --config-mode cloud-init integration in create."""

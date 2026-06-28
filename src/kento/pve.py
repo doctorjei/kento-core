@@ -417,17 +417,22 @@ def generate_qm_args(container_dir: Path, *,
     # --qemu-arg still wins (qm honours the last occurrence). Each args_parts
     # element is a single "-flag value" pair whose value has no whitespace,
     # satisfying qm's whitespace tokenization.
-    port_file = container_dir / "kento-port"
-    if port_file.is_file():
-        host_port, guest_port = port_file.read_text().strip().split(":")
+    from kento.vm import _read_hostfwds
+    hostfwds = _read_hostfwds(container_dir)
+    if hostfwds:
         device = "virtio-net-pci,netdev=net0"
         mac_file = container_dir / "kento-mac"
         if mac_file.is_file():
             mac = mac_file.read_text().strip()
             if mac:
                 device = f"virtio-net-pci,netdev=net0,mac={mac}"
+        # One netdev with N comma-joined hostfwd= options. Each args_parts
+        # element must contain no whitespace (qm whitespace-tokenizes the
+        # args: line); comma-joining keeps the whole -netdev value one token.
+        netdev = "user,id=net0," + ",".join(
+            f"hostfwd={hf}" for hf in hostfwds)
         args_parts += [
-            f"-netdev user,id=net0,hostfwd=tcp:127.0.0.1:{host_port}-:{guest_port}",
+            f"-netdev {netdev}",
             f"-device {device}",
         ]
 

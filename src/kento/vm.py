@@ -83,29 +83,65 @@ def _port_is_free(port: int) -> bool:
         return False
 
 
-def allocate_port() -> int:
+def allocate_port(exclude: set[int] | None = None) -> int:
     """Return the next free host port in range 10022-10999.
 
     Scans kento-port files in both LXC and VM base directories to find used
     ports, then verifies the candidate port is actually free on the host.
+
+    ``kento-port`` now holds N forward specs (one per line, §5.7A), so EVERY
+    line's host port is collected as used — not just the first. ``exclude`` is
+    an optional set of host ports to treat as already-taken; the caller uses it
+    to allocate several ``auto`` forwards in one create without writing each to
+    disk between allocations (the within-batch dedup the on-disk scan can't see).
     """
     from kento import LXC_BASE
-    used_ports: set[int] = set()
+    used_ports: set[int] = set(exclude or ())
     for base in (VM_BASE, LXC_BASE):
         if base.is_dir():
             for d in base.iterdir():
                 if d.is_dir():
                     port_file = d / "kento-port"
                     if port_file.is_file():
-                        try:
-                            host_port = int(port_file.read_text().strip().split(":")[0])
-                            used_ports.add(host_port)
-                        except (ValueError, IndexError):
-                            continue
+                        for line in port_file.read_text().splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                used_ports.add(int(line.split(":")[0]))
+                            except (ValueError, IndexError):
+                                continue
     for port in range(_PORT_MIN, _PORT_MAX + 1):
         if port not in used_ports and _port_is_free(port):
             return port
     raise StateError("no free port in range 10022-10999")
+
+
+def _read_hostfwds(container_dir: Path) -> list[str]:
+    """Read kento-port and return QEMU slirp ``hostfwd=`` fragments (§5.7A).
+
+    Each non-empty line is a §5.7A spec parsed via the Block-02 boundary parser;
+    one fragment ``<proto>:127.0.0.1:<hport>-:<gport>`` is emitted per forward,
+    protocol-aware (tcp/udp). Address stays ``127.0.0.1`` (current slirp
+    behavior; host_addr/guest_addr are ``None`` in 1.0). A 1:1 mirror of QEMU's
+    own ``hostfwd=proto:hostaddr:hostport-guestaddr:guestport`` grammar.
+
+    Absent file -> ``[]`` (no NIC emitted). A malformed line raises at the
+    boundary rather than silently dropping a forward (start fails loudly — the
+    file was written by a validated create/set path).
+    """
+    from kento._network import parse_forward_spec
+    port_file = container_dir / "kento-port"
+    if not port_file.is_file():
+        return []
+    fragments: list[str] = []
+    for line in port_file.read_text().splitlines():
+        spec = line.strip()
+        if not spec:
+            continue
+        (protocol, _haddr, hport), (_gaddr, gport) = parse_forward_spec(spec)
+        fragments.append(f"{protocol.value}:127.0.0.1:{hport}-:{gport}")
+    return fragments
 
 
 def is_vm_running(container_dir: Path) -> bool:
@@ -262,13 +298,6 @@ def start_vm(container_dir: Path, name: str) -> None:
         hint=f"run 'sh {inject_script} {rootfs} {container_dir}' manually to debug.",
     )
 
-    # Read port mapping (usermode networking)
-    port_file = container_dir / "kento-port"
-    host_port = guest_port = None
-    if port_file.is_file():
-        port_text = port_file.read_text().strip()
-        host_port, guest_port = port_text.split(":")
-
     # Resolve binaries up-front so an absent QEMU fails cleanly (before we
     # spawn virtiofsd or leak the mount). _find_virtiofsd / _find_qemu both
     # raise StateError on miss; at this point only the mount is held, and the
@@ -363,12 +392,10 @@ def _launch_qemu(container_dir: Path, name: str, rootfs: Path,
     kernel = rootfs / "boot" / "vmlinuz"
     initramfs = rootfs / "boot" / "initramfs.img"
 
-    # Read port mapping (usermode networking)
-    port_file = container_dir / "kento-port"
-    host_port = guest_port = None
-    if port_file.is_file():
-        port_text = port_file.read_text().strip()
-        host_port, guest_port = port_text.split(":")
+    # Read port mappings (usermode networking) — N forwards (§5.7A), one slirp
+    # hostfwd per spec, protocol-aware (tcp/udp). _read_hostfwds returns the
+    # list of "<proto>:127.0.0.1:<hport>-:<gport>" fragments for the -netdev.
+    hostfwds = _read_hostfwds(container_dir)
 
     memory_file = container_dir / "kento-memory"
     if memory_file.is_file():
@@ -422,7 +449,7 @@ def _launch_qemu(container_dir: Path, name: str, rootfs: Path,
          "-object", f"memory-backend-memfd,id=mem,size={memory}M,share=on",
          "-numa", "node,memdev=mem",
     ]
-    if host_port is not None:
+    if hostfwds:
         # Include MAC if available (kento-mac written at create time for VM modes)
         mac_file = container_dir / "kento-mac"
         device = "virtio-net-pci,netdev=net0"
@@ -430,8 +457,12 @@ def _launch_qemu(container_dir: Path, name: str, rootfs: Path,
             mac = mac_file.read_text().strip()
             if mac:
                 device = f"virtio-net-pci,netdev=net0,mac={mac}"
+        # One netdev with N comma-joined hostfwd= options (QEMU accepts repeated
+        # hostfwd= on a single -netdev user).
+        netdev = "user,id=net0," + ",".join(
+            f"hostfwd={hf}" for hf in hostfwds)
         qemu_cmd += [
-             "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{host_port}-:{guest_port}",
+             "-netdev", netdev,
              "-device", device,
         ]
     qemu_cmd += [

@@ -587,13 +587,95 @@ def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
             shutil.copy2(f, dest_dir / f.name)
 
 
+def _normalize_port_specs(port: str | list[str] | None) -> list[str] | None:
+    """Collapse the create() ``port`` arg to ``list[str] | None`` + validate.
+
+    The un-re-pointed CLI passes a single ``str`` (``"8080:80"`` / ``"auto"``);
+    the re-pointed CLI (Phase 6) will pass a ``list[str]``. Accept both:
+
+    * ``None`` -> ``None`` (no forwarding requested).
+    * ``str``  -> ``[str]``.
+    * ``list`` -> the list, with empty/whitespace-only entries dropped; an
+      all-empty list collapses to ``None`` (no forwards — there is no in-place
+      clear at create time, unlike ``set``).
+
+    Every concrete (non-``"auto"``) spec is validated and deduped EARLY via the
+    Block-02 boundary parser (:func:`parse_forwards`) so a malformed/duplicate
+    spec fails fast before any state mutation. ``"auto"`` entries are host-port
+    placeholders the write site resolves under ``kento_lock``; they are not yet
+    valid specs, so they are excluded from the pre-parse (each resolved spec is
+    re-validated together at write time).
+    """
+    if port is None:
+        return None
+    if isinstance(port, str):
+        specs = [port]
+    else:
+        specs = [p for p in port if p and p.strip()]
+        if not specs:
+            return None
+
+    # Pre-validate + dedup the concrete specs now (fail fast). "auto" is a
+    # placeholder, not a spec, so it cannot go through the grammar parser yet;
+    # the write site validates the full resolved set together under the lock.
+    from kento._network import parse_forwards
+    concrete = [s for s in specs if s != "auto"]
+    if concrete:
+        parse_forwards(concrete)
+    return specs
+
+
+def _write_port_specs(container_dir: Path, port_specs: list[str]) -> list[str]:
+    """Resolve any ``"auto"`` host ports and write N spec lines to kento-port.
+
+    ``port_specs`` is the normalized list from :func:`_normalize_port_specs`
+    (concrete specs already validated; ``"auto"`` placeholders not). Each
+    ``"auto"`` entry is resolved to a free host port mapped to guest 22 (the
+    historical default, tcp), and the full resolved set is validated/deduped
+    together via :func:`parse_forwards` so an ``auto`` allocation cannot collide
+    with a concrete forward (or with another freshly-allocated ``auto``).
+
+    Allocation + write happen under a single ``kento_lock`` so two concurrent
+    creates can't pick the same free port (the existing TOCTOU discipline,
+    extended to N) and the on-disk file is only ever a complete, validated set.
+
+    Returns the list of resolved spec strings (rendered §5.7A form) that were
+    written — used by the caller for logging.
+    """
+    from kento._network import (parse_forward_spec, parse_forwards,
+                                render_forward_spec)
+    from kento.vm import allocate_port
+
+    with kento_lock():
+        resolved: list[str] = []
+        allocated: set[int] = set()
+        for spec in port_specs:
+            if spec == "auto":
+                # allocate_port(exclude=...) treats this batch's already-claimed
+                # ports as taken, so two "auto" specs in one create never collide
+                # even though neither is written to disk until the end. It also
+                # excludes other instances' on-disk host ports + bind-tests.
+                host_port = allocate_port(exclude=allocated)
+                allocated.add(host_port)
+                binding, target = parse_forward_spec(f"{host_port}:22")
+            else:
+                binding, target = parse_forward_spec(spec)
+            resolved.append(render_forward_spec(binding, target))
+        # Validate + dedup the fully-resolved set as one unit (catches an auto
+        # port that lands on a concrete forward's host port).
+        parse_forwards(resolved)
+        (container_dir / "kento-port").write_text(
+            "".join(line + "\n" for line in resolved))
+    return resolved
+
+
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
            hostname: str | None = None,
            nesting: bool = False,
            start: bool = False, mode: str,
            pve: bool | None = None,
            vmid: int = 0, memory: int | None = None, cores: int | None = None,
-           port: str | None = None,
+           port: str | list[str] | None = None,
            ip: str | None = None, gateway: str | None = None,
            dns: str | None = None, searchdomain: str | None = None,
            timezone: str | None = None,
@@ -626,6 +708,18 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # the cloud-init YAML block scalar / /etc/environment / lxc.environment.
     if env:
         _validate_env(env)
+
+    # Normalize --port to a list of forward specs (§5.7A). The un-re-pointed
+    # CLI still passes a single string, so accept str | list[str] | None and
+    # collapse to ``port`` = list[str] | None for the rest of create(). An
+    # explicit empty list reads as "no forwards" (None) — there is no in-place
+    # clear at create time. After this point ``port`` is always a list or None;
+    # ``port is not None`` therefore still reads as "forwarding requested" for
+    # the mode-validation and config-generation booleans below. The non-"auto"
+    # specs are validated/deduped EARLY (fail fast, before any state mutation)
+    # via the Block-02 boundary parser; "auto" entries are placeholders the
+    # write site resolves under kento_lock, so they bypass this pre-parse.
+    port = _normalize_port_specs(port)
 
     # Validate and read SSH key files early (before any filesystem changes)
     ssh_key_contents: str | None = None
@@ -1102,24 +1196,14 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             # existing kento-port files and bind-tests, but without a lock
             # the scan and the write are a classic TOCTOU race).
             if network["type"] == "usermode":
-                from kento.vm import allocate_port
-                if port is None:
-                    with kento_lock():
-                        host_port = allocate_port()
-                        (container_dir / "kento-port").write_text(
-                            f"{host_port}:22\n")
-                    guest_port = 22
-                elif port == "auto":
-                    with kento_lock():
-                        host_port = allocate_port()
-                        (container_dir / "kento-port").write_text(
-                            f"{host_port}:22\n")
-                    guest_port = 22
-                else:
-                    host_port, guest_port = port.split(":")
-                    host_port, guest_port = int(host_port), int(guest_port)
-                    (container_dir / "kento-port").write_text(
-                        f"{host_port}:{guest_port}\n")
+                # N forwards (§5.7A): resolve any "auto" host ports + write one
+                # spec line each, under kento_lock (TOCTOU discipline). With no
+                # --port at all, usermode still wants the default SSH forward, so
+                # synthesize a single "auto" (host:22) — preserving prior
+                # behavior where a portless usermode VM got an allocated SSH port.
+                _specs = port if port is not None else ["auto"]
+                _resolved = _write_port_specs(container_dir, _specs)
+                host_port, guest_port = _resolved[0].split("/")[0].split(":")
 
             if mode == "pve-vm":
                 # Generate VM hookscript + inject.sh (hookscript invokes inject.sh
@@ -1179,22 +1263,13 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 logger.info("  Nesting: %s", 'allowed' if nesting else 'disabled')
                 logger.info("  Dir:     %s", container_dir)
         else:
-            # Port forwarding for LXC/PVE modes. Hold kento_lock across
-            # allocate + write so concurrent creates don't collide on the
-            # same free port (same race as the VM-mode branch above).
+            # Port forwarding for LXC/PVE modes. Resolve any "auto" host ports
+            # and write one §5.7A spec line each, holding kento_lock across
+            # allocate + write so concurrent creates don't collide on the same
+            # free port (same race as the VM-mode branch above), extended to N.
             if port is not None:
-                from kento.vm import allocate_port
-                if port == "auto":
-                    with kento_lock():
-                        host_port = allocate_port()
-                        (container_dir / "kento-port").write_text(
-                            f"{host_port}:22\n")
-                    guest_port = 22
-                else:
-                    host_port, guest_port = port.split(":")
-                    host_port, guest_port = int(host_port), int(guest_port)
-                    (container_dir / "kento-port").write_text(
-                        f"{host_port}:{guest_port}\n")
+                _resolved = _write_port_specs(container_dir, port)
+                host_port, guest_port = _resolved[0].split("/")[0].split(":")
 
             # Persist memory/cores so the start-host hook can propagate the limit
             # into the inner ns cgroup on PVE-LXC (outer cgroup gets the ceiling
