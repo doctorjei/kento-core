@@ -1343,7 +1343,12 @@ def test_network_setter_rejects_dns2(tmp_path):
     mock_set.assert_not_called()  # rejected before persistence
 
 
-# -- resources setter: Jei run-33 deferral (mode-appropriate running error) ---
+# -- resources setter: capability-aware live-on-LXC (Block 16, §11.2 M9) -------
+#
+# Stopped (any kind): persist via set_cmd (byte-identical to Block 11 — keeps
+# the VM clamp + validation). Running + VM/pve-vm: PERMANENT raise (no hotplug).
+# Running + LXC: live cgroup-v2 via lxc-cgroup, then persist. Running + pve-lxc:
+# live `pct set`, then persist. All live tools + set_cmd are mocked.
 
 
 def test_resources_setter_stopped_persists(tmp_path):
@@ -1357,9 +1362,11 @@ def test_resources_setter_stopped_persists(tmp_path):
     assert inst.resources == {"memory": 2048, "cores": 4}
 
 
-@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
-def test_resources_setter_running_raises_state_error(tmp_path, mode):
-    # Jei run-33: running resources raises StateError for ALL modes this block.
+@pytest.mark.parametrize("mode", ["vm", "pve-vm"])
+def test_resources_setter_running_vm_raises_permanent(tmp_path, mode):
+    # Running + VM/pve-vm: PERMANENT raise — a VM has no live memory/CPU hotplug
+    # (memfd sized at boot). The capability-aware message says "hotplug"; set_cmd
+    # and any live tool are never reached.
     d = _make_for_mode(tmp_path, mode)
     inst = _snapshot(d, mode)
     with patch("kento.is_running", return_value=True), \
@@ -1369,12 +1376,168 @@ def test_resources_setter_running_raises_state_error(tmp_path, mode):
         with pytest.raises(StateError) as exc:
             inst.resources = {"memory": 2048}
     mock_set.assert_not_called()
-    msg = str(exc.value)
-    # Capability-aware distinction kept VISIBLE in the message (not erased).
-    if mode in ("vm", "pve-vm"):
-        assert "hotplug" in msg
-    else:
-        assert "future release" in msg
+    assert "hotplug" in str(exc.value)
+
+
+def test_resources_setter_running_lxc_applies_live(tmp_path):
+    # Running + plain LXC: each changed knob applies live via lxc-cgroup with the
+    # EXACT cgroup-v2 values the boot config/hook use (memory.max bytes; cpu.max
+    # CFS quota), THEN persists via _apply_lxc (the canonical writer). set_cmd is
+    # NOT used on the running path (it would raise "Stop it first").
+    d = _make_lxc(tmp_path, **{"kento-memory": "512", "kento-cores": "1"})
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.set_cmd.set_cmd") as mock_set, \
+            patch("kento.subprocess_util.run_or_die") as run:
+        inst.resources = {"memory": 2048, "cores": 4}
+    mock_set.assert_not_called()  # running path never routes through set_cmd
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert ["lxc-cgroup", "-n", "mybox", "memory.max",
+            str(2048 * 1048576)] in cmds
+    assert ["lxc-cgroup", "-n", "mybox", "cpu.max",
+            f"{4 * 100000} 100000"] in cmds
+    # Persisted for REAL: kento-memory/-cores + the config cgroup lines.
+    assert (d / "kento-memory").read_text().strip() == "2048"
+    assert (d / "kento-cores").read_text().strip() == "4"
+    assert "lxc.cgroup2.memory.max = " + str(2048 * 1048576) \
+        in (d / "config").read_text()
+    assert inst.resources == {"memory": 2048, "cores": 4}
+
+
+def test_resources_setter_running_lxc_skips_unchanged_knob(tmp_path):
+    # Only the CHANGED knob applies live: memory changes, cores stays 4 -> exactly
+    # one lxc-cgroup call (memory.max), no cpu.max op.
+    d = _make_lxc(tmp_path, **{"kento-memory": "512", "kento-cores": "4"})
+    inst = _snapshot(d, "lxc")
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.subprocess_util.run_or_die") as run:
+        inst.resources = {"memory": 1024, "cores": 4}
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert len(cmds) == 1
+    assert cmds[0][3] == "memory.max"
+    assert inst.resources == {"memory": 1024, "cores": 4}
+
+
+def test_resources_setter_running_pve_lxc_pct_set(tmp_path):
+    # Running + pve-lxc: live via `pct set <vmid> -memory M` and
+    # `pct set <vmid> -cores N -cpulimit N` (mirrors the create mapping: cores =
+    # cpuset, cpulimit -> cpu.max), then persist via _apply_pve_lxc.
+    d = _make_for_mode(tmp_path, "pve")  # dir name "200" == vmid
+    # Seed prior values so both knobs are "changed".
+    (d / "kento-memory").write_text("512\n")
+    (d / "kento-cores").write_text("1\n")
+    inst = _snapshot(d, "pve")
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.pve_config_exists", return_value=True), \
+            patch("kento.set_cmd._apply_pve_lxc") as persist, \
+            patch("kento.subprocess_util.run_or_die") as run:
+        inst.resources = {"memory": 2048, "cores": 2}
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert ["pct", "set", "200", "-memory", "2048"] in cmds
+    assert ["pct", "set", "200", "-cores", "2", "-cpulimit", "2"] in cmds
+    persist.assert_called_once_with(d, 2048, 2, pve_args=None)
+    assert inst.resources == {"memory": 2048, "cores": 2}
+
+
+def test_resources_setter_running_lxc_rollback_on_failure(tmp_path):
+    # both-or-neither: memory applies live, then cores FAILS -> the engine unwinds
+    # the applied memory knob (restores the prior 512 MiB live value) and re-raises;
+    # the persist is never reached and the cache is unchanged. Mutation-checked:
+    # with the undo loop disabled, the "memory restored to 512" assertion reddens.
+    from kento.errors import SubprocessError
+    d = _make_lxc(tmp_path, **{"kento-memory": "512", "kento-cores": "1"})
+    inst = _snapshot(d, "lxc")
+    old = dict(inst.resources)
+    calls = []
+
+    def fake_run(cmd, what, **kw):
+        calls.append(list(cmd))
+        # Fail ONLY the cores (cpu.max) apply; the memory restore must succeed so
+        # the unwind completes (observable as a second memory.max write to 512).
+        if cmd[3] == "cpu.max" and cmd[4].startswith(str(4 * 100000)):
+            raise SubprocessError("cpu.max rejected")
+
+    persist_calls = []
+    real_persist = inst._persist_resources
+
+    def spy_persist(params):
+        persist_calls.append(dict(params))
+        return real_persist(params)
+
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch.object(inst, "_persist_resources", side_effect=spy_persist), \
+            patch("kento.subprocess_util.run_or_die", side_effect=fake_run):
+        with pytest.raises(SubprocessError):
+            inst.resources = {"memory": 2048, "cores": 4}
+    # memory.max applied to 2048, then cpu.max(4) fails.
+    assert calls[0] == ["lxc-cgroup", "-n", "mybox", "memory.max",
+                        str(2048 * 1048576)]
+    assert calls[1][3] == "cpu.max"
+    # CATCH-REVERSE: memory.max restored to the prior 512 MiB (the inverse op).
+    assert ["lxc-cgroup", "-n", "mybox", "memory.max",
+            str(512 * 1048576)] in calls[2:], (
+        f"rollback did not restore the prior memory.max; calls={calls}")
+    # The FORWARD persist (new {2048,4}) never ran — the live failure happened
+    # first. The unwind's disk-restore to OLD is the only persist (idempotent
+    # no-op write of the already-on-disk values); the new values never land.
+    assert persist_calls == [{"memory": 512, "cores": 1}]
+    assert (d / "kento-memory").read_text().strip() == "512"  # disk == old
+    assert inst.resources == old        # cache unchanged
+
+
+def test_resources_setter_running_lxc_persist_failure_rolls_back(tmp_path):
+    # SYMMETRY (Editor's A/C item): if the live apply SUCCEEDS but the persist
+    # writer fails MID-WRITE (kento-memory lands, kento-cores does not), the engine
+    # (a) unwinds the applied live knobs AND (b) restores the on-disk config to the
+    # OLD values — so disk + live + cache all return to the pre-set state, never a
+    # partial config that boots stale next start. Mutation-checked: drop the unwind
+    # _persist_resources(old_params) call and the "kento-cores restored to 1"
+    # assertion reddens.
+    d = _make_lxc(tmp_path, **{"kento-memory": "512", "kento-cores": "1"})
+    inst = _snapshot(d, "lxc")
+    calls = []
+
+    def fake_run(cmd, what, **kw):
+        calls.append(list(cmd))
+
+    persist_calls = []
+    real_persist = inst._persist_resources
+
+    def spy_persist(params):
+        persist_calls.append(dict(params))
+        # FORWARD persist (the new {2048,4}) fails AFTER a partial write — emulate
+        # set_cmd's mid-write failure: write kento-memory only, then raise. The
+        # RESTORE persist (the old {512,1}) runs the REAL writer (observable).
+        if params.get("memory") == 2048:
+            (d / "kento-memory").write_text("2048\n")  # partial landing
+            raise OSError("disk full writing kento-cores")
+        return real_persist(params)
+
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch.object(inst, "_persist_resources", side_effect=spy_persist), \
+            patch("kento.subprocess_util.run_or_die", side_effect=fake_run):
+        with pytest.raises(OSError):
+            inst.resources = {"memory": 2048, "cores": 4}
+    # (a) LIVE unwind: both knobs restored to the prior 512 MiB / 1 core.
+    assert ["lxc-cgroup", "-n", "mybox", "memory.max",
+            str(512 * 1048576)] in calls
+    assert ["lxc-cgroup", "-n", "mybox", "cpu.max",
+            f"{1 * 100000} 100000"] in calls
+    # Two persist attempts: the failing forward, then the restore to old.
+    assert persist_calls == [{"memory": 2048, "cores": 4},
+                             {"memory": 512, "cores": 1}]
+    # (b) DISK restored to OLD: the partial kento-memory=2048 is overwritten back
+    # to 512, and the config cgroup line matches (no stale partial survives).
+    assert (d / "kento-memory").read_text().strip() == "512"
+    assert (d / "kento-cores").read_text().strip() == "1"
+    assert "lxc.cgroup2.memory.max = " + str(512 * 1048576) \
+        in (d / "config").read_text()
+    assert inst.resources == {"memory": 512, "cores": 1}  # cache unchanged
 
 
 def test_resources_setter_rejects_unknown_key(tmp_path):

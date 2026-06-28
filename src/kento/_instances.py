@@ -344,39 +344,32 @@ class Instance(ABC):
 
     @resources.setter
     def resources(self, value: "dict[str, int]") -> None:
-        """Set the resource bag (memory/cores) (§11.2 M9; Jei run-33 deferral).
+        """Set the resource bag (memory/cores) — CAPABILITY-AWARE (§11.2 M9).
 
         Assign a WHOLE ``dict[str, int]`` (open bag, §2 principle 8); ``memory``
-        (MiB) and ``cores`` are decomposed into ``set_cmd(memory=, cores=)``.
+        (MiB) and ``cores`` are the two settable keys. Live-ness per M9:
 
-        Live-ness (Jei run-33): M9 locks "memory/cores apply LIVE on a running
-        LXC/pve-lxc (cgroup/pct hotplug)", but that live path is genuinely-new
-        runtime code (``set_cmd`` is stopped-only; no hotplug primitive exists),
-        DEFERRED to Phase 6/E2E. So in THIS block a RUNNING instance raises
-        ``StateError`` for BOTH kinds, with a MODE-APPROPRIATE message:
+        * **Stopped** (any kind) — persist only (``set_cmd`` writes
+          ``kento-memory``/``kento-cores`` + the boot config).
+        * **Running + VM/pve-vm** — RAISE ``StateError`` (PERMANENT: a VM's
+          memory memfd is sized at boot, so there is no live memory/CPU
+          hotplug). The message comes from ``_resources_running_error``.
+        * **Running + LXC/pve-lxc** — APPLY LIVE (Block 16): plain LXC via the
+          running container's cgroup-v2 knobs (``memory.max``/``cpu.max``, the
+          exact knobs the boot config + hook use); pve-lxc via ``pct set``
+          (PVE's live-capable path). Then persist. The live apply + persist are
+          sequenced apply-live-THEN-persist + catch-reverse undo (both-or-none).
 
-        * VM/pve-vm — "no live hotplug; stop first" (the PERMANENT M9 behavior:
-          the memfd is sized to memory at boot, so a VM can never hotplug here).
-        * LXC/pve-lxc — "stop first; live resource mutation lands in a future
-          release" (a DOCUMENTED incremental gap — the live cgroup/pct path slots
-          in HERE in Phase 6; see ``_resources_running_error`` for the seam).
-
-        A STOPPED instance persists via ``set_cmd`` for all four modes. The
-        capability-aware DISTINCTION (LXC-will-be-live vs VM-never) is kept VISIBLE
-        in the error message + the seam — the deferral does not erase it.
+        The whole running-LXC path lives in ``_set_resources_live`` (a sibling of
+        the stopped-only ``_set_via_set_cmd`` engine, mirroring how ``forwards``
+        gets ``_set_forwards_live``): the stopped-only engine raises on a running
+        instance, which a live-capable field must not.
         """
         # Pre-decompose so a bad bag (non-int / unknown key) fails before the
-        # lock/probe — and reject the live case with a mode-appropriate message.
+        # lock/probe — for BOTH the stopped persist and the live params.
         new_params = _resources_to_set_cmd_params(value)
         old_params = _resources_to_set_cmd_params(self._resources)
-        self._set_via_set_cmd(
-            field="resources",
-            new_params=new_params,
-            old_params=old_params,
-            new_cached=dict(value),
-            cache_attr="_resources",
-            running_error=self._resources_running_error,
-        )
+        self._set_resources_live(value, new_params, old_params)
 
     @property
     def extra_args(self) -> "tuple[str, ...]":
@@ -424,27 +417,20 @@ class Instance(ABC):
         )
 
     def _resources_running_error(self) -> "StateError":
-        """The mode-appropriate ``StateError`` for a running resources set.
+        """The PERMANENT ``StateError`` for a running VM/pve-vm resources set.
 
-        Phase-6 SEAM (Jei run-33): when the live cgroup/pct hotplug path is built,
-        the LXC/pve-lxc branch here is where "apply live + persist" replaces the
-        raise; the VM/pve-vm branch stays a raise PERMANENTLY (memfd sized at
-        boot). Keeping the capability-aware distinction visible in the message is
-        required (it is not a license to drop it).
+        VM-family ONLY (Block 16): a VM has no live memory/CPU hotplug — the
+        memory memfd is sized at boot — so this raise is permanent, not a seam.
+        The running LXC/pve-lxc case is NO LONGER routed here; it applies live in
+        ``_set_resources_live`` (the Phase-5c fold-in that closed Block 11's
+        Phase-6 seam). Callers must only invoke this on a VM-family mode.
         """
         from kento.errors import StateError
 
-        if _is_vm_mode(self._mode):
-            return StateError(
-                f"cannot change resources on a running {type(self).__name__}: "
-                "a VM has no live memory/CPU hotplug (the memfd is sized to "
-                f"memory at boot). Stop it first: kento stop {self._name}"
-            )
-        # LXC / pve-lxc: live cgroup/pct mutation is a future release (Phase 6).
         return StateError(
-            "cannot change resources on a running container yet: live resource "
-            "mutation on a running LXC/pve-lxc lands in a future release. Stop "
-            f"it first: kento stop {self._name}"
+            f"cannot change resources on a running {type(self).__name__}: "
+            "a VM has no live memory/CPU hotplug (the memfd is sized to "
+            f"memory at boot). Stop it first: kento stop {self._name}"
         )
 
     def _set_via_set_cmd(
@@ -455,19 +441,23 @@ class Instance(ABC):
         old_params: "dict[str, object]",
         new_cached: object,
         cache_attr: str,
-        running_error: "object | None" = None,
     ) -> None:
-        """Persist a settable field via ``set_cmd``, lock-guarded + catch-reverse.
+        """Persist a STOPPED-ONLY settable field via ``set_cmd``, lock-guarded +
+        catch-reverse.
 
-        The shared engine for every base/subclass setter (§11.2 M9 persist model):
+        The shared engine for every STOPPED-ONLY base/subclass setter
+        (lxc_args/qemu_args/network/hostname/extra_args — §11.2 M9 persist model).
+        ``resources`` and ``forwards`` are CAPABILITY-AWARE (live on a running
+        LXC) and so use their own engines (``_set_resources_live`` /
+        ``_set_forwards_live``); this engine UNCONDITIONALLY raises on a running
+        instance, which a live-capable field must not.
 
         1. ``_check_alive`` (a destroyed handle is unusable, §11.2 M7).
         2. Acquire ``kento_lock`` (excludes a concurrent ``start``; ``set_cmd``
            does NOT take the lock itself, so one acquire here is deadlock-safe).
         3. Take a LIVE ``is_running`` probe INSIDE the lock (NOT the cached
-           ``status``) and reject the stopped-only field on a running instance —
-           ``running_error()`` (resources' mode-appropriate message) or the
-           default ``StateError`` (lxc_args/qemu_args/network/hostname/...).
+           ``status``) and reject a running instance with ``StateError``
+           (stopped-only: the setting only applies at the guest's next boot).
         4. Call ``set_cmd.set_cmd(self._name, **new_params)``. ``set_cmd``
            validates EVERY field BEFORE mutating anything, so bad input raises
            with no partial write.
@@ -490,8 +480,6 @@ class Instance(ABC):
             # LIVE probe inside the lock — the cached status may be stale, and a
             # concurrent start is excluded by the lock we hold (TOCTOU-safe).
             if is_running(self._dir, self._mode):
-                if running_error is not None:
-                    raise running_error()
                 raise StateError(
                     f"cannot change {field} on a running "
                     f"{type(self).__name__}: this setting only applies at the "
@@ -676,6 +664,187 @@ class Instance(ABC):
                 )
             return _QmpForwardsApplier(self._dir / "qmp.sock", self._name)
         return _BridgedForwardsApplier(self)
+
+    # ------------------------------------------------------------------- #
+    # resources — capability-aware (§11.2 M9). The running LXC/pve-lxc live
+    # path (Block 16, Phase 5c) does not fit the stopped-only ``_set_via_set_cmd``
+    # engine (which raises on a running instance), so — exactly like ``forwards``
+    # — it gets its OWN engine that MIRRORS the same discipline: ``_check_alive``
+    # -> ``kento_lock`` -> LIVE ``is_running`` probe inside the lock -> apply ->
+    # catch-reverse -> persist -> cache on success. The difference from the
+    # stopped-only engine: the running LXC branch APPLIES live (cgroup / pct set
+    # with a both-or-neither undo stack) instead of raising; the running VM branch
+    # raises PERMANENTLY (no memory/CPU hotplug); the stopped branch persists.
+    # ------------------------------------------------------------------- #
+    def _set_resources_live(
+        self,
+        value: "dict[str, int]",
+        new_params: "dict[str, object]",
+        old_params: "dict[str, object]",
+    ) -> None:
+        """Engine for the ``resources`` setter (§11.2 M9 / Block 16).
+
+        ``value`` is the whole new bag (already validated by
+        ``_resources_to_set_cmd_params`` -> ``new_params``, the
+        ``memory=``/``cores=`` scalars; ``old_params`` is the same for the prior
+        cached bag, used for the stopped catch-reverse). Steps:
+
+        1. ``_check_alive`` (a destroyed handle is unusable, §11.2 M7).
+        2. Acquire ``kento_lock`` (excludes a concurrent ``start``; ``set_cmd``
+           and the live tools take no lock themselves -> one acquire here is
+           deadlock-safe).
+        3. LIVE ``is_running`` probe INSIDE the lock (NOT cached ``status``).
+        4. STOPPED -> persist via ``set_cmd`` with catch-reverse — BYTE-IDENTICAL
+           to the old (Block 11) stopped path (preserves the VM node-capacity
+           clamp + field validation that ``set_cmd`` runs). RUNNING + VM/pve-vm ->
+           raise the PERMANENT ``_resources_running_error`` (no hotplug). RUNNING
+           + LXC/pve-lxc -> apply each changed knob LIVE (pushing its INVERSE on
+           an undo stack), THEN persist the canonical config via
+           ``_persist_resources``; on ANY failure unwind the undo stack (restore
+           the prior live value) and re-raise — both-or-neither (JC4/JC5).
+        5. On success only, update the ``_resources`` cache (§2: getter never
+           re-queries).
+        """
+        from kento.locking import kento_lock
+
+        self._check_alive()
+
+        with kento_lock():
+            from kento import is_running
+
+            if not is_running(self._dir, self._mode):
+                # STOPPED: persist via set_cmd + catch-reverse (Block 11 path,
+                # byte-identical — keeps the VM clamp + set_cmd validation).
+                self._persist_resources_stopped(new_params, old_params)
+                self._resources = dict(value)
+                return
+
+            # RUNNING + VM/pve-vm: PERMANENT raise — no live memory/CPU hotplug.
+            if _is_vm_mode(self._mode):
+                raise self._resources_running_error()
+
+            # RUNNING + LXC/pve-lxc: apply each changed knob LIVE, undo on fail.
+            applier = self._resources_applier()
+            old = self._resources
+            undo: list[Callable[[], None]] = []
+            try:
+                for key in ("memory", "cores"):
+                    if key not in new_params:
+                        continue
+                    new_val = new_params[key]
+                    if key in old and old[key] == new_val:
+                        continue  # unchanged -> no live op, nothing to undo
+                    old_val = old.get(key)
+                    applier.apply(key, new_val)
+                    if old_val is not None:
+                        undo.append(
+                            lambda k=key, v=old_val: applier.apply(k, v))
+                    # No prior recorded value -> nothing meaningful to restore
+                    # live (the kernel's pre-existing limit stands); the persist
+                    # rollback below still restores the on-disk state.
+                # Live state now matches ``value``; persist the canonical config.
+                self._persist_resources(new_params)
+            except Exception:
+                # Catch-reverse: unwind applied LIVE knobs in REVERSE order, AND
+                # restore the on-disk config to the prior values, then re-raise
+                # the ORIGINAL error (mirrors create.py:_run_cleanup — best-effort,
+                # never masks the real failure). Restoring disk too keeps the
+                # running path SYMMETRIC with the stopped path (which restores via
+                # set_cmd(old_params)): if persist failed mid-write (e.g.
+                # kento-memory landed but kento-cores did not), a bare live-only
+                # unwind would leave a PARTIAL config that boots stale next start,
+                # diverging from the restored live+cache. So we also re-write disk
+                # to old_params. When persist was never reached (a live-knob
+                # failure), old_params == what is already on disk, so this is an
+                # idempotent no-op write — never harmful.
+                for inverse in reversed(undo):
+                    try:
+                        inverse()
+                    except Exception as rb_err:  # noqa: BLE001 — best-effort
+                        _instances_logger.warning(
+                            "rollback of a resources knob on %s failed: %s",
+                            self._name, rb_err,
+                        )
+                try:
+                    self._persist_resources(old_params)
+                except Exception as disk_err:  # noqa: BLE001 — best-effort
+                    _instances_logger.warning(
+                        "rollback of the resources config on %s failed: %s",
+                        self._name, disk_err,
+                    )
+                raise
+            self._resources = dict(value)
+
+    def _persist_resources_stopped(
+        self,
+        new_params: "dict[str, object]",
+        old_params: "dict[str, object]",
+    ) -> None:
+        """Stopped-path persist via ``set_cmd`` + catch-reverse (Block 11 path).
+
+        Identical in behavior to the old ``_set_via_set_cmd`` stopped persist for
+        resources: call ``set_cmd.set_cmd(name, **new_params)`` (which runs field
+        validation + the VM node-capacity clamp), and on any failure re-invoke it
+        with ``old_params`` to restore the prior persisted value, then re-raise
+        the ORIGINAL error (best-effort reverse; a failed reverse is logged, not
+        masked). Called only on the STOPPED branch, under our held ``kento_lock``;
+        ``set_cmd`` takes no lock itself, so this is deadlock-safe.
+        """
+        from kento import set_cmd as set_cmd_mod
+
+        try:
+            set_cmd_mod.set_cmd(self._name, **new_params)
+        except Exception:
+            try:
+                set_cmd_mod.set_cmd(self._name, **old_params)
+            except Exception as reverse_err:  # noqa: BLE001 — best-effort
+                _instances_logger.warning(
+                    "rollback of resources on %s failed: %s",
+                    self._name, reverse_err,
+                )
+            raise
+
+    def _persist_resources(self, params: "dict[str, object]") -> None:
+        """Running-path persist: write the canonical kento LXC config (§11.0).
+
+        Reuses the SAME low-level writers ``set_cmd`` uses to write
+        ``kento-memory``/``kento-cores`` + the boot config cgroup lines
+        (``set_cmd._apply_lxc`` for plain LXC / ``_apply_pve_lxc`` for pve-lxc) —
+        one canonical writer, no drift. Called DIRECTLY, NOT via ``set_cmd``:
+        ``set_cmd`` unconditionally rejects a RUNNING instance (set_cmd.py:401 —
+        "Stop it first"), so routing the live (running) persist through it would
+        make the live setter ALWAYS fail-then-rollback. The low-level writers
+        have no such guard — correct here, because by the time we persist on the
+        running path the cgroup/pct value is ALREADY applied live, and the
+        live-vs-stopped decision belongs to ``_set_resources_live`` (which holds
+        ``kento_lock`` across the whole op), not to the file writer. Only reached
+        on the RUNNING + LXC/pve-lxc branch (the only modes with a live applier).
+        """
+        from kento import set_cmd as set_cmd_mod
+
+        memory = params.get("memory")
+        cores = params.get("cores")
+        if self._mode == "pve":
+            set_cmd_mod._apply_pve_lxc(self._dir, memory, cores, pve_args=None)
+        else:  # lxc
+            set_cmd_mod._apply_lxc(self._dir, memory, cores)
+
+    def _resources_applier(self) -> "_LxcResourcesApplier | _PveLxcResourcesApplier":
+        """The mode-appropriate LIVE resources applier (Block 16).
+
+        * Plain LXC -> ``_LxcResourcesApplier`` (writes the running container's
+          cgroup-v2 ``memory.max``/``cpu.max`` via ``lxc-cgroup -n <name>`` — the
+          exact knobs the boot config + start-host hook use).
+        * pve-lxc -> ``_PveLxcResourcesApplier`` (``pct set <vmid> -memory/-cores
+          -cpulimit`` — PVE's live-capable path; matches the create mapping where
+          ``cores`` is cpuset and ``cpulimit`` drives ``cpu.max``).
+
+        Only ever called on the RUNNING + LXC/pve-lxc branch — VM-family raises
+        before reaching here, and the stopped branch persists without an applier.
+        """
+        if self._mode == "pve":
+            return _PveLxcResourcesApplier(self._dir, self._name)
+        return _LxcResourcesApplier(self._name)
 
     # ------------------------------------------------------------------- #
     # create / transient — the abstract contract (§10.1, §11.0).
@@ -2443,6 +2612,119 @@ class _QmpForwardsApplier:
 
         protocol, _haddr, host_port = binding
         vm_hostfwd_remove(sock, protocol, host_port)
+
+
+# --------------------------------------------------------------------------- #
+# Live-resources appliers (Block 16, §11.2 M9) — the per-mode primitive the
+# running ``resources`` setter drives. Each exposes ``apply(key, value)`` for ONE
+# knob ("memory" MiB / "cores" count); the engine composes the both-or-neither
+# undo stack on top. Plain LXC writes the running container's cgroup-v2 knobs via
+# ``lxc-cgroup``; pve-lxc uses ``pct set`` (PVE's live-capable path). The byte
+# values MIRROR what create/boot writes (set_cmd.py:_apply_lxc / pve.py): memory
+# -> ``memory.max`` = MiB*1048576 bytes; cores -> ``cpu.max`` = "N*100000 100000"
+# CFS quota; pve cores -> cpuset (``cores``) + ``cpulimit`` (-> cpu.max quota).
+# --------------------------------------------------------------------------- #
+
+# MiB -> bytes (the create/hook factor for lxc.cgroup2.memory.max).
+_MIB_BYTES = 1048576
+# CFS period the runtime pairs with the cores*period quota for cpu.max.
+_CFS_PERIOD = 100000
+
+
+class _LxcResourcesApplier:
+    """Live cgroup-v2 applier for a running PLAIN LXC container (Block 16).
+
+    Writes the running container's cgroup knobs via ``lxc-cgroup -n <name> KEY
+    VALUE`` — the canonical liblxc tool (same lxc-utils package as the
+    ``lxc-info``/``lxc-attach`` the runtime already requires). The KEY/VALUE pairs
+    are the EXACT cgroup-v2 knobs the boot ``config`` + start-host hook use:
+
+    * ``memory`` (MiB) -> ``memory.max`` = ``MiB * 1048576`` (bytes).
+    * ``cores`` (count) -> ``cpu.max`` = ``"cores*100000 100000"`` (CFS quota /
+      period) — matching ``set_cmd._apply_lxc`` / ``hook.sh`` exactly.
+
+    A failed write (tool absent, value rejected) raises ``SubprocessError`` via
+    ``run_or_die`` — surfaced by the engine and rolled back (§2 principle 5: a
+    running set MUST apply live or fail honestly, never silently persist-only).
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def apply(self, key: str, value: int) -> None:
+        from kento.subprocess_util import run_or_die
+
+        if key == "memory":
+            cgroup_key = "memory.max"
+            cgroup_val = str(int(value) * _MIB_BYTES)
+        elif key == "cores":
+            cgroup_key = "cpu.max"
+            cgroup_val = f"{int(value) * _CFS_PERIOD} {_CFS_PERIOD}"
+        else:  # pragma: no cover — engine only passes memory/cores
+            raise ValueError(f"unsupported live resource knob {key!r}")
+        run_or_die(
+            ["lxc-cgroup", "-n", self._name, cgroup_key, cgroup_val],
+            f"apply {key} live to running container",
+            name=self._name,
+        )
+
+
+class _PveLxcResourcesApplier:
+    """Live applier for a running pve-lxc container via ``pct set`` (Block 16).
+
+    pve-lxc has no plain-LXC ``config``: the source of truth is the PVE ``.conf``,
+    and ``pct set`` is PVE's live-capable mutation path (it rewrites the conf AND
+    hotplugs the running container's cgroup). The mapping MIRRORS the create-time
+    one (``pve.py:generate_pve_config``):
+
+    * ``memory`` (MiB) -> ``pct set <vmid> -memory <MiB>`` (live cgroup
+      ``memory.max``).
+    * ``cores`` (count) -> ``pct set <vmid> -cores <N> -cpulimit <N>``: ``cores``
+      is the cpuset (which CPUs) and ``cpulimit`` is the quota that drives
+      ``cpu.max`` — kento sets BOTH at create, so we set both here to keep the
+      live + persisted state coherent with a freshly-created CT. (DISCLOSED JC2:
+      ``pct set`` applies memory + cpulimit live on a running CT; ``cores``
+      cpuset likewise. This is genuinely live, not next-start-only.)
+
+    Each knob is a SEPARATE ``pct set`` so the engine can roll back exactly the
+    one(s) it applied. A failed ``pct set`` raises ``SubprocessError`` via
+    ``run_or_die`` — surfaced + rolled back by the engine.
+
+    Note: ``pct set`` rewrites the conf, dropping kento's raw ``lxc.cgroup2.*``
+    lines; the engine's post-apply ``_persist_resources`` (``_apply_pve_lxc``)
+    re-writes the canonical kento conf, restoring them for the next boot.
+    """
+
+    def __init__(self, container_dir: Path, name: str) -> None:
+        self._dir = container_dir
+        self._name = name
+
+    def _vmid(self) -> str:
+        # pve-lxc vmid is the container dir name (mirrors set_cmd:_pve_lxc_conf
+        # _path's fallback + the boot hook's CONTAINER_ID); a kento-vmid file
+        # overrides it if present (defensive parity with set_cmd).
+        vmid_file = self._dir / "kento-vmid"
+        if vmid_file.is_file():
+            text = vmid_file.read_text().strip()
+            if text:
+                return text
+        return self._dir.name
+
+    def apply(self, key: str, value: int) -> None:
+        from kento.subprocess_util import run_or_die
+
+        vmid = self._vmid()
+        if key == "memory":
+            args = ["-memory", str(int(value))]
+        elif key == "cores":
+            args = ["-cores", str(int(value)), "-cpulimit", str(int(value))]
+        else:  # pragma: no cover — engine only passes memory/cores
+            raise ValueError(f"unsupported live resource knob {key!r}")
+        run_or_die(
+            ["pct", "set", vmid, *args],
+            f"apply {key} live to running container",
+            name=self._name,
+        )
 
 
 def _resolve_guest_ip(container_dir: Path) -> str | None:
