@@ -918,15 +918,42 @@ class Instance(ABC):
         ``VirtualMachine``), loaded as a coherent snapshot.
 
         Polymorphic (§10.1): called on the **base** it returns whichever kind
-        ``name`` is; called on a **subclass** it NARROWS — resolving a name that
-        is a DIFFERENT kind raises a kind-mismatch ``InstanceNotFoundError``
-        whose message names the actual kind (NOT a ``None`` return, §2 principle
-        5). Raises ``InstanceNotFoundError`` when no such instance exists.
+        ``name`` is; called on a **subclass** it NARROWS — resolving WITHIN that
+        kind's namespace, so a name that exists in BOTH namespaces (a
+        ``create --force`` duplicate) resolves to the subclass's own kind rather
+        than raising ``resolve_any``'s cross-namespace "ambiguous" error.
+        Resolving a name that is ONLY a DIFFERENT kind still raises a
+        kind-mismatch ``InstanceNotFoundError`` whose message names the actual
+        kind (NOT a ``None`` return, §2 principle 5). Raises
+        ``InstanceNotFoundError`` when no such instance exists in any namespace.
         """
-        from kento import resolve_any
+        from kento import InstanceNotFoundError, resolve_any
 
-        container_dir, mode = resolve_any(name)
+        namespace = cls._namespace()
+        if namespace is None:
+            # Base Instance: span BOTH namespaces (byte-identical to before — a
+            # bare lookup of a dup name is ambiguous; the caller picks a scope).
+            container_dir, mode = resolve_any(name)
+            inst = _load_snapshot(container_dir, mode)
+            cls._reject_kind_mismatch(inst, name)
+            return inst
+
+        # Subclass: NARROW to this kind's namespace first (so a cross-namespace
+        # dup resolves THIS kind, not "ambiguous").
+        try:
+            container_dir, mode = resolve_any(name, namespace=namespace)
+        except InstanceNotFoundError:
+            # Not in our namespace. If the name IS the OTHER kind, surface the
+            # spec-required kind-mismatch message (naming the actual kind);
+            # otherwise re-raise the genuine not-found. We re-resolve via the
+            # base (both-namespace) path to discover the other-kind instance.
+            other = _try_resolve_other_kind(name)
+            if other is not None:
+                cls._reject_kind_mismatch(other, name)  # always raises here
+            raise
         inst = _load_snapshot(container_dir, mode)
+        # Defensive: namespace-scoped resolve already guarantees the kind, but
+        # keep the kind-check so an unexpected mode still fails type-honestly.
         cls._reject_kind_mismatch(inst, name)
         return inst
 
@@ -946,18 +973,37 @@ class Instance(ABC):
                 f" or Instance.get({name!r})."
             )
 
+    @classmethod
+    def _namespace(cls) -> str | None:
+        """The runtime namespace this class resolves within (§10.1 narrowing).
+
+        The base ``Instance`` spans BOTH namespaces (``None``); a concrete kind
+        narrows to its own — ``SystemContainer`` -> the ``"lxc"`` namespace,
+        ``VirtualMachine`` -> the ``"vm"`` namespace. This is the single source of
+        the class->namespace axis used by ``get``/``list`` (narrowing) and
+        ``prune_orphans`` (``_prune_scope``).
+        """
+        if cls is SystemContainer:
+            return "lxc"
+        if cls is VirtualMachine:
+            return "vm"
+        return None
+
     # ------------------------------------------------------------------- #
-    # M2 — list: enumerate cls's kind across both namespaces (§11.1).
+    # M2 — list: enumerate cls's kind, narrowed by namespace (§11.1).
     # ------------------------------------------------------------------- #
     @classmethod
     def list(cls) -> "list[Instance]":
-        """Enumerate instances of ``cls``'s kind across both namespaces (M2).
+        """Enumerate instances of ``cls``'s kind (M2, §10.1 narrowing).
 
-        Globs ``*/kento-image`` in ``LXC_BASE`` and ``VM_BASE`` (the same
+        Globs ``*/kento-image`` in the relevant namespace base(s) (the same
         enumeration source ``list.py`` uses) and loads each as a snapshot.
-        Polymorphic (§10.1): the **base** returns ALL kinds; a **subclass**
-        NARROWS to its own kind (``VirtualMachine.list()`` -> only VMs). No
-        filter params in 1.0 (callers filter the typed list, §11.9).
+        Polymorphic (§10.1): the **base** scans BOTH namespaces and returns ALL
+        kinds; a **subclass** NARROWS to its OWN namespace
+        (``SystemContainer`` -> ``LXC_BASE``, ``VirtualMachine`` -> ``VM_BASE``),
+        so it never even loads the other kind's entries. The ``isinstance`` filter
+        remains as a type-honesty backstop. No filter params in 1.0 (callers
+        filter the typed list, §11.9).
 
         TOTAL OVER THE STORE: a corrupt / mid-destroy / unresolvable entry is
         SKIPPED WITH A LOG, never fatal to the whole listing — one bad instance
@@ -968,8 +1014,16 @@ class Instance(ABC):
         """
         from kento import LXC_BASE, VM_BASE
 
+        namespace = cls._namespace()
+        if namespace == "lxc":
+            bases = (LXC_BASE,)
+        elif namespace == "vm":
+            bases = (VM_BASE,)
+        else:  # base Instance — scan both (byte-identical to before).
+            bases = (LXC_BASE, VM_BASE)
+
         instances: list[Instance] = []
-        for base in (LXC_BASE, VM_BASE):
+        for base in bases:
             if not base.is_dir():
                 continue
             for image_file in sorted(
@@ -1265,13 +1319,10 @@ class Instance(ABC):
         kind narrows to its own (``SystemContainer`` -> the LXC namespace,
         ``VirtualMachine`` -> the VM namespace). Only pve-lxc / pve-vm instances
         can orphan, so this is the namespace, not the platform — the same axis
-        ``reconcile.find_orphans`` scopes on.
+        ``reconcile.find_orphans`` scopes on. Delegates to :meth:`_namespace`,
+        the shared class->namespace mapping.
         """
-        if cls is SystemContainer:
-            return "lxc"
-        if cls is VirtualMachine:
-            return "vm"
-        return None
+        return cls._namespace()
 
     # ------------------------------------------------------------------- #
     # M11 — diagnose: INSTANCE-domain health checks for THIS instance (§11.2).
@@ -2333,6 +2384,28 @@ def _read_raw_mode(container_dir: Path) -> str:
     from kento import read_mode
 
     return read_mode(container_dir)
+
+
+def _try_resolve_other_kind(name: str) -> Instance | None:
+    """Resolve ``name`` across BOTH namespaces, returning the loaded snapshot.
+
+    Used by a subclass ``get`` AFTER its own namespace missed, to discover
+    whether ``name`` exists as the OTHER kind so the spec-required kind-mismatch
+    message can be raised (rather than a bare not-found). Returns the loaded
+    ``Instance`` if it exists in either namespace, or ``None`` if it is genuinely
+    absent. An ``ambiguous`` (dup-name) case cannot occur here — the subclass
+    namespace-scoped resolve already matched its own kind on a dup — but if it
+    somehow did, treat it as "not the other kind" (``None``) and let the original
+    not-found surface.
+    """
+    from kento import KentoError, resolve_any
+
+    try:
+        container_dir, mode = resolve_any(name)
+    except KentoError:
+        # Not found, or ambiguous: no single other-kind instance to name.
+        return None
+    return _load_snapshot(container_dir, mode)
 
 
 def _load_snapshot(container_dir: Path, mode: str) -> Instance:

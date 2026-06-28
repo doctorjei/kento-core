@@ -330,6 +330,92 @@ def test_get_absent_raises(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# M1 get — subclass namespace-narrowing on a cross-namespace duplicate name.
+# (Director-ruled core fix: subclass get resolves WITHIN its own namespace, so a
+# name present in BOTH namespaces resolves the subclass's kind instead of raising
+# resolve_any's cross-namespace "ambiguous". Base get still raises ambiguous —
+# the bare command needs an explicit scope. Spec §10.1 L1031-39.)
+# --------------------------------------------------------------------------- #
+
+
+def _make_dup(tmp_path):
+    """Create the SAME name as both an LXC and a VM (a create --force dup)."""
+    lxc_base = tmp_path / "lxc"
+    vm_base = tmp_path / "vm"
+    lxc_base.mkdir()
+    vm_base.mkdir()
+    _make_lxc(lxc_base, name="dup")
+    _make_vm(vm_base, name="dup")
+    return lxc_base, vm_base
+
+
+def test_subclass_get_narrows_on_cross_namespace_dup(tmp_path):
+    lxc_base, vm_base = _make_dup(tmp_path)
+    with patch("kento.LXC_BASE", lxc_base), \
+            patch("kento.VM_BASE", vm_base), \
+            patch("kento.is_running", return_value=False):
+        vm = VirtualMachine.get("dup")
+        ctr = SystemContainer.get("dup")
+    assert isinstance(vm, VirtualMachine) and vm._dir == vm_base / "dup"
+    assert isinstance(ctr, SystemContainer) and ctr._dir == lxc_base / "dup"
+
+
+def test_base_get_still_ambiguous_on_dup(tmp_path):
+    from kento.errors import KentoError
+
+    lxc_base, vm_base = _make_dup(tmp_path)
+    with patch("kento.LXC_BASE", lxc_base), \
+            patch("kento.VM_BASE", vm_base), \
+            patch("kento.is_running", return_value=False):
+        with pytest.raises(KentoError) as exc:
+            Instance.get("dup")
+    assert "ambiguous" in str(exc.value).lower()
+
+
+def test_subclass_get_wrong_only_kind_raises_kind_mismatch(tmp_path):
+    """A name that exists ONLY as the other kind still raises the spec kind-
+    mismatch message naming the actual kind (not a bare not-found)."""
+    lxc_base = tmp_path / "lxc"
+    vm_base = tmp_path / "vm"
+    lxc_base.mkdir()
+    vm_base.mkdir()
+    _make_lxc(lxc_base, name="onlylxc")
+    with patch("kento.LXC_BASE", lxc_base), \
+            patch("kento.VM_BASE", vm_base), \
+            patch("kento.is_running", return_value=False):
+        with pytest.raises(InstanceNotFoundError) as exc:
+            VirtualMachine.get("onlylxc")
+    assert "SystemContainer" in str(exc.value)
+
+
+def test_subclass_get_absent_raises_not_found(tmp_path):
+    lxc_base = tmp_path / "lxc"
+    vm_base = tmp_path / "vm"
+    lxc_base.mkdir()
+    vm_base.mkdir()
+    with patch("kento.LXC_BASE", lxc_base), \
+            patch("kento.VM_BASE", vm_base), \
+            patch("kento.is_running", return_value=False):
+        with pytest.raises(InstanceNotFoundError):
+            VirtualMachine.get("ghost")
+
+
+def test_subclass_list_narrows_on_cross_namespace_dup(tmp_path):
+    lxc_base, vm_base = _make_dup(tmp_path)
+    with patch("kento.LXC_BASE", lxc_base), \
+            patch("kento.VM_BASE", vm_base), \
+            patch("kento.is_running", return_value=False):
+        vms = VirtualMachine.list()
+        ctrs = SystemContainer.list()
+        all_insts = Instance.list()
+    assert [type(i).__name__ for i in vms] == ["VirtualMachine"]
+    assert [type(i).__name__ for i in ctrs] == ["SystemContainer"]
+    # Base still returns BOTH kinds (one per namespace).
+    assert {type(i).__name__ for i in all_insts} == {
+        "VirtualMachine", "SystemContainer"}
+
+
+# --------------------------------------------------------------------------- #
 # M2 list — both namespaces, polymorphic narrowing, total over corruption.
 # --------------------------------------------------------------------------- #
 
