@@ -35,6 +35,19 @@ class StateError(KentoError):
     (privilege, apparmor, mount) failed."""
 
 
+class StopTimeout(StateError):
+    """A graceful stop did not bring the instance down within the grace window.
+
+    Raised by ``Instance.stop(force=False)`` (M6, LOCKED) when the instance is
+    still running after the graceful shutdown — the LOCKED contract NEVER
+    hard-kills on the graceful path, so the caller is told to retry with
+    ``force=True`` rather than the instance being killed. Subclasses
+    ``StateError`` (it is a wrong-state-for-the-operation condition) so existing
+    ``except StateError`` / ``except KentoError`` handlers still catch it, while
+    callers that specifically want the try-force signal can catch ``StopTimeout``.
+    """
+
+
 class SubprocessError(KentoError):
     """An underlying command (pct/qm/lxc/virtiofsd/podman) failed.
 

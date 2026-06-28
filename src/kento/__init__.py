@@ -17,7 +17,7 @@ logger = logging.getLogger("kento")
 
 from kento.errors import (  # noqa: F401  (public re-export)
     KentoError, ValidationError, InstanceNotFoundError, InstanceExistsError,
-    ImageNotFoundError, ModeError, StateError, SubprocessError,
+    ImageNotFoundError, ModeError, StateError, StopTimeout, SubprocessError,
 )
 from kento._references import (  # noqa: F401  (public re-export)
     MalformedReference, Endpoint, Digest, SourceReference, OciReference,
@@ -51,7 +51,7 @@ __all__ = [
     # exception hierarchy (kento.errors)
     "KentoError", "ValidationError", "InstanceNotFoundError",
     "InstanceExistsError", "ImageNotFoundError", "ModeError", "StateError",
-    "SubprocessError",
+    "StopTimeout", "SubprocessError",
     # source-reference value types (Block 01 — kento._references)
     "MalformedReference", "Endpoint", "Digest", "SourceReference",
     "OciReference",

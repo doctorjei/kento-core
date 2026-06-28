@@ -882,6 +882,54 @@ class TestKillAndWait:
 
         mock_kill.assert_called_once_with(1234, signal.SIGTERM)
 
+    @patch("kento.vm.Path")
+    @patch("kento.vm.os.kill")
+    def test_default_escalates_to_sigkill_when_stubborn(self, mock_kill,
+                                                        mock_path_cls, tmp_path):
+        # Default (no_kill=False): a process still alive at the deadline gets
+        # SIGKILLed (today's behavior — unchanged).
+        from kento.vm import _kill_and_wait
+        pid_file = tmp_path / "pid"
+        pid_file.write_text("1234\n")
+        proc_path = MagicMock()
+        proc_path.is_dir.return_value = True  # never exits
+        original_path = Path
+        mock_path_cls.side_effect = lambda p: (
+            proc_path if p == "/proc/1234" else original_path(p))
+
+        with patch("kento.vm.time.sleep"), patch("kento.vm.time.monotonic",
+                                                 side_effect=[0.0, 0.0, 99.0]):
+            _kill_and_wait(pid_file, timeout=5.0)
+
+        # SIGTERM up front, then SIGKILL at the deadline.
+        assert mock_kill.call_args_list[0] == ((1234, signal.SIGTERM),)
+        assert mock_kill.call_args_list[-1] == ((1234, signal.SIGKILL),)
+        assert not pid_file.exists()
+
+    @patch("kento.vm.Path")
+    @patch("kento.vm.os.kill")
+    def test_no_kill_does_not_sigkill_stubborn(self, mock_kill, mock_path_cls,
+                                               tmp_path):
+        # no_kill=True (M6 graceful): a process still alive at the deadline is
+        # LEFT running — SIGTERM only, never SIGKILL, pid file preserved.
+        from kento.vm import _kill_and_wait
+        pid_file = tmp_path / "pid"
+        pid_file.write_text("1234\n")
+        proc_path = MagicMock()
+        proc_path.is_dir.return_value = True  # never exits
+        original_path = Path
+        mock_path_cls.side_effect = lambda p: (
+            proc_path if p == "/proc/1234" else original_path(p))
+
+        with patch("kento.vm.time.sleep"), patch("kento.vm.time.monotonic",
+                                                 side_effect=[0.0, 0.0, 99.0]):
+            _kill_and_wait(pid_file, timeout=5.0, no_kill=True)
+
+        # Only SIGTERM — no SIGKILL escalation.
+        mock_kill.assert_called_once_with(1234, signal.SIGTERM)
+        # pid file preserved (process still alive, left for the typed re-probe).
+        assert pid_file.exists()
+
 
 class TestGenerateMac:
     """Tests for generate_mac() — deterministic MAC address generation."""

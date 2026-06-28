@@ -125,7 +125,14 @@ def shutdown(
 
     if mode == "vm":
         from kento.vm import stop_vm
-        stop_vm(container_dir, force=force)
+        # graceful_only (M6 never-hard-kill): SIGTERM but don't SIGKILL a
+        # stubborn VM — leave it for the caller's re-probe. Pass no_kill ONLY
+        # when set, so the default path's stop_vm() call is byte-identical to
+        # before (existing callers/tests unchanged).
+        if graceful_only:
+            stop_vm(container_dir, force=force, no_kill=True)
+        else:
+            stop_vm(container_dir, force=force)
     elif mode == "pve-vm":
         vmid = (container_dir / "kento-vmid").read_text().strip()
         if force:
@@ -195,6 +202,12 @@ def shutdown(
         cmd = ["lxc-stop", "-n", container_id]
         if force:
             cmd.append("-k")
+        elif graceful_only:
+            # M6 never-hard-kill: --nokill makes lxc-stop report failure rather
+            # than SIGKILL the container after its grace window, leaving it up
+            # for the caller's re-probe. Opt-in (typed graceful path only);
+            # plain graceful keeps lxc-stop's default kill-after-grace.
+            cmd.append("--nokill")
         run_or_die(
             cmd,
             what="stop LXC container",
