@@ -262,10 +262,27 @@ class LayeredImage(Image):
         Wraps ``layers.resolve_image_id`` — which returns ``""`` on any failure
         (the internal-tool error-as-data shortcut, §2 principle 5). The typed
         surface **raises** ``ImageNotFoundError`` on that empty result instead
-        of yielding a sentinel, then parses the ``sha256:...`` string through
-        ``Digest.parse`` (which itself raises ``MalformedReference`` on a
-        malformed id). No ``""``/``None`` ever escapes. ``resolve_image_id``
-        itself is unchanged (its ``""``-tolerant callers stay until Phase 6).
+        of yielding a sentinel. No ``""``/``None`` ever escapes.
+
+        **Bare-hex normalization (the podman boundary).** ``resolve_image_id``
+        runs ``podman ... --format {{.Id}}``, and real podman (confirmed on
+        5.4.2) returns a **bare 64-char sha256 hex with NO ``algorithm:``
+        prefix**, e.g. ``279c3d3b…``. A bare hex is correctly NOT a valid
+        ``Digest`` *string* (§3.8 grammar = ``algorithm:encoded``), so feeding
+        it to ``Digest.parse`` would raise ``MalformedReference`` on every real
+        image. The id IS a sha256 digest rendered bare, so we normalize HERE,
+        at the boundary, without loosening the §3.8 grammar:
+
+        * if the raw already carries an ``algorithm:`` prefix (some podman/docker
+          builds DO prefix), parse it through ``Digest.parse`` (faithful — keeps
+          a non-sha256 algorithm intact); else
+        * construct ``Digest(algorithm="sha256", encoded=<hex>)`` from the bare
+          form. ``Digest.__post_init__`` runs the SAME ``validate_digest``
+          (sha256 => exactly 64 lowercase hex), so a garbage non-hex id still
+          raises a typed ``MalformedReference`` — never a bad ``Digest``.
+
+        ``resolve_image_id`` itself is unchanged (its ``""``-tolerant callers
+        stay until Phase 6).
         """
         from kento import layers as _layers
 
@@ -275,7 +292,14 @@ class LayeredImage(Image):
                 f"could not resolve content id for image: {ref}"
                 f" — is it present in the local store?  kento pull {ref}"
             )
-        return Digest.parse(raw)
+        if ":" in raw:
+            # Already prefixed (algorithm:encoded) — parse faithfully so a
+            # non-sha256 algorithm survives. Do NOT assume sha256 here.
+            return Digest.parse(raw)
+        # Bare {{.Id}} hex (the real-podman shape) — it is a sha256 digest
+        # rendered without its prefix. Construct the typed value; the
+        # constructor validates it (a garbage non-hex id raises a typed error).
+        return Digest(algorithm="sha256", encoded=raw)
 
     # ------------------------------------------------------------------- #
     # Content lifecycle (§4.4, §11.5 M19–M21/M23) — acquire / enumerate /
@@ -428,10 +452,12 @@ class LayeredImage(Image):
                 " EPIC)."
             )
 
-        # Enumerate dangling images by content id ({{.Id}} = "sha256:..." — the
-        # same full form layers.resolve_image_id yields, so it compares
-        # apples-to-apples against a hold's pinned content id). A dangling image
-        # is untagged ("<none>"), so its id IS its identifier in the report.
+        # Enumerate dangling images by content id ({{.Id}} = the BARE 64-hex
+        # sha256 real podman emits — the same form layers.resolve_image_id
+        # yields and create_image_hold stores in its label, so this compares
+        # apples-to-apples (bare-hex vs bare-hex) against a hold's pinned content
+        # id below). A dangling image is untagged ("<none>"), so its id IS its
+        # identifier in the report.
         result = run_or_die(
             [*_layers._podman_cmd(), "images",
              "--filter", "dangling=true", "--format", "{{.Id}}"],
@@ -535,21 +561,37 @@ class LayeredImage(Image):
         * ``images._holds()``'s ``{{.Image}}`` field, which is that same content
           id for a modern hold OR the ``repo:tag`` for a legacy hold — so we
           accept a match there against EITHER the content id or the rendered tag.
+
+        **Bare-hex comparison space (the real-podman shape).**
+        ``create_image_hold`` stores ``resolve_image_id``'s output in the label,
+        and real podman returns a **bare** 64-hex ``{{.Id}}`` (NO ``sha256:``
+        prefix). Our ``self.id`` renders ``sha256:<hex>``, so a naive
+        ``self.id.render() == <bare hex>`` would never match → a held image would
+        become removable without ``force`` (silent M23 break in the real env).
+        We compare in podman's NATIVE bare-hex space: ``self.id.encoded`` (the
+        bare hex) against each value, stripping a leading ``sha256:`` from EITHER
+        side first so a future prefixed label still matches. The legacy
+        ``repo:tag`` fallback is preserved on the raw (un-stripped) value.
         """
         from kento import images as _images_mod
 
-        # "sha256:..." — the same form layers.resolve_image_id ({{.Id}}) yields,
-        # so it compares apples-to-apples against the hold's pinned content id.
-        content_id = self.id.render()
+        # Compare in podman's native bare-hex space ({{.Id}}). self.id.encoded
+        # is the bare hex; strip a leading "sha256:" off either side defensively
+        # so a prefixed label/{{.Image}} still matches.
+        content_hex = self.id.encoded
+
+        def _bare(value: str) -> str:
+            return value.split(":", 1)[1] if ":" in value else value
 
         # Authoritative: the io.kento.hold-image-id label records the pinned id.
-        if content_id in _images_mod._hold_image_ids().values():
-            return True
+        for label_id in _images_mod._hold_image_ids().values():
+            if label_id and _bare(label_id) == content_hex:
+                return True
         # Fallback: _holds() {{.Image}} is the content id (modern hold) or the
-        # repo:tag (legacy hold pinned by ref) — match either so legacy holds
-        # still pin correctly.
+        # repo:tag (legacy hold pinned by ref) — match the bare content id OR
+        # the rendered tag (the latter against the raw value, not stripped).
         for _name, img in _images_mod._holds():
-            if img and (img == content_id or img == rendered_ref):
+            if img and (_bare(img) == content_hex or img == rendered_ref):
                 return True
         return False
 

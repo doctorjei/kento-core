@@ -174,6 +174,56 @@ def test_resolve_id_raises_on_malformed_digest():
 
 
 # --------------------------------------------------------------------------- #
+# resolve_id — BARE-HEX normalization (the real-podman {{.Id}} shape).
+#
+# REGRESSION: real podman (5.4.2) returns a BARE 64-hex sha256 with NO
+# "sha256:" prefix. The old code did Digest.parse(raw), which requires
+# "algorithm:encoded" and raised MalformedReference on EVERY real image (it was
+# masked because the prior unit tests only fed the prefixed DIGEST_STR form).
+# resolve_id must normalize the bare hex into Digest("sha256", hex).
+# --------------------------------------------------------------------------- #
+
+BARE_SHA = "279c3d3b" + "f" * 56  # a realistic bare 64-hex {{.Id}} (no prefix)
+
+
+def test_resolve_id_normalizes_bare_hex_to_sha256_digest():
+    # The real-podman shape: {{.Id}} is a bare 64-char hex, NO "sha256:" prefix.
+    assert ":" not in BARE_SHA and len(BARE_SHA) == 64
+    with patch("kento.layers.resolve_image_id", return_value=BARE_SHA) as m:
+        digest = LayeredImage.resolve_id("ubuntu:latest")
+    assert isinstance(digest, Digest)
+    assert digest.algorithm == "sha256"
+    assert digest.encoded == BARE_SHA          # bare hex preserved verbatim
+    assert digest.render() == f"sha256:{BARE_SHA}"  # rendered WITH the prefix
+    m.assert_called_once_with("ubuntu:latest")
+
+
+def test_resolve_id_bare_hex_strips_whitespace_via_resolve_image_id():
+    # resolve_image_id already .strip()s; a clean bare hex normalizes fine.
+    with patch("kento.layers.resolve_image_id", return_value=SHA):
+        digest = LayeredImage.resolve_id("ubuntu:latest")
+    assert digest.encoded == SHA
+    assert digest.render() == DIGEST_STR
+
+
+def test_resolve_id_prefixed_form_still_parses_faithfully():
+    # Some podman/docker builds DO emit "algorithm:encoded" — that path must
+    # still parse faithfully (and keep a non-sha256 algorithm intact).
+    with patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
+        digest = LayeredImage.resolve_id("ubuntu:latest")
+    assert digest.render() == DIGEST_STR
+
+
+def test_resolve_id_garbage_bare_id_still_raises_typed():
+    # A bare-but-NOT-64-hex id must still raise a typed error (validate_digest
+    # via Digest.__post_init__) — never fabricate a bad Digest (gate C).
+    for bad in ("not-a-digest", "z" * 64, "abc123", "a" * 63):
+        with patch("kento.layers.resolve_image_id", return_value=bad):
+            with pytest.raises(MalformedReference):
+                LayeredImage.resolve_id("weird:latest")
+
+
+# --------------------------------------------------------------------------- #
 # LayeredImage.resolve — delegates to layers.resolve_layers /
 # to_overlay_lowerdir / resolve_image_id (does not reimplement them)
 # --------------------------------------------------------------------------- #

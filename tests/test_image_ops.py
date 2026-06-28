@@ -389,6 +389,76 @@ def test_remove_force_does_not_consult_holds():
 
 
 # --------------------------------------------------------------------------- #
+# remove / _is_held — BARE-HEX hold comparison (the real-podman shape).
+#
+# REGRESSION: create_image_hold stores resolve_image_id's output in its
+# io.kento.hold-image-id label, and real podman {{.Id}}/{{.Image}} are a BARE
+# 64-hex (NO "sha256:" prefix). self.id.render() is "sha256:<hex>", so the old
+# `self.id.render() == <bare hex>` compare NEVER matched → a held image became
+# removable WITHOUT force (silent M23 break in the real env). _is_held must
+# compare in podman's native bare-hex space (self.id.encoded). _img()'s id is
+# Digest.parse(sha256:aaa...), so BARE_HEX below is the realistic hold value.
+# --------------------------------------------------------------------------- #
+
+BARE_HEX = SHA  # "a"*64 — exactly self.id.encoded for _img(); a real {{.Id}}
+
+
+def test_remove_refuses_when_held_by_BARE_HEX_label():
+    # The real shape: the io.kento.hold-image-id label is the BARE hex.
+    img = _img()
+    assert img.id.encoded == BARE_HEX  # guards the fixture assumption
+    with patch("kento.images._hold_image_ids",
+               return_value={"guest-a": BARE_HEX}), \
+         patch("kento.images._holds", return_value=[("guest-a", BARE_HEX)]), \
+         patch("kento.subprocess_util.subprocess.run") as m_run:
+        with pytest.raises(StateError, match="held"):
+            img.remove()
+    m_run.assert_not_called()  # refused BEFORE any podman rmi
+
+
+def test_remove_refuses_when_held_by_BARE_HEX_holds_field_no_label():
+    # Modern hold pinning the bare hex via _holds() {{.Image}}, empty label map.
+    img = _img()
+    with patch("kento.images._hold_image_ids", return_value={}), \
+         patch("kento.images._holds", return_value=[("guest-a", BARE_HEX)]), \
+         patch("kento.subprocess_util.subprocess.run") as m_run:
+        with pytest.raises(StateError, match="held"):
+            img.remove()
+    m_run.assert_not_called()
+
+
+def test_remove_not_held_when_BARE_HEX_pins_a_different_image():
+    # A hold pinning a DIFFERENT bare hex must NOT block removal of this image.
+    img = _img()
+    other_hex = "b" * 64
+    with patch("kento.images._hold_image_ids",
+               return_value={"guest-x": other_hex}), \
+         patch("kento.images._holds", return_value=[("guest-x", other_hex)]), \
+         patch("kento.subprocess_util.subprocess.run",
+               side_effect=lambda *a, **k: _ok(a[0])) as m_run:
+        img.remove()
+    rmi_cmds = [c.args[0] for c in m_run.call_args_list]
+    assert ["podman", "rmi", img.source.render()] in rmi_cmds
+
+
+def test_is_held_matches_bare_hex_and_prefixed_label():
+    # Direct _is_held unit: True for BOTH the real bare-hex label AND a
+    # defensively-prefixed "sha256:<hex>" label; False for a different id.
+    img = _img()
+    rendered = img.source.render()
+    with patch("kento.images._holds", return_value=[]):
+        with patch("kento.images._hold_image_ids",
+                   return_value={"g": BARE_HEX}):
+            assert img._is_held(rendered) is True       # bare hex (real)
+        with patch("kento.images._hold_image_ids",
+                   return_value={"g": f"sha256:{BARE_HEX}"}):
+            assert img._is_held(rendered) is True       # prefixed (defensive)
+        with patch("kento.images._hold_image_ids",
+                   return_value={"g": "c" * 64}):
+            assert img._is_held(rendered) is False      # different id
+
+
+# --------------------------------------------------------------------------- #
 # No forked podman/hold logic — ops compose existing functions only
 # --------------------------------------------------------------------------- #
 
