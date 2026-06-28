@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0.dev4] - 2026-06-28
+
+> **Library-API milestone (kento-core only; CLI unchanged at `kento 1.6.2`).**
+> This dev cut lands the first two phases of the typed public API surface plus
+> the previously-parked VM `--cores` clamp. The new types are **purely additive
+> and inert** — not yet wired into the runtime (the live `create`/`vm`/CLI
+> re-point is a later phase), so behavior is unchanged except for the clamp.
+> kento-core stays `.devN`: the API surface is not frozen and may still change.
+
+### Added
+
+- **Typed public API — Phase 1 (value types) + Phase 2 (the `Image` family).**
+  New types importable flat off `kento` (curated `__all__`):
+  - **Locators / references** — `SourceReference` (ABC), `OciReference`,
+    `Endpoint`, `Digest`, `MalformedReference`.
+  - **Network** — `NetworkConnection`, `NetworkMode`, `ForwardProtocol`,
+    `HostBinding`/`GuestTarget`, the port-forward spec-grammar + CIDR parsers.
+  - **Diagnosis / reports** — `Diagnosis`, `Finding`, `DiagnosisDomain`,
+    `CheckLevel`, `PruneScope`, `ReclaimReport`.
+  - **Platform / status / storage** — `PlatformProfile`, `PlatformMode`,
+    `Status`, `StorageMode`.
+  - **Images** — `Image` (ABC), `LayeredImage`, `Layer`, `DiskFormat`, plus the
+    `VolumeImage`/`CompositeImage` documented post-1.0 stubs. `LayeredImage`
+    carries the runtime lifecycle (`prepare`/`mount`/`unmount`/`release`,
+    delegating to the existing overlay/virtiofs assembly) and the content
+    lifecycle classmethods `pull`/`get`/`list`/`remove`/`prune` (the last
+    returning a `ReclaimReport`). All additive over the existing engine.
+
 ### Changed
 
 - **VM-mode `--cores` is now clamped to the node's CPU count, with a loud
