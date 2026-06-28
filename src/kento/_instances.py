@@ -547,9 +547,11 @@ class Instance(ABC):
         6. On success only, update the ``_forwards`` cache (§2: getter never
            re-queries).
 
-        Persistence goes through ``set_cmd(self._name, port=<specs|''>)`` — the
-        SAME declarative full-set replace the ``kento set --port`` CLI uses
-        (§5.7B), so the on-disk form is canonical and there is no second writer.
+        Persistence (``_persist_forwards``) writes ``kento-port`` via the SAME
+        canonical low-level writer the ``kento set --port`` CLI uses
+        (``set_cmd._apply_port_meta``), so the on-disk form is canonical with no
+        second writer — but NOT through ``set_cmd`` itself, which rejects a
+        running instance and would make the live path never succeed.
         """
         from kento._network import render_forward_spec, parse_forwards
         from kento.locking import kento_lock
@@ -585,17 +587,22 @@ class Instance(ABC):
                 if b in old and old[b] != t:
                     to_remove[b] = old[b]
 
-            applier = self._forwards_applier()
             undo: list[Callable[[], None]] = []
             try:
-                for binding, target in to_remove.items():
-                    applier.remove(binding, target)
-                    undo.append(
-                        lambda b=binding, t=target: applier.add(b, t))
-                for binding, target in to_add.items():
-                    applier.add(binding, target)
-                    undo.append(
-                        lambda b=binding, t=target: applier.remove(b, t))
+                # Build the live applier ONLY when there is live work to do — a
+                # no-op diff (e.g. re-assigning the same set) must not raise the
+                # "no live applier for this config" ModeError, and need touch no
+                # firewall/QMP at all (just re-persist the identical file).
+                if to_remove or to_add:
+                    applier = self._forwards_applier()
+                    for binding, target in to_remove.items():
+                        applier.remove(binding, target)
+                        undo.append(
+                            lambda b=binding, t=target: applier.add(b, t))
+                    for binding, target in to_add.items():
+                        applier.add(binding, target)
+                        undo.append(
+                            lambda b=binding, t=target: applier.remove(b, t))
                 # Live state now matches ``value``; persist the state file last.
                 self._persist_forwards(new_specs)
             except Exception:
@@ -614,32 +621,59 @@ class Instance(ABC):
             self._forwards = dict(value)
 
     def _persist_forwards(self, specs: "list[str]") -> None:
-        """Persist the forward set to ``kento-port`` via ``set_cmd`` (§5.7B).
+        """Persist the forward set to ``kento-port`` (declarative full set, §5.7B).
 
-        Declarative full-set replace: the given specs ARE the desired set
-        (``set_cmd(port=specs)``), or a clear (``set_cmd(port=[''])``) when empty.
-        Reuses the SAME stopped-only persistence the ``kento set --port`` CLI
-        uses — one canonical on-disk writer, no second copy. ``set_cmd`` takes no
-        lock, so calling it inside our held ``kento_lock`` is deadlock-safe.
+        Reuses ``set_cmd._apply_port_meta`` — the SAME canonical ``kento-port``
+        writer the ``kento set --port`` CLI uses (it re-renders each spec via
+        ``render_forward_spec`` so the on-disk form is canonical + deduped), one
+        copy, no drift. It is called DIRECTLY, NOT via ``set_cmd``: ``set_cmd``
+        unconditionally rejects a RUNNING instance (set_cmd.py:401 — "Stop it
+        first"), so routing the live (running) persist through it would make the
+        live setter ALWAYS fail-then-rollback (the Blocker the Editor caught).
+        The low-level writer has no such guard — correct here, because by the time
+        we persist on the running path the rules are ALREADY applied live, and the
+        live-vs-stopped decision belongs to ``_set_forwards_live`` (which holds
+        ``kento_lock`` across the whole op), not to the file writer.
+
+        ``"replace"`` writes the N specs; ``"clear"`` unlinks the file when the
+        set is empty (the writer's two declarative actions). Plain file I/O under
+        our held ``kento_lock``.
         """
-        from kento import set_cmd as set_cmd_mod
+        from kento.set_cmd import _apply_port_meta
 
-        set_cmd_mod.set_cmd(self._name, port=(specs if specs else [""]))
+        if specs:
+            _apply_port_meta(self._dir, specs, "replace")
+        else:
+            _apply_port_meta(self._dir, [""], "clear")
 
     def _forwards_applier(
         self) -> "_BridgedForwardsApplier | _QmpForwardsApplier":
         """The mode-appropriate live applier (bridged firewall vs VM-usermode QMP).
 
-        VM-family modes (vm / pve-vm) with usermode networking apply via QMP over
-        ``qmp.sock``; container modes (lxc / pve-lxc) apply via the host
-        nft/iptables DNAT path. Bridged-VM forwarding is not a current capability
-        (§5.7C), so a VM not in usermode has no live-forward applier — but a
-        non-forwardable net type is already rejected by ``set_cmd`` during the
-        persist step, so we never reach a live apply for it (the diff would be
-        empty and persistence raises). The applier raises if asked to act in a
-        configuration it cannot support, so a foot-gun surfaces as an error.
+        * Container modes (lxc / pve-lxc) -> ``_BridgedForwardsApplier`` (host
+          nft/iptables DNAT against the resolved guest IP).
+        * VM-family modes (vm / pve-vm) in **USER (slirp) net-mode** -> the
+          ``_QmpForwardsApplier`` (QMP ``hostfwd_add``/``remove`` over
+          ``qmp.sock``).
+        * A VM-family instance NOT in usermode -> bridged-VM forwarding is not a
+          current capability (§5.7C), so there is no live applier. We raise a
+          clear ``ModeError`` rather than hand back the QMP applier (which would
+          send ``hostfwd_add`` to a VM that has no slirp netdev and fail with an
+          opaque QMP error) — gate C: don't return an applier that invites a
+          misleading failure. This is only reachable on the RUNNING path with a
+          non-empty live diff; the STOPPED path persists without an applier.
         """
         if _is_vm_mode(self._mode):
+            if self._network.mode is not NetworkMode.USER:
+                from kento.errors import ModeError
+
+                raise ModeError(
+                    f"cannot apply port forwards live to '{self._name}': live "
+                    "port-forwarding on a VM requires usermode (slirp) "
+                    f"networking, but this VM is in {self._network.mode.value!r} "
+                    "mode (bridged-VM forwarding is not supported). Stop it to "
+                    "change forwards, which apply at next boot."
+                )
             return _QmpForwardsApplier(self._dir / "qmp.sock", self._name)
         return _BridgedForwardsApplier(self)
 
