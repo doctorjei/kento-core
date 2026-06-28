@@ -115,6 +115,7 @@ def test_snapshot_lxc_minimal(tmp_path):
     # hostname fallback = name (no hostname key written; † back-fill is Phase 6)
     assert inst.hostname == "mybox"
     assert inst.sources == (OciReference.parse("droste-hair:latest"),)
+    assert inst.directory == d  # observed identity (§11.0); == the snapshot's dir
     assert inst.storage is StorageMode.OVERLAY
     assert inst.status is Status.RUNNING
     assert inst.platform_profile == PlatformProfile(

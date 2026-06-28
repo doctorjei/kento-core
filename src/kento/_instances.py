@@ -243,6 +243,21 @@ class Instance(ABC):
         return self._created
 
     @property
+    def directory(self) -> Path:
+        """The on-disk container directory — observed identity (§11.0). Getter-only.
+
+        The instance's state directory under ``LXC_BASE`` / ``VM_BASE`` (the path
+        that holds its ``kento-*`` state files). This is the SAME value the legacy
+        ``info``/``inspect`` wire already surfaces as its ``directory`` field — it
+        is part of the instance's observable identity, not a derived display
+        convenience. Exposing it read-only lets a consumer (e.g. the CLI's wire
+        projection, §11.8 D1) reach the residual on-disk state without touching
+        the private ``_dir`` backing attribute. Getter-only: a snapshot's location
+        is fixed; relocating an instance is not a property assignment.
+        """
+        return self._dir
+
+    @property
     def environment(self) -> "dict[str, str]":
         """Create-time environment (no ``set --env`` today, §11.0). Getter-only."""
         return self._environment
