@@ -35,12 +35,13 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kento._diagnosis import Diagnosis, ReclaimReport
+from kento._images import Image
 from kento._network import (
     NetworkConnection,
     NetworkMode,
@@ -53,7 +54,7 @@ from kento._storage import StorageMode
 from kento.errors import InstanceNotFoundError, KentoError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from kento._network import GuestTarget, HostBinding
     from kento.errors import StateError
@@ -1002,26 +1003,105 @@ class SystemContainer(Instance):
         )
 
     @classmethod
-    def create(cls, *args, **kwargs) -> "SystemContainer":
-        """Create a new LXC system container — NOT YET BUILT (Phase 4, M15).
+    def create(
+        cls,
+        name: str,
+        image: "str | OciReference | Image",
+        *,
+        hostname: str | None = None,
+        platform: PlatformProfile | None = None,
+        mid: int | None = None,
+        network: NetworkConnection | None = None,
+        resources: "Mapping[str, int] | None" = None,
+        environment: "Mapping[str, str] | None" = None,
+        start: bool = False,
+        storage: StorageMode = StorageMode.OVERLAY,
+        unprivileged: bool = False,
+        nesting: bool = False,
+        lxc_args: "Sequence[str]" = (),
+        extra_args: "Sequence[str]" = (),
+    ) -> "SystemContainer":
+        """Create a new LXC system container (M15, §11.4) — wraps ``create.create``.
 
-        Overrides the abstract base contract so ``SystemContainer`` is a
-        concrete, instantiable class (``get``/``list`` build it from a
-        snapshot). The actual create body — with the M15 parameter list — lands
-        in Phase 4; calling it now raises rather than pretending.
+        Decomposes the typed parameter objects into the flat ``create.py:create``
+        keyword arguments (which returns ``None``), then re-snapshots the live
+        instance via :meth:`get` (kind-checked) — the additive wrapper stance
+        (§2): no live runtime logic is re-implemented here.
+
+        The KIND fixes the base ``mode`` to ``"lxc"`` (``create.py`` promotes it
+        to ``"pve"`` internally when ``platform`` selects PVE or auto-detection
+        finds a PVE host); ``platform`` decomposes into ``create.py``'s ``pve``
+        tri-state + ``vmid`` (JC2). ``image`` accepts a ``str`` / ``OciReference``
+        / ``Image`` (rendered to the ref string create.py wants, JC3). ``network``
+        / ``resources`` / ``environment`` decompose faithfully (JC5). ``storage``
+        other than ``OVERLAY`` raises (JC4 — the only 1.0-supported backend; not
+        silently ignored). ``unprivileged`` / ``lxc_args`` are the LXC-only params;
+        ``extra_args`` is the PVE ``--pve-arg`` pass-through.
         """
-        raise NotImplementedError(
-            "SystemContainer.create is built in Phase 4 (M15); this Phase-3 "
-            "block is read-only (get/list/refresh)."
+        from kento import create as create_mod
+
+        kwargs = _build_create_kwargs(
+            kind_mode="lxc",
+            name=name,
+            image=image,
+            hostname=hostname,
+            platform=platform,
+            mid=mid,
+            network=network,
+            resources=resources,
+            environment=environment,
+            start=start,
+            storage=storage,
+            nesting=nesting,
+            extra_args=extra_args,
         )
+        kwargs["unprivileged"] = unprivileged
+        kwargs["lxc_args"] = list(lxc_args) if lxc_args else None
+        create_mod.create(**kwargs)
+        return cls.get(name)
 
     @classmethod
-    def transient(cls, *args, **kwargs) -> "AbstractContextManager[SystemContainer]":
-        """Context-manager create — NOT YET BUILT (Phase 4, M27)."""
-        raise NotImplementedError(
-            "SystemContainer.transient is built in Phase 4 (M27); this Phase-3 "
-            "block is read-only (get/list/refresh)."
+    @contextmanager
+    def transient(
+        cls,
+        name: str,
+        image: "str | OciReference | Image",
+        *,
+        hostname: str | None = None,
+        platform: PlatformProfile | None = None,
+        mid: int | None = None,
+        network: NetworkConnection | None = None,
+        resources: "Mapping[str, int] | None" = None,
+        environment: "Mapping[str, str] | None" = None,
+        start: bool = False,
+        storage: StorageMode = StorageMode.OVERLAY,
+        unprivileged: bool = False,
+        nesting: bool = False,
+        lxc_args: "Sequence[str]" = (),
+        extra_args: "Sequence[str]" = (),
+    ) -> "Iterator[SystemContainer]":
+        """Context-manager create for a throwaway container (M27, §11.4).
+
+        Same parameters as :meth:`create`; the handle is scoped to a ``with``
+        block and **guaranteed torn down on exit** — ``destroy(force=True)``
+        (M7's force-stop-then-remove) runs whether the block exits normally or
+        via an exception. ``transient`` is the ONLY context-manager entry: a
+        plain ``create``/``get`` handle is NOT a context manager (no
+        ``__enter__``/``__exit__`` on ``Instance``), so ``with
+        SystemContainer.create(...)`` raises ``TypeError`` — teardown happens
+        iff the caller typed ``transient`` (JC6, footgun-free).
+        """
+        inst = cls.create(
+            name, image,
+            hostname=hostname, platform=platform, mid=mid, network=network,
+            resources=resources, environment=environment, start=start,
+            storage=storage, unprivileged=unprivileged, nesting=nesting,
+            lxc_args=lxc_args, extra_args=extra_args,
         )
+        try:
+            yield inst
+        finally:
+            inst.destroy(force=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1070,26 +1150,92 @@ class VirtualMachine(Instance):
         )
 
     @classmethod
-    def create(cls, *args, **kwargs) -> "VirtualMachine":
-        """Create a new VM — NOT YET BUILT (Phase 4, M16).
+    def create(
+        cls,
+        name: str,
+        image: "str | OciReference | Image",
+        *,
+        hostname: str | None = None,
+        platform: PlatformProfile | None = None,
+        mid: int | None = None,
+        network: NetworkConnection | None = None,
+        resources: "Mapping[str, int] | None" = None,
+        environment: "Mapping[str, str] | None" = None,
+        start: bool = False,
+        storage: StorageMode = StorageMode.OVERLAY,
+        nesting: bool = False,
+        qemu_args: "Sequence[str]" = (),
+        extra_args: "Sequence[str]" = (),
+    ) -> "VirtualMachine":
+        """Create a new QEMU/KVM virtual machine (M16, §11.4) — wraps ``create.create``.
 
-        Overrides the abstract base contract so ``VirtualMachine`` is a
-        concrete, instantiable class (``get``/``list`` build it from a
-        snapshot). The actual create body — with the M16 parameter list — lands
-        in Phase 4; calling it now raises rather than pretending.
+        Same decomposition shape as :meth:`SystemContainer.create`, with the VM
+        differences (M16): the KIND fixes the base ``mode`` to ``"vm"``
+        (``create.py`` promotes to ``"pve-vm"`` for PVE); there is NO
+        ``unprivileged``/``lxc_args`` (VMs have their own isolation), and the
+        backend pass-through is ``qemu_args`` (``--qemu-arg``) instead.
+        ``kernel``/``initramfs``/``machine`` are NOT params — they are the image
+        contract / a hardcoded constant (M16, §11.0). ``storage`` other than
+        ``OVERLAY`` raises (JC4).
         """
-        raise NotImplementedError(
-            "VirtualMachine.create is built in Phase 4 (M16); this Phase-3 "
-            "block is read-only (get/list/refresh)."
+        from kento import create as create_mod
+
+        kwargs = _build_create_kwargs(
+            kind_mode="vm",
+            name=name,
+            image=image,
+            hostname=hostname,
+            platform=platform,
+            mid=mid,
+            network=network,
+            resources=resources,
+            environment=environment,
+            start=start,
+            storage=storage,
+            nesting=nesting,
+            extra_args=extra_args,
         )
+        kwargs["qemu_args"] = list(qemu_args) if qemu_args else None
+        create_mod.create(**kwargs)
+        return cls.get(name)
 
     @classmethod
-    def transient(cls, *args, **kwargs) -> "AbstractContextManager[VirtualMachine]":
-        """Context-manager create — NOT YET BUILT (Phase 4, M27)."""
-        raise NotImplementedError(
-            "VirtualMachine.transient is built in Phase 4 (M27); this Phase-3 "
-            "block is read-only (get/list/refresh)."
+    @contextmanager
+    def transient(
+        cls,
+        name: str,
+        image: "str | OciReference | Image",
+        *,
+        hostname: str | None = None,
+        platform: PlatformProfile | None = None,
+        mid: int | None = None,
+        network: NetworkConnection | None = None,
+        resources: "Mapping[str, int] | None" = None,
+        environment: "Mapping[str, str] | None" = None,
+        start: bool = False,
+        storage: StorageMode = StorageMode.OVERLAY,
+        nesting: bool = False,
+        qemu_args: "Sequence[str]" = (),
+        extra_args: "Sequence[str]" = (),
+    ) -> "Iterator[VirtualMachine]":
+        """Context-manager create for a throwaway VM (M27, §11.4).
+
+        Same parameters as :meth:`create`; the handle is ``with``-scoped and
+        **guaranteed torn down on exit** via ``destroy(force=True)`` (normal OR
+        exceptional). The ONLY context-manager entry — a plain ``create``/``get``
+        handle raises ``TypeError`` under ``with`` (JC6, §11.4).
+        """
+        inst = cls.create(
+            name, image,
+            hostname=hostname, platform=platform, mid=mid, network=network,
+            resources=resources, environment=environment, start=start,
+            storage=storage, nesting=nesting,
+            qemu_args=qemu_args, extra_args=extra_args,
         )
+        try:
+            yield inst
+        finally:
+            inst.destroy(force=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1223,6 +1369,297 @@ def _resources_to_set_cmd_params(resources: "dict[str, int]") -> "dict[str, obje
 
 
 # --------------------------------------------------------------------------- #
+# Typed create-args -> create.py:create(**kwargs) decomposition (M15/M16, §11.4).
+#
+# The concrete ``create`` is an ADDITIVE wrapper (§2): decompose the typed
+# parameter objects into the flat ``create.py:create`` keyword args, call it
+# (it returns None), then re-snapshot via ``cls.get(name)``. These helpers do
+# the typed->flat mapping; getting it right is the crux (JC2/JC3/JC5) — a wrong
+# mapping silently mis-creates. ``create.py`` then validates + builds.
+# --------------------------------------------------------------------------- #
+
+
+def _image_to_ref(image: "str | OciReference | Image") -> str:
+    """Render an ``image`` argument to the ref string ``create.py`` wants (JC3).
+
+    Accepts (lean surface, §11.4):
+
+    * ``str``         — passed VERBATIM. ``create.py`` resolves/pulls it through
+      podman exactly as the CLI does (we do NOT re-parse-then-render a string —
+      that would normalize/alter what the caller typed; the str is the create
+      boundary's own input, §2 principle 3 keeps parsing where it already lives).
+    * ``OciReference`` — rendered via :meth:`OciReference.render` (the canonical
+      reference string; never re-split by hand, §2 principle 3).
+    * ``Image``        — a resolved image handle; we render its ``source``
+      locator (``OciReference.render``). This lets a caller pass a
+      ``LayeredImage`` it already pulled without re-typing the ref.
+
+    Any other type is a typed ``ValidationError`` (§2 principle 5 — a clear
+    boundary error, not a stringify-and-hope).
+    """
+    from kento.errors import ValidationError
+
+    if isinstance(image, str):
+        return image
+    if isinstance(image, OciReference):
+        return image.render()
+    if isinstance(image, Image):
+        return image.source.render()
+    raise ValidationError(
+        f"image must be a str, OciReference, or Image; got "
+        f"{type(image).__name__}."
+    )
+
+
+def _platform_to_create_args(
+    platform: PlatformProfile | None, mid: int | None,
+) -> "tuple[bool | None, int]":
+    """Decompose ``platform`` + ``mid`` into ``create.py``'s ``pve`` + ``vmid`` (JC2).
+
+    ``create.py:create`` takes a BASE ``mode`` (``"lxc"``/``"vm"`` — supplied by
+    the KIND) plus a ``pve`` TRI-STATE that it resolves internally (§6, create.py
+    PVE-promotion block):
+
+    * ``platform=None``           -> ``pve=None``  (let create.py AUTO-DETECT a
+      PVE host — its current default behavior; the typed default preserves it).
+    * ``PlatformMode.STANDARD``   -> ``pve=False`` (force NON-PVE; create.py does
+      no promotion).
+    * ``PlatformMode.PVE``        -> ``pve=True``  (force PVE; create.py raises
+      ``ModeError`` if the host is not actually PVE — surfaced, not swallowed).
+
+    ``vmid`` comes from ``mid`` (the top-level param) OR ``platform.mid``; ``mid``
+    (if given) takes precedence, else ``platform.mid``, else ``0`` (= create.py's
+    auto-allocate sentinel). A conflicting ``mid`` vs ``platform.mid`` is a typed
+    ``ValidationError`` rather than a silent pick (§2 principle 5).
+    """
+    from kento.errors import ValidationError
+
+    profile_mid = platform.mid if platform is not None else None
+    if mid is not None and profile_mid is not None and mid != profile_mid:
+        raise ValidationError(
+            f"conflicting instance id: mid={mid} but platform.mid="
+            f"{profile_mid}. Pass the id in exactly one place."
+        )
+    chosen_mid = mid if mid is not None else profile_mid
+    vmid = chosen_mid if chosen_mid is not None else 0
+
+    if platform is None:
+        return None, vmid
+    if platform.mode is PlatformMode.PVE:
+        return True, vmid
+    return False, vmid
+
+
+def _network_to_create_params(
+    conn: NetworkConnection | None, *, kind_mode: str,
+) -> "dict[str, object]":
+    """Decompose a ``NetworkConnection`` into ``create.py`` net params (JC5, §5).
+
+    ``create.py:create`` takes ``net_type`` (``bridge``/``host``/``usermode``/
+    ``none``) + ``bridge`` (L2) + ``ip``/``gateway``/``dns``/``searchdomain`` +
+    ``mac`` (NOT ``set_cmd``'s ``network=`` string — the create boundary's own
+    param shape). ``conn=None`` passes NOTHING, leaving ``create.py`` to
+    auto-detect a bridge (its current default — the same behavior as ``kento
+    create`` with no ``--network``):
+
+    * ``DHCP``     -> ``net_type="bridge"`` (+ bridge if named); lease supplies L3.
+    * ``STATIC``   -> ``net_type="bridge"`` (+ bridge) + ``ip=address[/subnet]``
+      + ``gateway`` + ``dns`` (from ``ip_config``).
+    * ``USER``     -> ``net_type="usermode"``.
+    * ``HOST``     -> ``net_type="host"``.
+    * ``DISABLED`` -> ``net_type="none"``.
+
+    ``mac`` (``link_config[mac]``) is VM-only: ``create.py`` writes ``kento-mac``
+    only for ``vm``/``pve-vm`` and SILENTLY IGNORES it on LXC. So a mac on an LXC
+    create is REJECTED here with ``ValidationError`` (gate C — symmetry with the
+    Block-11 setter, which raises ``ModeError`` for mac-on-LXC; silently dropping
+    an explicitly-set mac would be data loss). On VM modes the mac is passed
+    through. ``dns2`` cannot round-trip (``create.py`` writes a single ``dns=``
+    line) — a value carrying ``dns2`` is REJECTED with ``ValidationError`` rather
+    than silently lost (mirrors the Block-11 setter decomposition).
+    ``searchdomain`` is not in the typed model (§5.3) and is intentionally absent.
+    """
+    from kento.errors import ValidationError
+
+    if conn is None:
+        return {}
+
+    if "dns2" in conn.ip_config:
+        raise ValidationError(
+            "NetworkConnection.ip_config carries 'dns2', but create persists a "
+            "single DNS server. Drop 'dns2' (a second resolver is not yet "
+            "round-trippable through create)."
+        )
+
+    bridge = conn.link_config.get("bridge")
+    mac = conn.link_config.get("mac")
+    if mac is not None and not _is_vm_mode(kind_mode):
+        raise ValidationError(
+            "a MAC address is VM-only (link_config['mac'] is not applicable to "
+            "a SystemContainer's plain-LXC NIC). Drop 'mac' from link_config "
+            "for an LXC create."
+        )
+    params: dict[str, object] = {}
+
+    if conn.mode is NetworkMode.STATIC:
+        params["net_type"] = "bridge"
+        if bridge:
+            params["bridge"] = bridge
+        address = conn.ip_config.get("address")
+        subnet = conn.ip_config.get("subnet")
+        if address is not None:
+            params["ip"] = f"{address}/{subnet}" if subnet else address
+        if conn.ip_config.get("gateway"):
+            params["gateway"] = conn.ip_config["gateway"]
+        if conn.ip_config.get("dns1"):
+            params["dns"] = conn.ip_config["dns1"]
+    elif conn.mode is NetworkMode.DHCP:
+        params["net_type"] = "bridge"
+        if bridge:
+            params["bridge"] = bridge
+    else:
+        params["net_type"] = {
+            NetworkMode.USER: "usermode",
+            NetworkMode.HOST: "host",
+            NetworkMode.DISABLED: "none",
+        }[conn.mode]
+
+    if mac is not None:
+        params["mac"] = mac
+    return params
+
+
+def _resources_to_create_params(
+    resources: "Mapping[str, int] | None",
+) -> "dict[str, object]":
+    """Decompose the ``resources`` bag into ``create.py``'s ``memory``/``cores``.
+
+    ``memory`` (MiB) and ``cores`` map to the ``create.py`` scalar params; any
+    other key is rejected (the bag is open at the type level, §2 principle 8, but
+    only memory/cores are creatable — an unknown key would silently vanish, so we
+    fail loud per §2 principle 5). A non-int value is likewise a typed
+    ``ValidationError``. ``None``/absent => the param stays ``None`` (create.py's
+    own default sizing applies).
+    """
+    from kento.errors import ValidationError
+
+    if resources is None:
+        return {}
+    known = {"memory", "cores"}
+    unknown = set(resources) - known
+    if unknown:
+        raise ValidationError(
+            f"unsupported resources key(s) {sorted(unknown)!r}; only "
+            f"{sorted(known)!r} are settable."
+        )
+    params: dict[str, object] = {}
+    for key in ("memory", "cores"):
+        if key in resources:
+            value = resources[key]
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValidationError(
+                    f"resources[{key!r}] must be an int, got {value!r}."
+                )
+            params[key] = value
+    return params
+
+
+def _environment_to_env_list(
+    environment: "Mapping[str, str] | None",
+) -> "list[str] | None":
+    """Decompose the ``environment`` map into ``create.py``'s ``env`` list (§11.0).
+
+    ``create.py`` takes ``env`` as a list of ``"KEY=VALUE"`` strings (it validates
+    each — embedded newline / missing ``=`` / bad key — before any write). We
+    render the dict into that shape; ``None``/empty => ``None`` (no env file).
+    """
+    if not environment:
+        return None
+    return [f"{key}={value}" for key, value in environment.items()]
+
+
+def _resolve_extra_args(
+    extra_args: "Sequence[str]", platform: PlatformProfile | None,
+) -> "list[str] | None":
+    """Resolve the ``--pve-arg`` pass-through from the param + ``platform`` (JC2).
+
+    Both the M15/M16 top-level ``extra_args`` param AND ``PlatformProfile.
+    extra_args`` feed ``create.py``'s ``pve_args`` (§6 == M15 — they are the same
+    ``--pve-arg`` axis). Mirror the ``mid`` conflict logic so neither source is
+    silently lost (gate C):
+
+    * only the top-level param set      -> use it;
+    * only ``platform.extra_args`` set  -> use it (else a loaded profile's
+      pve-args would be silently DROPPED — exactly the footgun ``mid`` guards);
+    * BOTH set and they DIFFER          -> ``ValidationError`` (pass in one place);
+    * both set and EQUAL                -> use the (identical) value;
+    * neither set                       -> ``None`` (no pve-args).
+    """
+    from kento.errors import ValidationError
+
+    param = list(extra_args)
+    profile = list(platform.extra_args) if platform is not None else []
+    if param and profile and param != profile:
+        raise ValidationError(
+            f"conflicting --pve-arg pass-through: extra_args={param} but "
+            f"platform.extra_args={profile}. Pass it in exactly one place."
+        )
+    chosen = param or profile
+    return chosen or None
+
+
+def _build_create_kwargs(
+    *,
+    kind_mode: str,
+    name: str,
+    image: "str | OciReference | Image",
+    hostname: str | None,
+    platform: PlatformProfile | None,
+    mid: int | None,
+    network: NetworkConnection | None,
+    resources: "Mapping[str, int] | None",
+    environment: "Mapping[str, str] | None",
+    start: bool,
+    storage: StorageMode,
+    nesting: bool,
+    extra_args: "Sequence[str]",
+) -> "dict[str, object]":
+    """Build the shared ``create.py:create(**kwargs)`` arg set (M15/M16).
+
+    The common decomposition for both kinds — ``kind_mode`` is the base mode the
+    KIND supplies (``"lxc"``/``"vm"``); the per-kind backend pass-through
+    (``lxc_args``/``unprivileged`` vs ``qemu_args``) is added by the caller.
+
+    ``storage`` other than ``OVERLAY`` RAISES (JC4): ``create.py`` has no storage
+    param (OVERLAY is the only 1.0 backend = a no-op), so a non-OVERLAY value
+    would otherwise be silently ignored. We reject it up front (§2 principle 5;
+    gate C) rather than create something the caller didn't ask for.
+    """
+    if storage is not StorageMode.OVERLAY:
+        raise NotImplementedError(
+            f"storage={storage!r} is not supported in 1.0; only "
+            f"StorageMode.OVERLAY (the default) is available."
+        )
+
+    pve, vmid = _platform_to_create_args(platform, mid)
+    kwargs: dict[str, object] = {
+        "image": _image_to_ref(image),
+        "name": name,
+        "hostname": hostname,
+        "mode": kind_mode,
+        "pve": pve,
+        "vmid": vmid,
+        "start": start,
+        "nesting": nesting,
+        "env": _environment_to_env_list(environment),
+        "pve_args": _resolve_extra_args(extra_args, platform),
+    }
+    kwargs.update(_network_to_create_params(network, kind_mode=kind_mode))
+    kwargs.update(_resources_to_create_params(resources))
+    return kwargs
+
+
+# --------------------------------------------------------------------------- #
 # The snapshot loader — read kento-* keys into one coherent typed snapshot.
 #
 # A single point where a container directory + raw mode becomes a fully-typed
@@ -1273,11 +1710,15 @@ def _load_snapshot(container_dir: Path, mode: str) -> Instance:
     # have their backing field set here — the setter is for EXTERNAL mutation.
     name = _read_meta(container_dir, "kento-name") or container_dir.name
     inst._name = name
-    # † hostname: load the hostname key, fallback to name. The create-WRITE
-    # back-fill is Phase 6 (a live-path change); the read-fallback is correct
-    # now — a pre-back-fill instance has no hostname key, so name is the honest
-    # value (§11.0 †). A SET persists kento-hostname, so a later refresh reads it.
-    inst._hostname = _read_meta(container_dir, "hostname") or name
+    # † hostname: load the kento-hostname key, fallback to name. The create-WRITE
+    # back-fill is now done (Block 12, authorized run 33); the read-fallback stays
+    # correct — a pre-back-fill instance has no hostname key, so name is the honest
+    # value (§11.0 †). The key is ``kento-hostname`` — the SAME key create writes
+    # and ``set_cmd`` reads/writes (``_read_line``/``_write_meta`` prefix
+    # ``kento-``), so create/set/read all agree (Block-08 read the bare
+    # ``hostname`` file, which neither create nor set ever wrote — a latent seam
+    # this block closes alongside the create back-fill it enables).
+    inst._hostname = _read_meta(container_dir, "kento-hostname") or name
     inst._sources = _load_sources(container_dir)
     inst._storage = _load_storage(container_dir)
     inst._network = _load_network(container_dir)

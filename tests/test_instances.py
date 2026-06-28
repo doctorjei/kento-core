@@ -9,7 +9,12 @@ test_list.py). No live process is run.
 import os
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+
+def unittest_mock_handle():
+    """A fake created handle exposing the destroy() transient teardown uses."""
+    return MagicMock(name="instance_handle")
 
 import pytest
 
@@ -77,23 +82,15 @@ def test_base_instance_is_uninstantiable():
 
 
 def test_base_create_transient_abstract():
-    # Instance cannot be created. Python lets you CALL an abstract classmethod
-    # directly on the abstract class (abstractmethod only blocks instantiation),
-    # so the base bodies RAISE NotImplementedError rather than silently return
-    # None. Concrete kinds also raise (Phase 4 stubs) but ARE instantiable from a
-    # snapshot.
+    # Instance is abstract. Python lets you CALL an abstract classmethod directly
+    # on the abstract class (abstractmethod only blocks instantiation), so the
+    # base bodies RAISE NotImplementedError rather than silently return None. The
+    # CONCRETE kinds now implement create/transient (Block 12, Phase 4) — those
+    # are exercised in the create/transient tests below.
     with pytest.raises(NotImplementedError):
         Instance.create()
     with pytest.raises(NotImplementedError):
         Instance.transient()
-    with pytest.raises(NotImplementedError):
-        SystemContainer.create("x", "img")
-    with pytest.raises(NotImplementedError):
-        VirtualMachine.create("x", "img")
-    with pytest.raises(NotImplementedError):
-        SystemContainer.transient("x", "img")
-    with pytest.raises(NotImplementedError):
-        VirtualMachine.transient("x", "img")
 
 
 def test_subclasses_instantiate_from_snapshot(tmp_path):
@@ -133,7 +130,9 @@ def test_snapshot_lxc_minimal(tmp_path):
 
 
 def test_snapshot_hostname_key_overrides_name(tmp_path):
-    d = _make_lxc(tmp_path, hostname="custom-host")
+    # The read path loads the kento-hostname key (the SAME key create writes and
+    # set_cmd reads/writes — prefix `kento-`); a bare `hostname` file is not it.
+    d = _make_lxc(tmp_path, **{"kento-hostname": "custom-host"})
     with patch("kento.is_running", return_value=False):
         inst = _instances._load_snapshot(d, "lxc")
     assert inst.name == "mybox"
@@ -1296,7 +1295,7 @@ def test_setter_live_probe_not_cached_status(tmp_path):
 def test_setter_catch_reverse_restores_on_failure(tmp_path):
     # set_cmd raises on the FIRST (new) call -> setter re-invokes set_cmd with the
     # OLD params (rollback) and re-raises the original error; cache unchanged.
-    d = _make_lxc(tmp_path, **{"hostname": "orig"})
+    d = _make_lxc(tmp_path, **{"kento-hostname": "orig"})
     inst = _snapshot(d, "lxc")
     assert inst.hostname == "orig"
 
@@ -1365,3 +1364,331 @@ def test_setter_propagates_set_cmd_mode_error(tmp_path):
             patch("kento.locking.kento_lock"):
         with pytest.raises(ModeError):
             inst.qemu_args = ["-foo"]
+
+
+# =========================================================================== #
+# Block 12 — concrete create / transient (M15/M16/M27).
+#
+# Additive wrappers over create.py:create. We assert the typed->flat arg
+# DECOMPOSITION (mocked create.py:create), the get() round-trip (mocked get),
+# the storage guard, transient teardown (normal + exceptional), and the
+# `with create(...)` -> TypeError footgun guard. No live process is run.
+# =========================================================================== #
+
+
+# -- create: arg decomposition per kind --------------------------------------
+
+
+def test_sc_create_decomposes_standard(tmp_path):
+    sentinel = object()
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=sentinel) as mget:
+        out = SystemContainer.create("box", "img:tag")
+    assert out is sentinel
+    mget.assert_called_once_with("box")
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["image"] == "img:tag"
+    assert kwargs["name"] == "box"
+    assert kwargs["mode"] == "lxc"
+    assert kwargs["pve"] is None          # platform=None -> auto-detect
+    assert kwargs["vmid"] == 0            # mid None -> 0 (auto)
+    assert kwargs["hostname"] is None
+    assert kwargs["start"] is False
+    assert kwargs["nesting"] is False
+    assert kwargs["unprivileged"] is False
+    assert kwargs["lxc_args"] is None
+    assert kwargs["pve_args"] is None
+    assert kwargs["env"] is None
+
+
+def test_vm_create_decomposes_standard(tmp_path):
+    sentinel = object()
+    with patch("kento.create.create") as mock_create, \
+            patch.object(VirtualMachine, "get", return_value=sentinel) as mget:
+        out = VirtualMachine.create("vm1", "img:tag")
+    assert out is sentinel
+    mget.assert_called_once_with("vm1")
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["mode"] == "vm"
+    assert "unprivileged" not in kwargs    # VM has no unprivileged
+    assert "lxc_args" not in kwargs        # VM has no lxc_args
+    assert kwargs["qemu_args"] is None
+
+
+def test_sc_create_pve_platform(tmp_path):
+    plat = PlatformProfile(mode=PlatformMode.PVE, mid=200, extra_args=())
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", platform=plat, extra_args=["a", "b"])
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["mode"] == "lxc"         # base mode; create.py promotes to pve
+    assert kwargs["pve"] is True
+    assert kwargs["vmid"] == 200           # from platform.mid
+    assert kwargs["pve_args"] == ["a", "b"]   # from the top-level extra_args param
+
+
+def test_create_standard_platform_sets_pve_false(tmp_path):
+    plat = PlatformProfile(mode=PlatformMode.STANDARD, mid=None, extra_args=())
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", platform=plat)
+    assert mock_create.call_args.kwargs["pve"] is False
+
+
+def test_create_mid_param_overrides_into_vmid(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(VirtualMachine, "get", return_value=object()):
+        VirtualMachine.create("vm1", "img", mid=321)
+    assert mock_create.call_args.kwargs["vmid"] == 321
+
+
+def test_create_extra_args_from_platform_profile(tmp_path):
+    # platform.extra_args feeds pve_args when the top-level param is empty (else
+    # a loaded profile's pve-args would be silently dropped — gate C).
+    plat = PlatformProfile(mode=PlatformMode.PVE, mid=200,
+                           extra_args=("onboot=1",))
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", platform=plat)
+    assert mock_create.call_args.kwargs["pve_args"] == ["onboot=1"]
+
+
+def test_create_extra_args_conflict_raises(tmp_path):
+    # Both the param AND platform.extra_args set and DIFFERENT -> ValidationError
+    # (mirrors the mid conflict).
+    plat = PlatformProfile(mode=PlatformMode.PVE, mid=200,
+                           extra_args=("a=1",))
+    with patch("kento.create.create"), \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(ValidationError):
+            SystemContainer.create("box", "img", platform=plat,
+                                   extra_args=["b=2"])
+
+
+def test_create_extra_args_equal_ok(tmp_path):
+    # Both set and EQUAL -> use the identical value (no conflict).
+    plat = PlatformProfile(mode=PlatformMode.PVE, mid=200,
+                           extra_args=("a=1",))
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", platform=plat, extra_args=["a=1"])
+    assert mock_create.call_args.kwargs["pve_args"] == ["a=1"]
+
+
+def test_create_mac_on_lxc_rejected(tmp_path):
+    # A MAC is VM-only; create.py silently ignores it on LXC, so we reject it
+    # (gate C — symmetry with the Block-11 setter).
+    conn = NetworkConnection(mode=NetworkMode.DHCP,
+                             link_config={"mac": "aa:bb:cc:dd:ee:ff"})
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(ValidationError):
+            SystemContainer.create("box", "img", network=conn)
+    mock_create.assert_not_called()
+
+
+def test_create_mac_on_vm_passed(tmp_path):
+    conn = NetworkConnection(mode=NetworkMode.DHCP,
+                             link_config={"mac": "aa:bb:cc:dd:ee:ff"})
+    with patch("kento.create.create") as mock_create, \
+            patch.object(VirtualMachine, "get", return_value=object()):
+        VirtualMachine.create("vm1", "img", network=conn)
+    assert mock_create.call_args.kwargs["mac"] == "aa:bb:cc:dd:ee:ff"
+
+
+def test_create_conflicting_mid_vs_platform_raises(tmp_path):
+    plat = PlatformProfile(mode=PlatformMode.PVE, mid=200, extra_args=())
+    with patch("kento.create.create"), \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(ValidationError):
+            SystemContainer.create("box", "img", platform=plat, mid=201)
+
+
+def test_create_mid_matching_platform_ok(tmp_path):
+    plat = PlatformProfile(mode=PlatformMode.PVE, mid=200, extra_args=())
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", platform=plat, mid=200)
+    assert mock_create.call_args.kwargs["vmid"] == 200
+
+
+# -- create: image accepted types --------------------------------------------
+
+
+def test_create_image_ocireference(tmp_path):
+    ref = OciReference.parse("registry.example.com/foo/bar:1.2")
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", ref)
+    assert mock_create.call_args.kwargs["image"] == ref.render()
+
+
+def test_create_image_rejects_bad_type(tmp_path):
+    with patch("kento.create.create"), \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(ValidationError):
+            SystemContainer.create("box", 12345)  # type: ignore[arg-type]
+
+
+# -- create: network / resources / environment decomposition ------------------
+
+
+def test_create_network_static(tmp_path):
+    conn = NetworkConnection(
+        mode=NetworkMode.STATIC,
+        link_config={"bridge": "br0"},
+        ip_config={"address": "10.0.0.5", "subnet": "24",
+                   "gateway": "10.0.0.1", "dns1": "1.1.1.1"},
+    )
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", network=conn)
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["net_type"] == "bridge"
+    assert kwargs["bridge"] == "br0"
+    assert kwargs["ip"] == "10.0.0.5/24"
+    assert kwargs["gateway"] == "10.0.0.1"
+    assert kwargs["dns"] == "1.1.1.1"
+
+
+def test_create_network_modes(tmp_path):
+    cases = {
+        NetworkMode.USER: "usermode",
+        NetworkMode.HOST: "host",
+        NetworkMode.DISABLED: "none",
+        NetworkMode.DHCP: "bridge",
+    }
+    for mode, expected in cases.items():
+        conn = NetworkConnection(mode=mode)
+        with patch("kento.create.create") as mock_create, \
+                patch.object(VirtualMachine, "get", return_value=object()):
+            VirtualMachine.create("vm1", "img", network=conn)
+        assert mock_create.call_args.kwargs["net_type"] == expected
+
+
+def test_create_network_dns2_rejected(tmp_path):
+    conn = NetworkConnection(
+        mode=NetworkMode.STATIC,
+        ip_config={"address": "10.0.0.5", "dns1": "1.1.1.1", "dns2": "8.8.8.8"},
+    )
+    with patch("kento.create.create"), \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(ValidationError):
+            SystemContainer.create("box", "img", network=conn)
+
+
+def test_create_resources_and_environment(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create(
+            "box", "img",
+            resources={"memory": 1024, "cores": 2},
+            environment={"FOO": "bar", "BAZ": "qux"},
+        )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["memory"] == 1024
+    assert kwargs["cores"] == 2
+    assert kwargs["env"] == ["FOO=bar", "BAZ=qux"]
+
+
+def test_create_resources_unknown_key_rejected(tmp_path):
+    with patch("kento.create.create"), \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(ValidationError):
+            SystemContainer.create("box", "img", resources={"disk": 10})
+
+
+def test_create_passes_lxc_and_qemu_and_extra_args(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create(
+            "box", "img", lxc_args=["lxc.x = y"], extra_args=["onboot=1"],
+            unprivileged=True, nesting=True, start=True,
+        )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["lxc_args"] == ["lxc.x = y"]
+    assert kwargs["pve_args"] == ["onboot=1"]
+    assert kwargs["unprivileged"] is True
+    assert kwargs["nesting"] is True
+    assert kwargs["start"] is True
+
+    with patch("kento.create.create") as mock_create2, \
+            patch.object(VirtualMachine, "get", return_value=object()):
+        VirtualMachine.create("vm1", "img", qemu_args=["-cpu", "host"])
+    assert mock_create2.call_args.kwargs["qemu_args"] == ["-cpu", "host"]
+
+
+def test_create_hostname_passed_through(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", hostname="myhost")
+    assert mock_create.call_args.kwargs["hostname"] == "myhost"
+
+
+# -- create: storage guard ---------------------------------------------------
+
+
+def test_create_non_overlay_storage_raises(tmp_path):
+    # Only StorageMode.OVERLAY is supported in 1.0; any other value RAISES
+    # (gate C — not silently ignored). Use any non-OVERLAY enum member.
+    other = next(m for m in StorageMode if m is not StorageMode.OVERLAY)
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        with pytest.raises(NotImplementedError):
+            SystemContainer.create("box", "img", storage=other)
+    mock_create.assert_not_called()
+
+
+# -- transient: teardown on normal AND exceptional exit -----------------------
+
+
+def test_transient_tears_down_on_normal_exit(tmp_path):
+    handle = unittest_mock_handle()
+    with patch.object(SystemContainer, "create", return_value=handle) as mcreate:
+        with SystemContainer.transient("box", "img", start=True) as c:
+            assert c is handle
+    mcreate.assert_called_once()
+    handle.destroy.assert_called_once_with(force=True)
+
+
+def test_transient_tears_down_on_exception(tmp_path):
+    handle = unittest_mock_handle()
+    with patch.object(VirtualMachine, "create", return_value=handle):
+        with pytest.raises(RuntimeError, match="boom"):
+            with VirtualMachine.transient("vm1", "img") as c:
+                assert c is handle
+                raise RuntimeError("boom")
+    # Teardown still ran (finally) despite the exception.
+    handle.destroy.assert_called_once_with(force=True)
+
+
+def test_transient_forwards_args_to_create(tmp_path):
+    handle = unittest_mock_handle()
+    with patch.object(SystemContainer, "create", return_value=handle) as mcreate:
+        with SystemContainer.transient(
+            "box", "img", hostname="h", unprivileged=True, start=True,
+        ):
+            pass
+    kwargs = mcreate.call_args.kwargs
+    assert kwargs["hostname"] == "h"
+    assert kwargs["unprivileged"] is True
+    assert kwargs["start"] is True
+
+
+# -- footgun guard: with create(...) raises TypeError -------------------------
+
+
+def test_plain_create_is_not_a_context_manager(tmp_path):
+    # `with SystemContainer.create(...)` must raise TypeError — a plain handle is
+    # NOT a context manager (no __enter__/__exit__ on Instance), so teardown
+    # happens IFF the caller typed transient (footgun-free, M27).
+    handle = _snapshot(_make_lxc(tmp_path), "lxc")
+    with patch.object(SystemContainer, "create", return_value=handle):
+        with pytest.raises(TypeError):
+            with SystemContainer.create("box", "img"):
+                pass
+
+
+def test_instance_has_no_enter_exit():
+    assert not hasattr(Instance, "__enter__")
+    assert not hasattr(Instance, "__exit__")

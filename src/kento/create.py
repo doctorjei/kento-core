@@ -588,6 +588,7 @@ def _copy_ssh_host_keys(src_dir: Path, dest_dir: Path) -> None:
 
 
 def create(image: str, *, name: str | None = None, bridge: str | None = None,
+           hostname: str | None = None,
            nesting: bool = False,
            start: bool = False, mode: str,
            pve: bool | None = None,
@@ -946,6 +947,12 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         (container_dir / "kento-state").write_text(str(state_dir) + "\n")
         (container_dir / "kento-mode").write_text(mode + "\n")
         (container_dir / "kento-name").write_text(name + "\n")
+        # Persist the resolved hostname (the §11.0 † back-fill, authorized run
+        # 33). Only when an explicit hostname was given — a None hostname keeps
+        # the legacy no-write behavior, where the read path falls back to `name`
+        # (and `set_cmd` writes kento-hostname on a later set, the same key).
+        if hostname is not None:
+            (container_dir / "kento-hostname").write_text(hostname + "\n")
 
         # Persist the resolved network identity so a future `kento set`
         # net-rewrite can faithfully re-emit network config without
@@ -1004,8 +1011,11 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 lines.append("")
                 (resolved_dir / "90-kento.conf").write_text("\n".join(lines))
 
-        # Write hostname into guest
-        _inject_hostname(state_dir, name)
+        # Write hostname into guest. Use an explicit hostname when given (so the
+        # guest gets the real UTS name BEFORE start, where start=True boots
+        # before any post-create fixup), else fall back to `name` (legacy,
+        # byte-identical when hostname is None).
+        _inject_hostname(state_dir, hostname or name)
 
         # Write timezone config if requested
         if timezone:
