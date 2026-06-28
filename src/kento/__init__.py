@@ -19,6 +19,60 @@ from kento.errors import (  # noqa: F401  (public re-export)
     KentoError, ValidationError, InstanceNotFoundError, InstanceExistsError,
     ImageNotFoundError, ModeError, StateError, SubprocessError,
 )
+from kento._references import (  # noqa: F401  (public re-export)
+    MalformedReference, Endpoint, Digest, SourceReference, OciReference,
+)
+from kento._network import (  # noqa: F401  (public re-export)
+    NetworkMode, ForwardProtocol, NetworkConnection,
+    HostBinding, GuestTarget, ForwardAddressNotImplemented,
+    parse_forward_spec, render_forward_spec, parse_forwards, parse_cidr,
+)
+from kento._diagnosis import (  # noqa: F401  (public re-export)
+    DiagnosisDomain, CheckLevel, PruneScope, Finding, Diagnosis, ReclaimReport,
+)
+from kento._platform import (  # noqa: F401  (public re-export)
+    PlatformMode, PlatformProfile, Status,
+)
+from kento._storage import (  # noqa: F401  (public re-export)
+    StorageMode,
+)
+from kento._images import (  # noqa: F401  (public re-export)
+    DiskFormat, Layer, Image, LayeredImage, VolumeImage, CompositeImage,
+)
+
+# Curated public surface. The source-reference value types are re-exported
+# flat (canonical paths kento.OciReference etc.); the `_references` module is
+# internal. Errors are re-exported from kento.errors. The remaining names are
+# the long-standing module-level helpers defined below.
+__all__ = [
+    # exception hierarchy (kento.errors)
+    "KentoError", "ValidationError", "InstanceNotFoundError",
+    "InstanceExistsError", "ImageNotFoundError", "ModeError", "StateError",
+    "SubprocessError",
+    # source-reference value types (Block 01 — kento._references)
+    "MalformedReference", "Endpoint", "Digest", "SourceReference",
+    "OciReference",
+    # network value types (Block 02 — kento._network)
+    "NetworkMode", "ForwardProtocol", "NetworkConnection",
+    "HostBinding", "GuestTarget", "ForwardAddressNotImplemented",
+    "parse_forward_spec", "render_forward_spec", "parse_forwards", "parse_cidr",
+    # diagnosis & report value types (Block 04 — kento._diagnosis)
+    "DiagnosisDomain", "CheckLevel", "PruneScope", "Finding", "Diagnosis",
+    "ReclaimReport",
+    # platform / lifecycle-status value types (Block 03 — kento._platform)
+    "PlatformMode", "PlatformProfile", "Status",
+    # root-storage value type (Block 03 — kento._storage)
+    "StorageMode",
+    # image family value types (Block 05 — kento._images)
+    "DiskFormat", "Layer", "Image", "LayeredImage", "VolumeImage",
+    "CompositeImage",
+    # module-level helpers (defined in this module)
+    "validate_name", "detect_bridge", "resolve_network", "read_mode",
+    "require_root", "detect_mode", "upper_base", "sanitize_image_name",
+    "next_instance_name", "pve_config_exists", "is_running",
+    "resolve_container", "resolve_in_namespace", "resolve_any",
+    "check_name_conflict", "LXC_BASE", "VM_BASE",
+]
 
 LXC_BASE = Path("/var/lib/lxc")
 VM_BASE = Path("/var/lib/kento/vm")
