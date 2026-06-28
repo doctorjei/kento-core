@@ -86,11 +86,19 @@ def test_nft_installs_n_forwards_protocol_aware(hook_fixture, tmp_path):
         for ln in rule_lines
     ), log
 
-    # udp 5353 -> 53: same triplet, udp matchers + udp:5353 comment.
+    # udp 5353 -> 53: same triplet, udp matchers + udp:5353 comment. Assert the
+    # proto on EACH of the three chains (prerouting / output / postrouting) so a
+    # single-chain proto regression (e.g. hook.sh output DNAT hardcoded to tcp)
+    # reddens the suite — the OUTPUT chain is the gap the Editor flagged.
     udp_comment = f'kento:{name}:udp:5353'
     assert sum(1 for ln in rule_lines if udp_comment in ln) == 3, log
     assert any(
         f"prerouting udp dport 5353 dnat to {static_ip}:53" in ln
+        and udp_comment in ln
+        for ln in rule_lines
+    ), log
+    assert any(
+        f"output udp dport 5353 dnat to {static_ip}:53" in ln
         and udp_comment in ln
         for ln in rule_lines
     ), log
@@ -130,7 +138,15 @@ def test_iptables_installs_n_forwards_protocol_aware(hook_fixture, tmp_path):
     assert sum(1 for ln in add_lines if f"kento:{name}:tcp:8080" in ln) == 3
     assert sum(1 for ln in add_lines if f"kento:{name}:udp:5353" in ln) == 3
     assert any("-p tcp --dport 8080" in ln for ln in add_lines), log
-    assert any("-p udp --dport 5353" in ln for ln in add_lines), log
+    # Assert udp proto on EACH chain (PREROUTING / OUTPUT / POSTROUTING) so a
+    # single-chain proto regression (e.g. the OUTPUT DNAT hardcoded to tcp)
+    # reddens the suite — the OUTPUT chain is the gap the Editor flagged.
+    assert any("PREROUTING -p udp --dport 5353" in ln for ln in add_lines), log
+    assert any("OUTPUT -p udp --dport 5353" in ln for ln in add_lines), log
+    assert any(
+        "POSTROUTING" in ln and "-p udp --dport 53 " in f"{ln} "
+        for ln in add_lines
+    ), log
 
     backend = hook_fixture.container_dir / "kento-portfwd-backend"
     assert backend.read_text().strip() == "iptables"
