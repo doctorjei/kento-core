@@ -869,8 +869,46 @@ def test_lxc_set_port_clear(tmp_path):
 def test_lxc_set_port_bad_form_rejected(tmp_path):
     d = _lxc_box(tmp_path, bridge="vmbr0")
     with _env(d, "lxc"):
-        with pytest.raises(ValidationError, match="HOST:GUEST"):
+        # Validation now runs through the §5.7A boundary parser (parse_forwards):
+        # a bare token has too few colon-separated elements.
+        with pytest.raises(ValidationError, match="port-forward spec"):
             set_cmd("box", port=["notaport"])
+
+
+def test_lxc_set_port_replaces_with_n(tmp_path):
+    """set --port a --port b --port c/udp is a declarative full-set replace."""
+    d = _lxc_box(tmp_path, bridge="vmbr0")
+    (d / "kento-port").write_text("9999:99\n")  # prior single forward
+    with _env(d, "lxc"):
+        assert set_cmd("box", port=["8080:80", "8443:443", "5353:53/udp"]) == 0
+    assert (d / "kento-port").read_text().splitlines() == [
+        "8080:80", "8443:443", "5353:53/udp"]
+
+
+def test_lxc_set_port_dedup_rejected(tmp_path):
+    """A duplicate (proto, host_port) in the replace set is a clear error."""
+    d = _lxc_box(tmp_path, bridge="vmbr0")
+    with _env(d, "lxc"):
+        with pytest.raises(ValidationError, match="duplicate"):
+            set_cmd("box", port=["8080:80", "8080:90"])
+
+
+def test_lxc_set_port_clears_n(tmp_path):
+    """--port '' clears the whole set even when N forwards were present."""
+    d = _lxc_box(tmp_path, bridge="vmbr0")
+    (d / "kento-port").write_text("8080:80\n8443:443\n5353:53/udp\n")
+    with _env(d, "lxc"):
+        assert set_cmd("box", port=[""]) == 0
+    assert not (d / "kento-port").exists()
+
+
+def test_lxc_set_port_address_form_raises(tmp_path):
+    """A 3/4-element address form raises at the boundary (1.0 never writes)."""
+    from kento._network import ForwardAddressNotImplemented
+    d = _lxc_box(tmp_path, bridge="vmbr0")
+    with _env(d, "lxc"):
+        with pytest.raises(ForwardAddressNotImplemented):
+            set_cmd("box", port=["127.0.0.1:8080:80"])
 
 
 def test_lxc_set_port_on_host_type_rejected(tmp_path):

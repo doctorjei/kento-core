@@ -141,7 +141,10 @@ def test_portfwd_worker_writes_active_marker_with_canned_ip(
     )
 
     contents = active.read_text().strip()
-    expected = f"{host_port}:{guest_port}:{canned_ip}"
+    # Block 14: the active marker now records ONE line per forward in the shape
+    # "HOST:GUEST:IP:PROTO" (proto suffix added so teardown/diagnostics see the
+    # full set). A no-/proto spec defaults to tcp.
+    expected = f"{host_port}:{guest_port}:{canned_ip}:tcp"
     assert contents == expected, (
         f"marker content mismatch. expected={expected!r} actual={contents!r}"
     )

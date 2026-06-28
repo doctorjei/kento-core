@@ -361,17 +361,21 @@ def test_post_stop_nft_teardown_anchors_comment_match():
         r"""NAME_RE=$(printf '%s' "$NAME" | sed 's/[.[\*^$]/\\&/g')"""
         in post_body
     ), "post-stop must regex-escape NAME into NAME_RE before the teardown greps"
-    # Anchored nft match: full quoted token + trailing boundary, over NAME_RE.
-    # The `$` in the alternation is backslash-escaped in the source string.
-    assert r'comment \"kento:${NAME_RE}\"( |\$)' in post_body, (
-        "nft teardown must anchor the comment match to the escaped token"
+    # Block 14: the per-forward comment is now `kento:NAME:proto:hport`. The nft
+    # teardown matches `kento:NAME` followed by `:` (the new suffix) OR the
+    # closing `"` (the legacy bare token), so both pre/post-14 rules are deleted
+    # while `kento:web` still never matches `kento:web2` (next char is `:` or
+    # `"`, never a digit). The `$`/`"` in the alternation are backslash-escaped
+    # in the source string.
+    assert r'comment \"kento:${NAME_RE}(:|\")' in post_body, (
+        "nft teardown must anchor the comment match (new suffix or legacy token)"
     )
     # Must NOT use the old unanchored bare-substring grep.
     assert 'grep "kento:${NAME}"' not in post_body
     # Must NOT interpolate the raw NAME into the teardown greps (unescaped).
     assert 'grep -E "comment \\"kento:${NAME}\\"' not in post_body
-    # iptables teardown likewise anchored over NAME_RE (not -F).
-    assert r'kento:${NAME_RE}( |\$)' in post_body
+    # iptables teardown likewise anchored over NAME_RE: `:` (new), space, or end.
+    assert r'kento:${NAME_RE}(:| |\$)' in post_body
     assert 'grep -F "kento:${NAME}"' not in post_body
 
 

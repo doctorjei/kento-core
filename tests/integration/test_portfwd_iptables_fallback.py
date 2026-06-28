@@ -127,7 +127,10 @@ def test_iptables_fallback_static_ip(hook_fixture, tmp_path):
     assert active.exists(), (
         f"missing active marker.\nstderr:\n{result.stderr}"
     )
-    assert active.read_text().strip() == f"{host_port}:{guest_port}:{static_ip}"
+    # Block 14: marker is one "HOST:GUEST:IP:PROTO" line per forward (tcp default).
+    assert active.read_text().strip() == (
+        f"{host_port}:{guest_port}:{static_ip}:tcp"
+    )
 
     backend = hook_fixture.container_dir / "kento-portfwd-backend"
     assert backend.exists(), "missing backend marker"
@@ -180,7 +183,10 @@ def test_iptables_fallback_dhcp_worker(hook_fixture, tmp_path):
     assert _wait_for_file(active), (
         f"worker never wrote {active}.\nworker:\n{worker_path.read_text()}"
     )
-    assert active.read_text().strip() == f"{host_port}:{guest_port}:{canned_ip}"
+    # Block 14: marker is one "HOST:GUEST:IP:PROTO" line per forward (tcp default).
+    assert active.read_text().strip() == (
+        f"{host_port}:{guest_port}:{canned_ip}:tcp"
+    )
 
     backend = hook_fixture.container_dir / "kento-portfwd-backend"
     assert backend.exists() and backend.read_text().strip() == "iptables"

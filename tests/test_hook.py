@@ -277,11 +277,16 @@ def test_generate_hook_post_stop_anchors_comment_match():
         r"""NAME_RE=$(printf '%s' "$NAME" | sed 's/[.[\*^$]/\\&/g')"""
         in post_body
     )
-    # nft: full quoted comment token + trailing boundary, over NAME_RE.
-    assert r'comment \"kento:${NAME_RE}\"( |\$)' in post_body
+    # Block 14: the per-forward comment is now `kento:NAME:proto:hport`. The
+    # teardown matches `kento:NAME` followed by `:` (the new suffix) OR the
+    # legacy boundary, so both pre/post-14 rules are torn down while `kento:web`
+    # still never matches `kento:web2` (next char is `:`, `"`, space, or end —
+    # never a digit).
+    # nft: `kento:NAME` followed by `:` (new) or the closing `"` (legacy bare).
+    assert r'comment \"kento:${NAME_RE}(:|\")' in post_body
     assert 'grep "kento:${NAME}"' not in post_body
-    # iptables: trailing-boundary anchored grep -E over NAME_RE, not a bare -F.
-    assert r'kento:${NAME_RE}( |\$)' in post_body
+    # iptables: `kento:NAME` followed by `:` (new), space, or end (legacy).
+    assert r'kento:${NAME_RE}(:| |\$)' in post_body
     assert 'grep -F "kento:${NAME}"' not in post_body
 
 
@@ -372,18 +377,26 @@ def test_generate_hook_start_host_no_sync_lxc_info():
 
 
 def test_generate_hook_validates_port_spec():
-    """F19: setup_port_forwarding must validate kento-port before nft use."""
+    """F19: spec validation must run before any nft rule install.
+
+    Block 14 moved per-line spec validation into parse_port_specs(), which
+    setup_port_forwarding() calls at the top before resolving an IP or
+    installing any rule. The rule install itself lives in
+    install_forward_rules() and is reached only for VALID forwards.
+    """
     script = generate_hook(Path("/var/lib/lxc/test"), "/a:/b", "test")
-    # Static: rejection path lives inside the setup_port_forwarding() body,
-    # not below it (so it runs before any nft invocation).
+    # The rejection path lives in parse_port_specs(), defined ahead of the
+    # rule-install function install_forward_rules().
+    assert "invalid kento-port" in script
+    assert script.index("parse_port_specs()") < script.index(
+        "install_forward_rules()"
+    )
+    # parse_port_specs (validation) is invoked before the install helper is
+    # ever called inside setup_port_forwarding().
     fn_start = script.index("setup_port_forwarding()")
     fn_body = script[fn_start:script.index("\n}\n", fn_start) + 2]
-    assert "invalid kento-port" in fn_body
-    # The actual nft invocation happens after the validation (by line order).
-    # Use "nft add rule ip kento prerouting" — appears only as real commands,
-    # not in the explanatory comment.
-    assert fn_body.index("invalid kento-port") < fn_body.index(
-        "nft add rule ip kento prerouting tcp"
+    assert fn_body.index("parse_port_specs ") < fn_body.index(
+        "install_forward_rules "
     )
 
 
@@ -396,10 +409,13 @@ def test_generate_hook_rejects_malformed_port_at_runtime(tmp_path):
     import subprocess as sp
     script = generate_hook(tmp_path, "/a:/b", "testname")
 
-    # Strip the rest of the script after setup_port_forwarding() so we
-    # only define the function; we'll call it from our own harness below.
-    fn_start = script.index("setup_port_forwarding()")
-    fn_end = script.index("\n}\n", fn_start) + 2
+    # Extract the helper functions setup_port_forwarding() depends on
+    # (parse_port_specs + install_forward_rules) through the end of
+    # setup_port_forwarding() itself; we'll call it from our own harness below.
+    # Block 14: validation lives in parse_port_specs(), so it must be defined.
+    fn_start = script.index("parse_port_specs()")
+    setup_start = script.index("setup_port_forwarding()")
+    fn_end = script.index("\n}\n", setup_start) + 2
     fn_def = script[fn_start:fn_end]
 
     # Minimal prologue — match the globals the function references.

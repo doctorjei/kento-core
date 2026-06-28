@@ -379,6 +379,50 @@ class TestStartVm:
         qemu_args = mock_popen.call_args_list[1][0][0]
         assert "hostfwd=tcp:127.0.0.1:12345-:2222" in " ".join(qemu_args)
 
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_start_passes_n_forwards_protocol_aware(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run,
+            tmp_path):
+        """N kento-port lines -> one hostfwd= per spec on a single -netdev,
+        protocol-aware (tcp/udp)."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        rootfs.mkdir()
+        boot = rootfs / "boot"
+        boot.mkdir()
+        (boot / "vmlinuz").write_text("kernel")
+        (boot / "initramfs.img").write_text("initramfs")
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-port").write_text("12345:2222\n5353:53/udp\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+        mock_vfs = MagicMock()
+        mock_vfs.pid = 100
+        mock_vfs.poll.return_value = None
+        mock_qemu = MagicMock()
+        mock_qemu.pid = 200
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        netdev_idx = qemu_args.index("-netdev")
+        netdev = qemu_args[netdev_idx + 1]
+        # Single netdev carries both hostfwds, comma-joined, protocol-aware.
+        assert netdev == (
+            "user,id=net0,"
+            "hostfwd=tcp:127.0.0.1:12345-:2222,"
+            "hostfwd=udp:127.0.0.1:5353-:53"
+        )
+
     @patch("kento.vm.is_vm_running", return_value=False)
     @patch("kento.vm.unmount_rootfs")
     @patch("kento.vm.mount_rootfs")

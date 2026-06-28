@@ -37,7 +37,6 @@ from kento.errors import ModeError, StateError, ValidationError
 logger = logging.getLogger("kento")
 
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
-_PORT_RE = re.compile(r"^\d+:\d+$")
 
 # net_type values that support port forwarding, by family. Usermode forwards
 # via QEMU slirp hostfwd (VM modes); bridge forwards via iptables/nft DNAT on
@@ -554,12 +553,13 @@ def set_cmd(name, *, memory=None, cores=None, mac=None,
 
         port_action = _classify_list(port)
         if port_action == "replace":
-            for entry in _nonempty(port):
-                if not _PORT_RE.match(entry):
-                    raise ValidationError(
-                        f"invalid --port {entry!r}; expected HOST:GUEST with "
-                        "numeric ports (e.g. 10022:22)."
-                    )
+            # Validate + dedup the full set declaratively via the §5.7A boundary
+            # parser (Block 02): accepts N specs, protocol-aware (tcp/udp), and
+            # rejects a duplicate (protocol, host_addr, host_port) with a clear
+            # error. Address forms raise ForwardAddressNotImplemented at the
+            # boundary (1.0 never persists them).
+            from kento._network import parse_forwards
+            parse_forwards(_nonempty(port))
 
         _validate_net_identity(
             new, mode=mode,
@@ -662,13 +662,21 @@ def _emit_guest_net_dropins(container_dir: Path, new: dict, mode: str) -> None:
 
 
 def _apply_port_meta(container_dir: Path, port, port_action: str) -> None:
-    """Replace/clear kento-port from a --port list arg."""
+    """Replace/clear kento-port from a --port list arg.
+
+    ``set --port`` is a DECLARATIVE full-set replace (§5.7B): the given specs
+    ARE the desired set, written one §5.7A line each. ``--port ''`` (clear)
+    unlinks the file. Specs are re-rendered through the Block-02 parser so the
+    on-disk form is canonical and deduped (validation already ran in set_cmd()).
+    """
     path = container_dir / "kento-port"
     if port_action == "clear":
         path.unlink(missing_ok=True)
     elif port_action == "replace":
-        # set takes a single forwarding pair (mirrors create's --port).
-        path.write_text(_nonempty(port)[0] + "\n")
+        from kento._network import parse_forwards, render_forward_spec
+        forwards = parse_forwards(_nonempty(port))
+        lines = [render_forward_spec(b, t) for b, t in forwards.items()]
+        path.write_text("".join(line + "\n" for line in lines))
 
 
 def _apply_passthrough_meta(container_dir: Path, field: str,
