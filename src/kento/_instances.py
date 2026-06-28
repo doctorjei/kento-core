@@ -149,6 +149,14 @@ class Instance(ABC):
     _dir: Path
     _mode: str
 
+    # Dead-handle flag (§11.2 M7): set True after ``destroy()`` removes the
+    # instance. A class-level default of ``False`` means a freshly-loaded
+    # snapshot is alive without the loader having to set it; ``destroy`` flips
+    # the INSTANCE attribute to True, and every mutating method guards on it via
+    # ``_check_alive`` so a post-destroy reuse fails cleanly (§2 principle 5 —
+    # raise, never silently no-op) instead of re-touching a removed directory.
+    _dead: bool = False
+
     # Cached snapshot fields (§11.0). Plain cached attributes set by the loader:
     # access is variable-like (``inst.status``) and reads return the cached
     # value with no I/O (§10.2). Settable PROPERTIES (M9) are a LATER block and
@@ -306,11 +314,180 @@ class Instance(ABC):
         The handle identity is unchanged; only the cached snapshot is updated —
         the conventional ``.reload()`` / ``.refresh_from_db()`` pattern (§10.2).
         """
+        self._check_alive()
         fresh = _load_snapshot(self._dir, self._mode)
         # Copy the fresh snapshot's cached state into THIS handle (in place), so
         # any existing reference observes the updated values. _populate is the
         # single field-set used by both the loader and refresh.
         self.__dict__.update(fresh.__dict__)
+
+    # ------------------------------------------------------------------- #
+    # Dead-handle guard (§11.2 M7).
+    # ------------------------------------------------------------------- #
+    def _check_alive(self) -> None:
+        """Raise if this handle was already destroyed (§11.2 M7, §2 principle 5).
+
+        After ``destroy()`` the backing instance and its directory are gone, so
+        any further lifecycle/refresh call would either no-op silently or fail
+        with a confusing low-level error. We make the dead state explicit: a
+        reused handle raises ``InstanceNotFoundError`` naming the instance, so
+        the caller learns the handle is spent rather than acting on a removed
+        instance.
+        """
+        if self._dead:
+            raise InstanceNotFoundError(
+                f"instance {self.name!r} was destroyed; this handle is no "
+                f"longer usable."
+            )
+
+    # ------------------------------------------------------------------- #
+    # M5 — start: boot the instance; self-update status (§11.2).
+    # ------------------------------------------------------------------- #
+    def start(self) -> None:
+        """Boot the instance (M5, §11.2) — wraps ``start.start``.
+
+        Delegates to the existing mode-aware ``start.start`` (which dispatches on
+        ``self._mode`` internally: vm / pve-vm / pve / lxc), then self-updates the
+        cached ``status`` from a fresh live probe (§10.2 — a lifecycle method DOES
+        I/O and reflects the new state). ``start.start`` is idempotent (a no-op on
+        an already-running instance), so a redundant ``start()`` is safe and the
+        re-resolved status is still correct.
+
+        Self-update via the Block-08 ``_resolve_status`` rather than a hard-coded
+        ``Status.RUNNING``: re-resolving is the honest value (it picks up ORPHAN /
+        UNKNOWN, and does not claim RUNNING if the boot silently failed to take),
+        and it reuses the one status resolver instead of forking a second notion
+        of "running".
+        """
+        self._check_alive()
+        from kento import start as start_mod
+
+        start_mod.start(self.name, container_dir=self._dir, mode=self._mode)
+        self.status = _resolve_status(self._dir, self._mode)
+
+    # ------------------------------------------------------------------- #
+    # M6 — stop: graceful-or-forced shutdown (§11.2, LOCKED).
+    # ------------------------------------------------------------------- #
+    # Default graceful grace window (seconds) when ``timeout`` is None (§11.2 M6).
+    _STOP_DEFAULT_TIMEOUT = 15
+
+    def stop(self, *, timeout: int | None = None, force: bool = False) -> None:
+        """Stop the instance (M6, §11.2 — LOCKED) — wraps ``stop.shutdown``.
+
+        Delivers the full LOCKED M6 semantics. The typed layer owns ALL the
+        timing/decision logic; ``stop.shutdown`` supplies the per-mode graceful
+        and forced primitives (its graceful path is now genuinely no-kill —
+        ``--nokill`` on LXC, no-SIGKILL on VM, no ``--forceStop`` on PVE — so a
+        stubborn guest is left running for our re-probe):
+
+        * ``force=False`` — graceful only, NEVER hard-kills. Issue a graceful
+          stop, then re-probe: if still running, raise
+          ``StopTimeout("cannot stop; try force")`` (the instance is left up).
+        * ``force=True``, ``timeout`` None/0 — immediate hard kill.
+        * ``force=True``, ``timeout > 0`` — grace that long, THEN kill: a graceful
+          stop, a bounded liveness poll up to ``timeout`` seconds, then a hard
+          kill only if it is still up.
+
+        ``timeout`` is the grace window; the post-elapse action differs — report
+        (raise) vs kill — and the DEFAULT differs by case (§11.2 M6): graceful
+        ``None`` => 15s; forced ``None`` => 0 (immediate). Self-updates ``status``
+        from a fresh probe afterward (§10.2).
+        """
+        self._check_alive()
+        from kento import stop as stop_mod
+
+        # Default grace window. Graceful: None => 15s. Forced: None => 0
+        # (immediate kill); only an explicit timeout>0 buys a forced grace window.
+        if timeout is None:
+            grace = 0 if force else self._STOP_DEFAULT_TIMEOUT
+        else:
+            grace = timeout
+
+        if force and grace <= 0:
+            # Immediate hard kill: no grace window requested.
+            stop_mod.shutdown(
+                self.name, force=True,
+                container_dir=self._dir, mode=self._mode,
+            )
+            self.status = _resolve_status(self._dir, self._mode)
+            return
+
+        # Both remaining paths begin with a genuine graceful (no-kill) stop.
+        stop_mod.shutdown(
+            self.name, graceful_only=True,
+            container_dir=self._dir, mode=self._mode,
+        )
+        # Give the guest the grace window to actually go down.
+        went_down = _wait_until_down(self._dir, self._mode, grace)
+
+        if not went_down:
+            if force:
+                # force + timeout>0: grace elapsed, still up -> hard kill now.
+                stop_mod.shutdown(
+                    self.name, force=True,
+                    container_dir=self._dir, mode=self._mode,
+                )
+            else:
+                # Graceful only: NEVER kill -> report it is still running. Resolve
+                # status first so the handle reflects the still-running reality.
+                self.status = _resolve_status(self._dir, self._mode)
+                from kento.errors import StopTimeout
+
+                raise StopTimeout("cannot stop; try force")
+
+        self.status = _resolve_status(self._dir, self._mode)
+
+    # ------------------------------------------------------------------- #
+    # M7 — destroy: stop (if needed) + remove instance + writable layer (§11.2).
+    # ------------------------------------------------------------------- #
+    def destroy(self, *, force: bool = False) -> None:
+        """Destroy the instance (M7, §11.2) — wraps ``destroy.destroy``.
+
+        Removes the instance and its writable layer, and releases this instance's
+        OWN image hold (never the image — that is ``prune``'s job; ``destroy.py``
+        calls ``remove_image_hold`` for this guest only). ``force=True`` →
+        force-stop-then-remove (``destroy.destroy`` hard-stops a running instance
+        before removal); ``force=False`` on a running instance raises
+        ``StateError`` (``destroy.destroy``'s guard) rather than killing it.
+
+        After this returns the backing instance is gone, so the handle is marked
+        DEAD: a subsequent lifecycle/refresh call on it raises
+        ``InstanceNotFoundError`` (via ``_check_alive``) instead of acting on a
+        removed directory. We do NOT self-update ``status`` to a sentinel —
+        there is no "destroyed" ``Status`` (the enum models a live instance's
+        state); the dead flag is the honest signal that the handle is spent.
+        """
+        self._check_alive()
+        from kento import destroy as destroy_mod
+
+        destroy_mod.destroy(
+            self.name, force, container_dir=self._dir, mode=self._mode,
+        )
+        # Only on success: the instance is gone, so the handle is spent.
+        self._dead = True
+
+    # ------------------------------------------------------------------- #
+    # M8 — scrub: reset the writable upper layer + re-pin hold (§11.2).
+    # ------------------------------------------------------------------- #
+    def scrub(self) -> None:
+        """Scrub the instance back to pristine image state (M8, §11.2).
+
+        Wraps ``reset.reset``: full reset of the writable upper layer
+        (keep-nothing — the surgical keep-``/home`` variant is the future
+        ``wipe``/``rebuild`` verbs, not this), keeping the instance + identity,
+        and re-pinning the image hold to the freshly-resolved image
+        (``reset.reset`` calls ``repin_image_hold``).
+
+        ``reset.reset`` refuses to run on a RUNNING instance (raises
+        ``StateError`` — scrub a stopped instance). It leaves the instance
+        stopped, so we re-resolve ``status`` afterward to reflect that (it
+        stays STOPPED unless something changed underneath).
+        """
+        self._check_alive()
+        from kento import reset as reset_mod
+
+        reset_mod.reset(self.name, container_dir=self._dir, mode=self._mode)
+        self.status = _resolve_status(self._dir, self._mode)
 
 
 # --------------------------------------------------------------------------- #
@@ -642,6 +819,43 @@ def _load_forwards(container_dir: Path) -> dict["HostBinding", "GuestTarget"]:
             continue
         forwards[binding] = target
     return forwards
+
+
+def _wait_until_down(container_dir: Path, mode: str, timeout: int) -> bool:
+    """Poll the run-state up to ``timeout`` s; True iff the instance went down.
+
+    Drives the M6 grace window: after a graceful stop, poll the runtime
+    ``is_running`` probe until it reports the instance is down or ``timeout``
+    seconds elapse. Returns True if it went down within the window (so the caller
+    neither raises ``StopTimeout`` nor force-kills), False if it is still up at
+    the deadline (caller decides: raise on the graceful path, kill on force).
+
+    Total over a failing probe: if the probe raises (node unreachable, tool
+    missing) we treat the instance as DOWN for this decision — we will NOT raise
+    "cannot stop" nor hard-kill on an unobservable instance (acting destructively
+    or alarmingly on what we cannot even observe is the wrong default; the
+    conservative read is to let the graceful stop stand).
+
+    ``timeout <= 0`` does a single immediate probe (no wait). The poll cadence is
+    a fixed 0.5s tick; the final probe always lands at-or-after the deadline so a
+    just-in-time shutdown is still seen.
+    """
+    import time
+
+    from kento import is_running
+
+    deadline = time.monotonic() + max(timeout, 0)
+    while True:
+        try:
+            running = is_running(container_dir, mode)
+        except (OSError, KentoError):
+            # Unobservable -> treat as down (don't raise / don't kill).
+            return True
+        if not running:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
 
 
 def _resolve_status(container_dir: Path, mode: str) -> Status:

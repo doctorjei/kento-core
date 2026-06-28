@@ -439,3 +439,331 @@ def test_resources_omits_non_integer(tmp_path):
     with patch("kento.is_running", return_value=False):
         inst = _instances._load_snapshot(d, "lxc")
     assert inst.resources == {"memory": 512}
+
+
+# --------------------------------------------------------------------------- #
+# Block 09 — lifecycle methods: start / stop / destroy / scrub (ADDITIVE).
+#
+# Each method WRAPS the existing mode-aware runtime func (start.start /
+# stop.shutdown / destroy.destroy / reset.reset) and self-updates status. We
+# patch the wrapped func to assert DELEGATION (no forked lifecycle logic) +
+# the exact call shape per mode, and patch the status probe to assert the
+# self-update. House pattern: snapshot built via _load_snapshot with is_running
+# mocked; no live process runs.
+# --------------------------------------------------------------------------- #
+
+
+from kento import StopTimeout  # noqa: E402  (grouped with the Block-09 block)
+
+
+def _make_for_mode(base: Path, mode: str) -> Path:
+    """Build a per-mode container dir that loads into a VALID typed snapshot.
+
+    PVE modes need a coherent vmid (the PlatformProfile coherence check, §6.2):
+    pve-lxc's vmid is the dir NAME (>= the PVE floor), pve-vm reads kento-vmid.
+    """
+    if mode == "pve":
+        return _make_lxc(base, name="200", **{"kento-mode": "pve"})
+    if mode == "pve-vm":
+        return _make_vm(base, name="myvm", **{"kento-mode": "pve-vm",
+                                              "kento-vmid": "200"})
+    if mode == "vm":
+        return _make_vm(base, **{"kento-mode": "vm"})
+    return _make_lxc(base, **{"kento-mode": "lxc"})
+
+
+def _snapshot(d: Path, mode: str):
+    """Build a typed handle for a fake container dir (status probe mocked)."""
+    with patch("kento.is_running", return_value=False):
+        return _instances._load_snapshot(d, mode)
+
+
+# -- M5 start: delegates per mode + self-updates status ----------------------
+
+
+@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
+def test_start_delegates_to_mode_aware_func(tmp_path, mode):
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.start.start") as mock_start, \
+            patch("kento.is_running", return_value=True), \
+            patch("kento.pve_config_exists", return_value=True):
+        inst.start()
+    # Delegation: called once with this handle's name/dir/raw mode.
+    mock_start.assert_called_once_with(inst.name, container_dir=d, mode=mode)
+    # Self-update from a fresh probe (running + config present => RUNNING).
+    assert inst.status is Status.RUNNING
+
+
+def test_start_self_update_reflects_probe_not_a_literal(tmp_path):
+    # The status self-update RE-RESOLVES (does not blindly set RUNNING): an LXC
+    # whose probe still says not-running after start reads STOPPED, honestly.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.start.start"), patch("kento.is_running", return_value=False):
+        inst.start()
+    assert inst.status is Status.STOPPED
+
+
+# -- M6 stop: full LOCKED semantics (typed layer owns all timing) ------------
+
+
+def test_stop_graceful_passes_graceful_only(tmp_path):
+    # force=False issues a graceful (no-kill) stop: shutdown(graceful_only=True).
+    # It went down within the window -> no StopTimeout, status STOPPED.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento.is_running", return_value=False):
+        inst.stop()
+    mock_sd.assert_called_once_with(
+        inst.name, graceful_only=True, container_dir=d, mode="lxc",
+    )
+    assert inst.status is Status.STOPPED
+
+
+@pytest.mark.parametrize("mode", ["lxc", "vm"])
+def test_stop_graceful_stubborn_raises_stop_timeout(tmp_path, mode):
+    # LOCKED: a graceful stop that leaves the instance UP raises StopTimeout and
+    # NEVER hard-kills (no second forced shutdown call). Verified for BOTH lxc
+    # (--nokill) and vm (no-SIGKILL). timeout=0 keeps the poll instantaneous;
+    # the still-running probe drives the raise.
+    maker = _make_vm if mode == "vm" else _make_lxc
+    d = maker(tmp_path, **{"kento-mode": mode})
+    inst = _snapshot(d, mode)
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento.is_running", return_value=True):
+        with pytest.raises(StopTimeout, match="cannot stop; try force"):
+            inst.stop(timeout=0)
+    # Exactly ONE shutdown call (graceful) — no forced fallback kill.
+    mock_sd.assert_called_once_with(
+        inst.name, graceful_only=True, container_dir=d, mode=mode,
+    )
+    assert inst.status is Status.RUNNING
+
+
+def test_stop_timeout_subclasses_state_error():
+    # StopTimeout is catchable as StateError / KentoError (back-compat handlers).
+    from kento.errors import StateError, KentoError
+    assert issubclass(StopTimeout, StateError)
+    assert issubclass(StopTimeout, KentoError)
+
+
+def test_stop_force_immediate_kill(tmp_path):
+    # force=True, timeout None/0 -> immediate shutdown(force=True). No graceful
+    # phase, no timeout forwarded, single call.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento.is_running", return_value=False):
+        inst.stop(force=True)
+    mock_sd.assert_called_once_with(
+        inst.name, force=True, container_dir=d, mode="lxc",
+    )
+    assert inst.status is Status.STOPPED
+
+
+def test_stop_force_timeout_zero_is_immediate(tmp_path):
+    # Explicit timeout=0 with force is the immediate-kill case (no grace poll).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento._instances._wait_until_down") as mock_wait, \
+            patch("kento.is_running", return_value=False):
+        inst.stop(force=True, timeout=0)
+    mock_wait.assert_not_called()  # no grace window
+    mock_sd.assert_called_once_with(
+        inst.name, force=True, container_dir=d, mode="lxc",
+    )
+
+
+def test_stop_force_with_timeout_grace_then_kill(tmp_path):
+    # force=True, timeout>0: graceful FIRST, then a bounded wait, then a hard
+    # kill ONLY because it is still up. Two shutdown calls in order:
+    # graceful_only then force. The grace window is owned by the typed layer.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento._instances._wait_until_down", return_value=False), \
+            patch("kento.is_running", return_value=False):
+        inst.stop(force=True, timeout=10)
+    assert mock_sd.call_count == 2
+    assert mock_sd.call_args_list[0].kwargs.get("graceful_only") is True
+    assert mock_sd.call_args_list[1].kwargs.get("force") is True
+    # Neither delegated call forwards `timeout` (shutdown rejects it).
+    for call in mock_sd.call_args_list:
+        assert "timeout" not in call.kwargs
+
+
+def test_stop_force_with_timeout_no_kill_if_it_goes_down(tmp_path):
+    # force=True, timeout>0 but the guest goes down during the grace window:
+    # NO hard kill (only the graceful call). grace-then-kill skips the kill.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento._instances._wait_until_down", return_value=True), \
+            patch("kento.is_running", return_value=False):
+        inst.stop(force=True, timeout=10)
+    mock_sd.assert_called_once_with(
+        inst.name, graceful_only=True, container_dir=d, mode="lxc",
+    )
+
+
+def test_stop_graceful_default_timeout_is_15(tmp_path):
+    # timeout None -> default 15s grace window passed to the waiter.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.stop.shutdown"), \
+            patch("kento._instances._wait_until_down", return_value=True) as mw, \
+            patch("kento.is_running", return_value=False):
+        inst.stop()
+    # _wait_until_down(dir, mode, 15)
+    assert mw.call_args[0][2] == 15
+
+
+@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
+def test_stop_graceful_delegates_per_mode(tmp_path, mode):
+    # The wrapped shutdown dispatches on mode internally; we just pass our raw
+    # mode through. Assert the per-mode graceful call shape (delegation).
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.stop.shutdown") as mock_sd, \
+            patch("kento._instances._wait_until_down", return_value=True), \
+            patch("kento.is_running", return_value=False), \
+            patch("kento.pve_config_exists", return_value=True):
+        inst.stop()
+    mock_sd.assert_called_once_with(
+        inst.name, graceful_only=True, container_dir=d, mode=mode,
+    )
+
+
+def test_stop_graceful_unobservable_probe_does_not_raise(tmp_path):
+    # _wait_until_down is total: a probe that raises => treated as DOWN (we do
+    # NOT raise StopTimeout when we cannot even observe the instance).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    from kento.errors import KentoError
+
+    def _boom(*a, **k):
+        raise KentoError("node unreachable")
+
+    with patch("kento.stop.shutdown"), patch("kento.is_running", side_effect=_boom):
+        # Must not raise StopTimeout; status resolves to UNKNOWN (total probe).
+        inst.stop(timeout=0)
+    assert inst.status is Status.UNKNOWN
+
+
+# -- M6 _wait_until_down helper ----------------------------------------------
+
+
+def test_wait_until_down_returns_true_when_down(tmp_path):
+    d = _make_lxc(tmp_path)
+    with patch("kento.is_running", return_value=False):
+        assert _instances._wait_until_down(d, "lxc", 0) is True
+
+
+def test_wait_until_down_returns_false_when_still_up(tmp_path):
+    d = _make_lxc(tmp_path)
+    with patch("kento.is_running", return_value=True):
+        # timeout=0 -> single probe, still up -> False (no real sleep).
+        assert _instances._wait_until_down(d, "lxc", 0) is False
+
+
+def test_wait_until_down_unobservable_is_down(tmp_path):
+    d = _make_lxc(tmp_path)
+    from kento.errors import KentoError
+    with patch("kento.is_running", side_effect=KentoError("x")):
+        assert _instances._wait_until_down(d, "lxc", 0) is True
+
+
+# -- M7 destroy: delegate, force, dead-handle --------------------------------
+
+
+@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
+def test_destroy_delegates_per_mode(tmp_path, mode):
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.destroy.destroy") as mock_destroy:
+        inst.destroy()
+    # destroy.destroy(name, force, *, container_dir, mode) — positional force.
+    mock_destroy.assert_called_once_with(
+        inst.name, False, container_dir=d, mode=mode,
+    )
+
+
+def test_destroy_force_forwards_force(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.destroy.destroy") as mock_destroy:
+        inst.destroy(force=True)
+    mock_destroy.assert_called_once_with(
+        inst.name, True, container_dir=d, mode="lxc",
+    )
+
+
+def test_destroy_marks_handle_dead(tmp_path):
+    # After destroy, the handle is dead: any reuse raises InstanceNotFoundError.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    with patch("kento.destroy.destroy"):
+        inst.destroy()
+    assert inst._dead is True
+    for call in (
+        lambda: inst.start(),
+        lambda: inst.stop(),
+        lambda: inst.destroy(),
+        lambda: inst.scrub(),
+        lambda: inst.refresh(),
+    ):
+        with pytest.raises(InstanceNotFoundError, match="was destroyed"):
+            call()
+
+
+def test_destroy_failure_leaves_handle_alive(tmp_path):
+    # If destroy.destroy raises, the instance is NOT gone — the handle must stay
+    # alive (we only flip _dead on success), so the caller can retry.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    from kento.errors import StateError
+    with patch("kento.destroy.destroy", side_effect=StateError("running")):
+        with pytest.raises(StateError):
+            inst.destroy()
+    assert inst._dead is False
+
+
+# -- M8 scrub: delegate + re-pin (via reset) + status self-update ------------
+
+
+@pytest.mark.parametrize("mode", ["lxc", "pve", "vm", "pve-vm"])
+def test_scrub_delegates_per_mode(tmp_path, mode):
+    d = _make_for_mode(tmp_path, mode)
+    inst = _snapshot(d, mode)
+    with patch("kento.reset.reset") as mock_reset, \
+            patch("kento.is_running", return_value=False), \
+            patch("kento.pve_config_exists", return_value=True):
+        inst.scrub()
+    mock_reset.assert_called_once_with(inst.name, container_dir=d, mode=mode)
+    # scrub leaves the instance stopped (config present + not running).
+    assert inst.status is Status.STOPPED
+
+
+def test_scrub_self_updates_status(tmp_path):
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    # Pretend it started life RUNNING in the cache; scrub re-resolves to STOPPED.
+    inst.status = Status.RUNNING
+    with patch("kento.reset.reset"), patch("kento.is_running", return_value=False):
+        inst.scrub()
+    assert inst.status is Status.STOPPED
+
+
+# -- Dispatch resolution: methods live on the BASE, not forked per subclass --
+
+
+def test_lifecycle_methods_defined_on_base_only(tmp_path):
+    # Disclosed dispatch resolution: the base delegates to the mode-aware wrapped
+    # funcs; subclasses do NOT override (no fabricated per-subclass re-calls).
+    for meth in ("start", "stop", "destroy", "scrub"):
+        assert meth in Instance.__dict__, f"{meth} should be on the base"
+        assert meth not in SystemContainer.__dict__, f"{meth} not overridden"
+        assert meth not in VirtualMachine.__dict__, f"{meth} not overridden"

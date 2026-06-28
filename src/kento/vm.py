@@ -467,8 +467,19 @@ def _launch_qemu(container_dir: Path, name: str, rootfs: Path,
     )
 
 
-def _kill_and_wait(pid_file: Path, timeout: float = 5.0, *, force: bool = False) -> None:
-    """Send SIGTERM (or SIGKILL if force) to a process and wait for it to exit."""
+def _kill_and_wait(pid_file: Path, timeout: float = 5.0, *, force: bool = False,
+                   no_kill: bool = False) -> None:
+    """Send SIGTERM (or SIGKILL if force) to a process and wait for it to exit.
+
+    ``no_kill`` (graceful-only, M6): SIGTERM the process and wait, but do NOT
+    escalate to SIGKILL if it is still alive at the deadline — the still-running
+    process is left for the caller's typed re-probe to detect (so the typed
+    ``stop(force=False)`` can raise ``StopTimeout`` instead of the runtime
+    hard-killing). Defaults to ``False`` = today's behavior (escalate to
+    SIGKILL); only the typed graceful path opts in. Mutually distinct from
+    ``force`` (which sends SIGKILL up front); ``no_kill`` only suppresses the
+    deadline-fallback SIGKILL on the SIGTERM path.
+    """
     if not pid_file.is_file():
         return
     try:
@@ -488,7 +499,11 @@ def _kill_and_wait(pid_file: Path, timeout: float = 5.0, *, force: bool = False)
             break
         time.sleep(0.1)
     else:
-        # Still alive — force kill
+        # Still alive at the deadline. Graceful-only (no_kill) LEAVES it running
+        # for the typed re-probe (M6 "never hard-kills"); otherwise escalate to
+        # SIGKILL (today's default) and drop the pid file.
+        if no_kill:
+            return
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -496,10 +511,19 @@ def _kill_and_wait(pid_file: Path, timeout: float = 5.0, *, force: bool = False)
     pid_file.unlink(missing_ok=True)
 
 
-def stop_vm(container_dir: Path, *, force: bool = False) -> None:
-    """Stop a VM: kill QEMU + virtiofsd, unmount rootfs, clean up."""
-    _kill_and_wait(container_dir / "kento-qemu-pid", force=force)
-    _kill_and_wait(container_dir / "kento-virtiofsd-pid", force=force)
+def stop_vm(container_dir: Path, *, force: bool = False,
+            no_kill: bool = False) -> None:
+    """Stop a VM: kill QEMU + virtiofsd, unmount rootfs, clean up.
+
+    ``no_kill`` (M6 graceful-only): SIGTERM QEMU/virtiofsd but do NOT SIGKILL a
+    stubborn process — leave it running for the typed re-probe (defaults to
+    ``False`` = today's kill-on-timeout behavior; opt-in from the typed graceful
+    stop only). Forwarded to ``_kill_and_wait`` only when set, so the default
+    path's call shape is byte-identical to before (existing tests untouched).
+    """
+    extra = {"no_kill": True} if no_kill else {}
+    _kill_and_wait(container_dir / "kento-qemu-pid", force=force, **extra)
+    _kill_and_wait(container_dir / "kento-virtiofsd-pid", force=force, **extra)
 
     # Unmount rootfs. Use the busy-mount-hardened helper so a wedged QEMU
     # or virtiofsd that left a stale handle doesn't permanently block stop.

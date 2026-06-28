@@ -35,6 +35,26 @@ def test_shutdown_lxc_graceful(mock_root, mock_run, mock_running, tmp_path):
 @patch("kento.stop.is_running", return_value=True)
 @patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
 @patch("kento.stop.require_root")
+def test_shutdown_lxc_graceful_only_adds_nokill(mock_root, mock_run,
+                                                mock_running, tmp_path):
+    # M6 never-hard-kill: graceful_only adds --nokill so lxc-stop reports
+    # failure instead of SIGKILLing the container after its grace window.
+    d = tmp_path / "mybox"
+    d.mkdir()
+    (d / "kento-image").write_text("debian:12\n")
+    (d / "kento-mode").write_text("lxc\n")
+
+    with patch("kento.stop.resolve_container", return_value=d):
+        shutdown("mybox", graceful_only=True)
+
+    mock_run.assert_called_once()
+    assert list(mock_run.call_args[0][0]) == [
+        "lxc-stop", "-n", "mybox", "--nokill"]
+
+
+@patch("kento.stop.is_running", return_value=True)
+@patch("kento.subprocess_util.subprocess.run", side_effect=_ok)
+@patch("kento.stop.require_root")
 def test_shutdown_pve_graceful(mock_root, mock_run, mock_running, tmp_path):
     d = tmp_path / "100"
     d.mkdir()
