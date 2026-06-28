@@ -1489,6 +1489,7 @@ class SystemContainer(Instance):
         platform: PlatformProfile | None = None,
         mid: int | None = None,
         network: NetworkConnection | None = None,
+        forwards: "Mapping[HostBinding, GuestTarget] | None" = None,
         resources: "Mapping[str, int] | None" = None,
         environment: "Mapping[str, str] | None" = None,
         start: bool = False,
@@ -1497,6 +1498,14 @@ class SystemContainer(Instance):
         nesting: bool = False,
         lxc_args: "Sequence[str]" = (),
         extra_args: "Sequence[str]" = (),
+        searchdomain: str | None = None,
+        timezone: str | None = None,
+        ssh_keys: "Sequence[str] | None" = None,
+        ssh_key_user: str = "root",
+        ssh_host_keys: bool = False,
+        ssh_host_key_dir: str | None = None,
+        config_mode: str = "auto",
+        force: bool = False,
     ) -> "SystemContainer":
         """Create a new LXC system container (M15, §11.4) — wraps ``create.create``.
 
@@ -1514,6 +1523,15 @@ class SystemContainer(Instance):
         other than ``OVERLAY`` raises (JC4 — the only 1.0-supported backend; not
         silently ignored). ``unprivileged`` / ``lxc_args`` are the LXC-only params;
         ``extra_args`` is the PVE ``--pve-arg`` pass-through.
+
+        The **create-time long tail** (§11.4 M15's enumerated ``# + timezone,
+        ssh_user, …`` tail — Director-authorized): ``forwards`` (the typed
+        port-forward map, §5.7, rendered to ``create.py``'s ``port`` spec list)
+        plus the CREATE-input passthroughs ``searchdomain`` / ``timezone`` /
+        ``ssh_keys`` / ``ssh_key_user`` / ``ssh_host_keys`` / ``ssh_host_key_dir``
+        / ``config_mode`` / ``force``. Each defaults to ``create.py``'s own
+        default, so leaving any unset is BYTE-IDENTICAL to before. ``searchdomain``
+        is a create input, NOT a ``NetworkConnection`` field (§5.3).
         """
         from kento import create as create_mod
 
@@ -1525,12 +1543,21 @@ class SystemContainer(Instance):
             platform=platform,
             mid=mid,
             network=network,
+            forwards=forwards,
             resources=resources,
             environment=environment,
             start=start,
             storage=storage,
             nesting=nesting,
             extra_args=extra_args,
+            searchdomain=searchdomain,
+            timezone=timezone,
+            ssh_keys=ssh_keys,
+            ssh_key_user=ssh_key_user,
+            ssh_host_keys=ssh_host_keys,
+            ssh_host_key_dir=ssh_host_key_dir,
+            config_mode=config_mode,
+            force=force,
         )
         kwargs["unprivileged"] = unprivileged
         kwargs["lxc_args"] = list(lxc_args) if lxc_args else None
@@ -1548,6 +1575,7 @@ class SystemContainer(Instance):
         platform: PlatformProfile | None = None,
         mid: int | None = None,
         network: NetworkConnection | None = None,
+        forwards: "Mapping[HostBinding, GuestTarget] | None" = None,
         resources: "Mapping[str, int] | None" = None,
         environment: "Mapping[str, str] | None" = None,
         start: bool = False,
@@ -1556,24 +1584,36 @@ class SystemContainer(Instance):
         nesting: bool = False,
         lxc_args: "Sequence[str]" = (),
         extra_args: "Sequence[str]" = (),
+        searchdomain: str | None = None,
+        timezone: str | None = None,
+        ssh_keys: "Sequence[str] | None" = None,
+        ssh_key_user: str = "root",
+        ssh_host_keys: bool = False,
+        ssh_host_key_dir: str | None = None,
+        config_mode: str = "auto",
+        force: bool = False,
     ) -> "Iterator[SystemContainer]":
         """Context-manager create for a throwaway container (M27, §11.4).
 
-        Same parameters as :meth:`create`; the handle is scoped to a ``with``
-        block and **guaranteed torn down on exit** — ``destroy(force=True)``
-        (M7's force-stop-then-remove) runs whether the block exits normally or
-        via an exception. ``transient`` is the ONLY context-manager entry: a
-        plain ``create``/``get`` handle is NOT a context manager (no
-        ``__enter__``/``__exit__`` on ``Instance``), so ``with
-        SystemContainer.create(...)`` raises ``TypeError`` — teardown happens
-        iff the caller typed ``transient`` (JC6, footgun-free).
+        Same parameters as :meth:`create` (including the create-time long tail);
+        the handle is scoped to a ``with`` block and **guaranteed torn down on
+        exit** — ``destroy(force=True)`` (M7's force-stop-then-remove) runs
+        whether the block exits normally or via an exception. ``transient`` is
+        the ONLY context-manager entry: a plain ``create``/``get`` handle is NOT
+        a context manager (no ``__enter__``/``__exit__`` on ``Instance``), so
+        ``with SystemContainer.create(...)`` raises ``TypeError`` — teardown
+        happens iff the caller typed ``transient`` (JC6, footgun-free).
         """
         inst = cls.create(
             name, image,
             hostname=hostname, platform=platform, mid=mid, network=network,
-            resources=resources, environment=environment, start=start,
-            storage=storage, unprivileged=unprivileged, nesting=nesting,
-            lxc_args=lxc_args, extra_args=extra_args,
+            forwards=forwards, resources=resources, environment=environment,
+            start=start, storage=storage, unprivileged=unprivileged,
+            nesting=nesting, lxc_args=lxc_args, extra_args=extra_args,
+            searchdomain=searchdomain, timezone=timezone, ssh_keys=ssh_keys,
+            ssh_key_user=ssh_key_user, ssh_host_keys=ssh_host_keys,
+            ssh_host_key_dir=ssh_host_key_dir, config_mode=config_mode,
+            force=force,
         )
         try:
             yield inst
@@ -1771,6 +1811,7 @@ class VirtualMachine(Instance):
         platform: PlatformProfile | None = None,
         mid: int | None = None,
         network: NetworkConnection | None = None,
+        forwards: "Mapping[HostBinding, GuestTarget] | None" = None,
         resources: "Mapping[str, int] | None" = None,
         environment: "Mapping[str, str] | None" = None,
         start: bool = False,
@@ -1778,6 +1819,14 @@ class VirtualMachine(Instance):
         nesting: bool = False,
         qemu_args: "Sequence[str]" = (),
         extra_args: "Sequence[str]" = (),
+        searchdomain: str | None = None,
+        timezone: str | None = None,
+        ssh_keys: "Sequence[str] | None" = None,
+        ssh_key_user: str = "root",
+        ssh_host_keys: bool = False,
+        ssh_host_key_dir: str | None = None,
+        config_mode: str = "auto",
+        force: bool = False,
     ) -> "VirtualMachine":
         """Create a new QEMU/KVM virtual machine (M16, §11.4) — wraps ``create.create``.
 
@@ -1788,7 +1837,9 @@ class VirtualMachine(Instance):
         backend pass-through is ``qemu_args`` (``--qemu-arg``) instead.
         ``kernel``/``initramfs``/``machine`` are NOT params — they are the image
         contract / a hardcoded constant (M16, §11.0). ``storage`` other than
-        ``OVERLAY`` raises (JC4).
+        ``OVERLAY`` raises (JC4). The create-time long tail
+        (``forwards``/``searchdomain``/``timezone``/``ssh_*``/``config_mode``/
+        ``force``) is the SAME as :meth:`SystemContainer.create`.
         """
         from kento import create as create_mod
 
@@ -1800,12 +1851,21 @@ class VirtualMachine(Instance):
             platform=platform,
             mid=mid,
             network=network,
+            forwards=forwards,
             resources=resources,
             environment=environment,
             start=start,
             storage=storage,
             nesting=nesting,
             extra_args=extra_args,
+            searchdomain=searchdomain,
+            timezone=timezone,
+            ssh_keys=ssh_keys,
+            ssh_key_user=ssh_key_user,
+            ssh_host_keys=ssh_host_keys,
+            ssh_host_key_dir=ssh_host_key_dir,
+            config_mode=config_mode,
+            force=force,
         )
         kwargs["qemu_args"] = list(qemu_args) if qemu_args else None
         create_mod.create(**kwargs)
@@ -1822,6 +1882,7 @@ class VirtualMachine(Instance):
         platform: PlatformProfile | None = None,
         mid: int | None = None,
         network: NetworkConnection | None = None,
+        forwards: "Mapping[HostBinding, GuestTarget] | None" = None,
         resources: "Mapping[str, int] | None" = None,
         environment: "Mapping[str, str] | None" = None,
         start: bool = False,
@@ -1829,20 +1890,33 @@ class VirtualMachine(Instance):
         nesting: bool = False,
         qemu_args: "Sequence[str]" = (),
         extra_args: "Sequence[str]" = (),
+        searchdomain: str | None = None,
+        timezone: str | None = None,
+        ssh_keys: "Sequence[str] | None" = None,
+        ssh_key_user: str = "root",
+        ssh_host_keys: bool = False,
+        ssh_host_key_dir: str | None = None,
+        config_mode: str = "auto",
+        force: bool = False,
     ) -> "Iterator[VirtualMachine]":
         """Context-manager create for a throwaway VM (M27, §11.4).
 
-        Same parameters as :meth:`create`; the handle is ``with``-scoped and
-        **guaranteed torn down on exit** via ``destroy(force=True)`` (normal OR
-        exceptional). The ONLY context-manager entry — a plain ``create``/``get``
-        handle raises ``TypeError`` under ``with`` (JC6, §11.4).
+        Same parameters as :meth:`create` (including the create-time long tail);
+        the handle is ``with``-scoped and **guaranteed torn down on exit** via
+        ``destroy(force=True)`` (normal OR exceptional). The ONLY context-manager
+        entry — a plain ``create``/``get`` handle raises ``TypeError`` under
+        ``with`` (JC6, §11.4).
         """
         inst = cls.create(
             name, image,
             hostname=hostname, platform=platform, mid=mid, network=network,
-            resources=resources, environment=environment, start=start,
-            storage=storage, nesting=nesting,
+            forwards=forwards, resources=resources, environment=environment,
+            start=start, storage=storage, nesting=nesting,
             qemu_args=qemu_args, extra_args=extra_args,
+            searchdomain=searchdomain, timezone=timezone, ssh_keys=ssh_keys,
+            ssh_key_user=ssh_key_user, ssh_host_keys=ssh_host_keys,
+            ssh_host_key_dir=ssh_host_key_dir, config_mode=config_mode,
+            force=force,
         )
         try:
             yield inst
@@ -2319,6 +2393,29 @@ def _environment_to_env_list(
     return [f"{key}={value}" for key, value in environment.items()]
 
 
+def _forwards_to_create_port(
+    forwards: "Mapping[HostBinding, GuestTarget] | None",
+) -> "list[str] | None":
+    """Render the typed ``forwards`` map into ``create.py``'s ``port`` list (§5.7).
+
+    ``create.py:create`` accepts ``port`` as ``str | list[str] | None`` (Block 14
+    made it accept a list) — the §5.7A spec strings (``hostPort:guestPort`` /
+    ``...:guestPort/udp``) it writes to ``kento-port``. We render each typed
+    binding back to its canonical spec via ``render_forward_spec`` (the SAME
+    renderer the live ``forwards`` setter + ``set_cmd`` use, so the on-disk form
+    is identical regardless of the entry point). ``None``/empty => ``None`` (no
+    port file). An address-carrying binding raises ``ForwardAddressNotImplemented``
+    inside ``render_forward_spec`` (1.0 has no per-address bind), surfaced at the
+    create boundary rather than silently dropped (gate C).
+    """
+    if not forwards:
+        return None
+    from kento._network import render_forward_spec
+
+    return [render_forward_spec(binding, target)
+            for binding, target in forwards.items()]
+
+
 def _resolve_extra_args(
     extra_args: "Sequence[str]", platform: PlatformProfile | None,
 ) -> "list[str] | None":
@@ -2364,6 +2461,15 @@ def _build_create_kwargs(
     storage: StorageMode,
     nesting: bool,
     extra_args: "Sequence[str]",
+    forwards: "Mapping[HostBinding, GuestTarget] | None" = None,
+    searchdomain: str | None = None,
+    timezone: str | None = None,
+    ssh_keys: "Sequence[str] | None" = None,
+    ssh_key_user: str = "root",
+    ssh_host_keys: bool = False,
+    ssh_host_key_dir: str | None = None,
+    config_mode: str = "auto",
+    force: bool = False,
 ) -> "dict[str, object]":
     """Build the shared ``create.py:create(**kwargs)`` arg set (M15/M16).
 
@@ -2375,6 +2481,17 @@ def _build_create_kwargs(
     param (OVERLAY is the only 1.0 backend = a no-op), so a non-OVERLAY value
     would otherwise be silently ignored. We reject it up front (§2 principle 5;
     gate C) rather than create something the caller didn't ask for.
+
+    The **create-time long tail** (§11.4 M15's enumerated ``# + timezone,
+    ssh_user, …`` tail — Director-authorized run 33+): ``forwards`` (port
+    forwards, rendered to ``create.py``'s ``port`` spec list — §5.7), plus the
+    CREATE-input passthroughs ``searchdomain`` / ``timezone`` / ``ssh_keys`` /
+    ``ssh_key_user`` / ``ssh_host_keys`` / ``ssh_host_key_dir`` / ``config_mode``
+    / ``force``. These are forwarded verbatim to ``create.py:create``; each
+    defaults to ``create.py``'s OWN default, so leaving them unset is BYTE-
+    IDENTICAL to before they existed. ``searchdomain`` is intentionally a create
+    INPUT, not a ``NetworkConnection`` field (the model dropped it, §5.3) — no
+    model conflict, no capability regression.
     """
     if storage is not StorageMode.OVERLAY:
         raise NotImplementedError(
@@ -2394,6 +2511,16 @@ def _build_create_kwargs(
         "nesting": nesting,
         "env": _environment_to_env_list(environment),
         "pve_args": _resolve_extra_args(extra_args, platform),
+        # Create-time long tail (forwarded verbatim; create.py-default when unset).
+        "port": _forwards_to_create_port(forwards),
+        "searchdomain": searchdomain,
+        "timezone": timezone,
+        "ssh_keys": list(ssh_keys) if ssh_keys else None,
+        "ssh_key_user": ssh_key_user,
+        "ssh_host_keys": ssh_host_keys,
+        "ssh_host_key_dir": ssh_host_key_dir,
+        "config_mode": config_mode,
+        "force": force,
     }
     kwargs.update(_network_to_create_params(network, kind_mode=kind_mode))
     kwargs.update(_resources_to_create_params(resources))

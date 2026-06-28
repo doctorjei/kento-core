@@ -1987,6 +1987,86 @@ def test_create_image_rejects_bad_type(tmp_path):
             SystemContainer.create("box", 12345)  # type: ignore[arg-type]
 
 
+# -- create: the create-time long tail (§11.4 M15 enumerated tail) ------------
+
+
+def test_create_long_tail_defaults_byte_identical(tmp_path):
+    # When the long-tail params are unset, the kwargs forwarded to create.py
+    # carry create.py's OWN defaults (so existing behavior is byte-identical).
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img")
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["port"] is None
+    assert kwargs["searchdomain"] is None
+    assert kwargs["timezone"] is None
+    assert kwargs["ssh_keys"] is None
+    assert kwargs["ssh_key_user"] == "root"
+    assert kwargs["ssh_host_keys"] is False
+    assert kwargs["ssh_host_key_dir"] is None
+    assert kwargs["config_mode"] == "auto"
+    assert kwargs["force"] is False
+
+
+def test_create_long_tail_forwarded_sc(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create(
+            "box", "img",
+            searchdomain="example.com", timezone="Europe/Berlin",
+            ssh_keys=["/k1.pub", "/k2.pub"], ssh_key_user="debian",
+            ssh_host_keys=True, ssh_host_key_dir="/hostkeys",
+            config_mode="cloudinit", force=True,
+        )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["searchdomain"] == "example.com"
+    assert kwargs["timezone"] == "Europe/Berlin"
+    assert kwargs["ssh_keys"] == ["/k1.pub", "/k2.pub"]
+    assert kwargs["ssh_key_user"] == "debian"
+    assert kwargs["ssh_host_keys"] is True
+    assert kwargs["ssh_host_key_dir"] == "/hostkeys"
+    assert kwargs["config_mode"] == "cloudinit"
+    assert kwargs["force"] is True
+
+
+def test_create_long_tail_forwarded_vm(tmp_path):
+    # The same long tail is available on the VM kind.
+    with patch("kento.create.create") as mock_create, \
+            patch.object(VirtualMachine, "get", return_value=object()):
+        VirtualMachine.create(
+            "vm1", "img", timezone="UTC", config_mode="injection")
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["timezone"] == "UTC"
+    assert kwargs["config_mode"] == "injection"
+
+
+def test_create_forwards_rendered_to_port_specs(tmp_path):
+    # The typed `forwards` map renders to create.py's `port` spec list (§5.7).
+    forwards = {
+        (ForwardProtocol.TCP, None, 10022): (None, 22),
+        (ForwardProtocol.UDP, None, 5353): (None, 53),
+    }
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", forwards=forwards)
+    port = mock_create.call_args.kwargs["port"]
+    assert set(port) == {"10022:22", "5353:53/udp"}
+
+
+def test_create_forwards_empty_is_none(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", forwards={})
+    assert mock_create.call_args.kwargs["port"] is None
+
+
+def test_create_ssh_keys_empty_is_none(tmp_path):
+    with patch("kento.create.create") as mock_create, \
+            patch.object(SystemContainer, "get", return_value=object()):
+        SystemContainer.create("box", "img", ssh_keys=[])
+    assert mock_create.call_args.kwargs["ssh_keys"] is None
+
+
 # -- create: network / resources / environment decomposition ------------------
 
 
