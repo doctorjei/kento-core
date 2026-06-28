@@ -1481,15 +1481,22 @@ def test_resources_setter_running_lxc_rollback_on_failure(tmp_path):
     assert ["lxc-cgroup", "-n", "mybox", "memory.max",
             str(512 * 1048576)] in calls[2:], (
         f"rollback did not restore the prior memory.max; calls={calls}")
-    assert not persist_calls            # persist never reached on a live fail
+    # The FORWARD persist (new {2048,4}) never ran — the live failure happened
+    # first. The unwind's disk-restore to OLD is the only persist (idempotent
+    # no-op write of the already-on-disk values); the new values never land.
+    assert persist_calls == [{"memory": 512, "cores": 1}]
+    assert (d / "kento-memory").read_text().strip() == "512"  # disk == old
     assert inst.resources == old        # cache unchanged
 
 
 def test_resources_setter_running_lxc_persist_failure_rolls_back(tmp_path):
-    # If the live apply SUCCEEDS but the persist (writer) fails, the engine unwinds
-    # the applied live knobs and re-raises (the on-disk state is whatever the
-    # writer left, but the live cgroup is restored to the prior values).
-    from kento.errors import SubprocessError
+    # SYMMETRY (Editor's A/C item): if the live apply SUCCEEDS but the persist
+    # writer fails MID-WRITE (kento-memory lands, kento-cores does not), the engine
+    # (a) unwinds the applied live knobs AND (b) restores the on-disk config to the
+    # OLD values — so disk + live + cache all return to the pre-set state, never a
+    # partial config that boots stale next start. Mutation-checked: drop the unwind
+    # _persist_resources(old_params) call and the "kento-cores restored to 1"
+    # assertion reddens.
     d = _make_lxc(tmp_path, **{"kento-memory": "512", "kento-cores": "1"})
     inst = _snapshot(d, "lxc")
     calls = []
@@ -1497,19 +1504,39 @@ def test_resources_setter_running_lxc_persist_failure_rolls_back(tmp_path):
     def fake_run(cmd, what, **kw):
         calls.append(list(cmd))
 
+    persist_calls = []
+    real_persist = inst._persist_resources
+
+    def spy_persist(params):
+        persist_calls.append(dict(params))
+        # FORWARD persist (the new {2048,4}) fails AFTER a partial write — emulate
+        # set_cmd's mid-write failure: write kento-memory only, then raise. The
+        # RESTORE persist (the old {512,1}) runs the REAL writer (observable).
+        if params.get("memory") == 2048:
+            (d / "kento-memory").write_text("2048\n")  # partial landing
+            raise OSError("disk full writing kento-cores")
+        return real_persist(params)
+
     with patch("kento.is_running", return_value=True), \
             patch("kento.locking.kento_lock"), \
-            patch.object(inst, "_persist_resources",
-                         side_effect=OSError("disk full")), \
+            patch.object(inst, "_persist_resources", side_effect=spy_persist), \
             patch("kento.subprocess_util.run_or_die", side_effect=fake_run):
         with pytest.raises(OSError):
             inst.resources = {"memory": 2048, "cores": 4}
-    # Both knobs applied, then the unwind restores both (reverse order: cores then
-    # memory) -> the restore ops are present after the two forward applies.
+    # (a) LIVE unwind: both knobs restored to the prior 512 MiB / 1 core.
     assert ["lxc-cgroup", "-n", "mybox", "memory.max",
             str(512 * 1048576)] in calls
     assert ["lxc-cgroup", "-n", "mybox", "cpu.max",
             f"{1 * 100000} 100000"] in calls
+    # Two persist attempts: the failing forward, then the restore to old.
+    assert persist_calls == [{"memory": 2048, "cores": 4},
+                             {"memory": 512, "cores": 1}]
+    # (b) DISK restored to OLD: the partial kento-memory=2048 is overwritten back
+    # to 512, and the config cgroup line matches (no stale partial survives).
+    assert (d / "kento-memory").read_text().strip() == "512"
+    assert (d / "kento-cores").read_text().strip() == "1"
+    assert "lxc.cgroup2.memory.max = " + str(512 * 1048576) \
+        in (d / "config").read_text()
     assert inst.resources == {"memory": 512, "cores": 1}  # cache unchanged
 
 

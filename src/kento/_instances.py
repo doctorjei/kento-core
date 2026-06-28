@@ -745,9 +745,18 @@ class Instance(ABC):
                 # Live state now matches ``value``; persist the canonical config.
                 self._persist_resources(new_params)
             except Exception:
-                # Catch-reverse: unwind applied live knobs in REVERSE order, then
-                # re-raise the ORIGINAL error (mirrors create.py:_run_cleanup —
-                # best-effort, never masks the real failure).
+                # Catch-reverse: unwind applied LIVE knobs in REVERSE order, AND
+                # restore the on-disk config to the prior values, then re-raise
+                # the ORIGINAL error (mirrors create.py:_run_cleanup — best-effort,
+                # never masks the real failure). Restoring disk too keeps the
+                # running path SYMMETRIC with the stopped path (which restores via
+                # set_cmd(old_params)): if persist failed mid-write (e.g.
+                # kento-memory landed but kento-cores did not), a bare live-only
+                # unwind would leave a PARTIAL config that boots stale next start,
+                # diverging from the restored live+cache. So we also re-write disk
+                # to old_params. When persist was never reached (a live-knob
+                # failure), old_params == what is already on disk, so this is an
+                # idempotent no-op write — never harmful.
                 for inverse in reversed(undo):
                     try:
                         inverse()
@@ -756,6 +765,13 @@ class Instance(ABC):
                             "rollback of a resources knob on %s failed: %s",
                             self._name, rb_err,
                         )
+                try:
+                    self._persist_resources(old_params)
+                except Exception as disk_err:  # noqa: BLE001 — best-effort
+                    _instances_logger.warning(
+                        "rollback of the resources config on %s failed: %s",
+                        self._name, disk_err,
+                    )
                 raise
             self._resources = dict(value)
 
