@@ -40,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kento._diagnosis import Diagnosis, ReclaimReport
 from kento._network import (
     NetworkConnection,
     NetworkMode,
@@ -488,6 +489,139 @@ class Instance(ABC):
 
         reset_mod.reset(self.name, container_dir=self._dir, mode=self._mode)
         self.status = _resolve_status(self._dir, self._mode)
+
+    # ------------------------------------------------------------------- #
+    # M3 — adopt: heal an orphaned PVE instance; classmethod (§11.1, §11.9).
+    # ------------------------------------------------------------------- #
+    @classmethod
+    def adopt(cls, name: str) -> "Instance":
+        """Heal an orphaned PVE instance, returning its handle (M3, §11.1).
+
+        An orphan is a kento-managed pve-lxc / pve-vm instance whose state dir
+        survives but whose PVE ``.conf`` was destroyed out-of-band. ``adopt``
+        regenerates the missing config (snippets wrapper + hook + ``.conf``)
+        from the surviving ``kento-*`` state, bringing the instance back as a
+        known instance. It does NOT auto-start or re-mount the rootfs — run
+        ``start()`` afterward (§11.1).
+
+        Wraps ``reconcile.adopt`` (which holds ``kento_lock``, requires root,
+        and is PVE-only / fails closed). Its typed raises propagate unchanged:
+        ``ModeError`` on a non-PVE instance, ``StateError`` when the instance is
+        not an orphan / the vmid is occupied / network metadata is unrecoverable
+        (§2 principle 5 — a typed raise, never a silent no-op).
+
+        On success returns a FRESH, kind-checked handle via :meth:`get` (a live
+        snapshot of the healed instance — not a stale construction). Because
+        ``get`` is polymorphic, calling ``SystemContainer.adopt(...)`` on a name
+        that healed to a VM (or vice versa) raises ``get``'s kind-mismatch
+        ``InstanceNotFoundError`` rather than returning the wrong-typed handle.
+        """
+        from kento import reconcile
+
+        reconcile.adopt(name)
+        # Hand back a live, kind-checked handle (get narrows on a subclass).
+        return cls.get(name)
+
+    # ------------------------------------------------------------------- #
+    # M4 — prune_orphans: batch-reconcile orphaned state; classmethod (§11.1).
+    # ------------------------------------------------------------------- #
+    @classmethod
+    def prune_orphans(cls, *, reap: bool = False) -> ReclaimReport:
+        """Batch-reconcile orphaned PVE state (M4, §11.1) — dry-run by default.
+
+        Enumerates kento PVE instances whose ``.conf`` is definitively gone and,
+        when ``reap=True``, destroys each (discarding its surviving state).
+        ``reap=False`` (the default) is a DRY RUN: nothing is removed, the report
+        lists what WOULD be reaped. Mirrors ``Instance.list()`` — collection-
+        scoped, polymorphic over both namespaces:
+
+        * base ``Instance`` => ``scope=None`` (both namespaces);
+        * ``SystemContainer`` => ``scope="lxc"`` (the pve-lxc namespace);
+        * ``VirtualMachine`` => ``scope="vm"`` (the pve-vm namespace).
+
+        Returns the shared :class:`ReclaimReport` (M25), built per the locked
+        mapping (§11.6, spec line ~1334): ``dry_run = not reap``; ``reclaimed`` =
+        the orphan names that were (or would be) reaped; ``failed`` = ``(name,
+        reason)`` pairs for orphans whose ``destroy`` failed under ``reap=True``
+        (the 1.6.2 failure-surfacing contract — surfaced, never swallowed).
+
+        Wraps ``reconcile.reap_orphans`` (which isolates each per-orphan failure
+        and never raises for a single failure), then projects its per-orphan
+        result entries into the typed report.
+        """
+        from kento import reconcile
+
+        results = reconcile.reap_orphans(reap, cls._prune_scope())
+
+        reclaimed: list[str] = []
+        failed: list[tuple[str, str]] = []
+        for entry in results:
+            if reap and entry.get("error"):
+                # A reap that failed -> surface (name, reason) (1.6.2 contract).
+                failed.append((entry["name"], entry["error"]))
+            else:
+                # Dry-run: every entry is "would reap". reap=True success: reaped.
+                # (A dry-run entry never carries an error — reap_orphans sets it
+                # only under reap=True; so the else-branch is exactly would-reap
+                # or successfully-reaped.)
+                reclaimed.append(entry["name"])
+
+        return ReclaimReport(
+            dry_run=not reap,
+            reclaimed=tuple(reclaimed),
+            failed=tuple(failed),
+        )
+
+    @classmethod
+    def _prune_scope(cls) -> str | None:
+        """The ``reap_orphans`` scope for this class (mirrors ``list()``).
+
+        The base ``Instance`` reconciles BOTH namespaces (``None``); a concrete
+        kind narrows to its own (``SystemContainer`` -> the LXC namespace,
+        ``VirtualMachine`` -> the VM namespace). Only pve-lxc / pve-vm instances
+        can orphan, so this is the namespace, not the platform — the same axis
+        ``reconcile.find_orphans`` scopes on.
+        """
+        if cls is SystemContainer:
+            return "lxc"
+        if cls is VirtualMachine:
+            return "vm"
+        return None
+
+    # ------------------------------------------------------------------- #
+    # M11 — diagnose: INSTANCE-domain health checks for THIS instance (§11.2).
+    # ------------------------------------------------------------------- #
+    def diagnose(self) -> Diagnosis:
+        """Run the read-only INSTANCE-domain health checks for this one (M11).
+
+        Runs the existing ``diagnose.run_diagnostics(self.name)`` scan (read-only
+        / silent — it REPORTS, never reaps) and projects the flat findings into a
+        typed :class:`Diagnosis` (§11.8 D3). ``run_diagnostics(name)`` returns
+        the host-level checks PLUS this instance's checks; M11 is specifically
+        the INSTANCE-domain checks for THIS instance, so we filter to
+        ``domain=INSTANCE`` and ``subject=self.name`` — dropping the host/image
+        findings that the same scan also surfaces (those belong to
+        ``kento.diagnose()`` / ``image.diagnose()``).
+
+        Performs I/O (the scan) — an explicit, named method, exactly the kind of
+        moment §2 principle 2 permits I/O; the returned ``Diagnosis`` is an inert
+        value. Raises ``InstanceNotFoundError`` if the instance has vanished
+        (``run_diagnostics`` resolves the name and raises on a miss).
+        """
+        self._check_alive()
+        import importlib
+
+        from kento._diagnosis import DiagnosisDomain, diagnosis_from_report
+
+        # Reach the diagnose SUBMODULE, not the top-level ``kento.diagnose``
+        # FUNCTION (Block 10's name-collision foot-gun): ``from kento import
+        # diagnose`` would bind the function. ``import_module`` returns the
+        # cached submodule from ``sys.modules`` — its ``run_diagnostics``.
+        _diagnose = importlib.import_module("kento.diagnose")
+        report = _diagnose.run_diagnostics(self.name)
+        return diagnosis_from_report(
+            report, domain=DiagnosisDomain.INSTANCE, subject=self.name,
+        )
 
 
 # --------------------------------------------------------------------------- #

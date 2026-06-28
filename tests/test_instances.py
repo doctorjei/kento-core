@@ -27,6 +27,7 @@ from kento import (
     StorageMode,
     ValidationError,
     ForwardProtocol,
+    ModeError,
 )
 from kento import _instances
 
@@ -767,3 +768,170 @@ def test_lifecycle_methods_defined_on_base_only(tmp_path):
         assert meth in Instance.__dict__, f"{meth} should be on the base"
         assert meth not in SystemContainer.__dict__, f"{meth} not overridden"
         assert meth not in VirtualMachine.__dict__, f"{meth} not overridden"
+
+
+# --------------------------------------------------------------------------- #
+# Block 10 — recovery classmethods (M3 adopt / M4 prune_orphans) + M11
+# instance.diagnose(). adopt/prune_orphans WRAP reconcile.{adopt,reap_orphans};
+# diagnose WRAPS diagnose.run_diagnostics. We patch the wrapped funcs to assert
+# DELEGATION (no forked logic) + the exact call shape, and the typed projection.
+# --------------------------------------------------------------------------- #
+
+from kento import Diagnosis, DiagnosisDomain, ReclaimReport  # noqa: E402
+
+
+# -- M3 adopt: delegate + return a fresh kind-checked handle -----------------
+
+
+def test_adopt_delegates_and_returns_handle(tmp_path):
+    # adopt(name) -> reconcile.adopt(name), then cls.get(name) for a live handle.
+    d = _make_lxc(tmp_path, name="200", **{"kento-mode": "pve"})
+    with patch("kento.reconcile.adopt") as mock_adopt, \
+            patch("kento.resolve_any", return_value=(d, "pve")), \
+            patch("kento.is_running", return_value=False), \
+            patch("kento.pve_config_exists", return_value=True):
+        handle = Instance.adopt("200")
+    mock_adopt.assert_called_once_with("200")
+    assert isinstance(handle, SystemContainer)
+    assert handle.name == "200"
+
+
+def test_adopt_typed_raises_pass_through(tmp_path):
+    # reconcile.adopt's typed raises (ModeError/StateError) propagate unchanged;
+    # adopt does NOT swallow them or call get() on a failure.
+    with patch("kento.reconcile.adopt",
+               side_effect=ModeError("not a PVE instance")) as mock_adopt, \
+            patch.object(Instance, "get") as mock_get:
+        with pytest.raises(ModeError):
+            Instance.adopt("plainbox")
+    mock_adopt.assert_called_once()
+    mock_get.assert_not_called()
+
+
+def test_adopt_on_subclass_kind_checks(tmp_path):
+    # Calling SystemContainer.adopt on a name that healed to a VM raises get's
+    # kind-mismatch (get is polymorphic), not a wrong-typed handle.
+    d = _make_vm(tmp_path, name="myvm", **{"kento-mode": "pve-vm",
+                                           "kento-vmid": "200"})
+    with patch("kento.reconcile.adopt"), \
+            patch("kento.resolve_any", return_value=(d, "pve-vm")), \
+            patch("kento.is_running", return_value=False), \
+            patch("kento.pve_config_exists", return_value=True):
+        with pytest.raises(InstanceNotFoundError):
+            SystemContainer.adopt("myvm")
+        # The base / the right kind succeed.
+        assert isinstance(VirtualMachine.adopt("myvm"), VirtualMachine)
+
+
+def test_adopt_is_a_classmethod():
+    assert isinstance(Instance.__dict__["adopt"], classmethod)
+
+
+# -- M4 prune_orphans: per-cls scope + ReclaimReport mapping -----------------
+
+
+def _reap_entry(name, *, reaped=False, error=None, mode="pve"):
+    return {"name": name, "vmid": 200, "mode": mode,
+            "reaped": reaped, "error": error}
+
+
+def test_prune_orphans_dry_run_default_maps_would_reap():
+    # reap=False (default) => dry_run=True, reclaimed = would-reap names, no
+    # reaping happened.
+    entries = [_reap_entry("ghost1"), _reap_entry("ghost2")]
+    with patch("kento.reconcile.reap_orphans", return_value=entries) as mock_reap:
+        report = Instance.prune_orphans()
+    mock_reap.assert_called_once_with(False, None)  # base => both namespaces
+    assert isinstance(report, ReclaimReport)
+    assert report.dry_run is True
+    assert report.reclaimed == ("ghost1", "ghost2")
+    assert report.failed == ()
+    assert report.ok is True
+
+
+def test_prune_orphans_reap_maps_reaped_and_failures():
+    # reap=True => dry_run=False; reclaimed = successfully reaped names; failed =
+    # (name, error) pairs surfaced (1.6.2 contract).
+    entries = [
+        _reap_entry("ghost1", reaped=True),
+        _reap_entry("ghost2", reaped=False, error="pct destroy failed"),
+    ]
+    with patch("kento.reconcile.reap_orphans", return_value=entries) as mock_reap:
+        report = Instance.prune_orphans(reap=True)
+    mock_reap.assert_called_once_with(True, None)
+    assert report.dry_run is False
+    assert report.reclaimed == ("ghost1",)
+    assert report.failed == (("ghost2", "pct destroy failed"),)
+    assert report.ok is False
+
+
+def test_prune_orphans_scope_mirrors_list_per_cls():
+    with patch("kento.reconcile.reap_orphans", return_value=[]) as mock_reap:
+        Instance.prune_orphans()
+        SystemContainer.prune_orphans()
+        VirtualMachine.prune_orphans()
+    scopes = [c.args[1] for c in mock_reap.call_args_list]
+    assert scopes == [None, "lxc", "vm"]
+
+
+def test_prune_orphans_empty_is_clean_dry_run_report():
+    with patch("kento.reconcile.reap_orphans", return_value=[]):
+        report = Instance.prune_orphans()
+    assert report == ReclaimReport(dry_run=True, reclaimed=(), failed=())
+
+
+def test_prune_orphans_is_a_classmethod():
+    assert isinstance(Instance.__dict__["prune_orphans"], classmethod)
+
+
+# -- M11 instance.diagnose(): wraps run_diagnostics, filters INSTANCE+self ----
+
+
+def _diag_finding(category, severity, scope, message="m", remediation=None):
+    return {"category": category, "severity": severity, "scope": scope,
+            "message": message, "remediation": remediation}
+
+
+def test_instance_diagnose_filters_to_instance_domain_and_self(tmp_path):
+    d = _make_lxc(tmp_path, name="mybox")
+    inst = _snapshot(d, "lxc")
+    report = {"checks": [
+        _diag_finding("status", "ok", "mybox"),
+        _diag_finding("network", "ok", "mybox"),
+        _diag_finding("apparmor", "ok", "host"),      # HOST — dropped
+        _diag_finding("hold", "ok", "host"),          # IMAGE — dropped
+        _diag_finding("orphan", "warn", "mybox"),     # HOST domain — dropped
+        _diag_finding("status", "ok", "otherbox"),    # other subject — dropped
+    ], "problem_count": 1, "instances_scanned": 2}
+    with patch("kento.diagnose.run_diagnostics",
+               return_value=report) as mock_run:
+        result = inst.diagnose()
+    mock_run.assert_called_once_with("mybox")
+    assert isinstance(result, Diagnosis)
+    assert {f.check for f in result.findings} == {"status", "network"}
+    assert all(f.domain is DiagnosisDomain.INSTANCE for f in result.findings)
+    assert all(f.subject == "mybox" for f in result.findings)
+
+
+def test_instance_diagnose_resolves_by_name_and_raises_on_miss(tmp_path):
+    d = _make_lxc(tmp_path, name="mybox")
+    inst = _snapshot(d, "lxc")
+    with patch("kento.diagnose.run_diagnostics",
+               side_effect=InstanceNotFoundError("gone")):
+        with pytest.raises(InstanceNotFoundError):
+            inst.diagnose()
+
+
+def test_instance_diagnose_guards_dead_handle(tmp_path):
+    d = _make_lxc(tmp_path, name="mybox")
+    inst = _snapshot(d, "lxc")
+    inst._dead = True
+    with pytest.raises(InstanceNotFoundError):
+        inst.diagnose()
+
+
+def test_instance_diagnose_on_base_only(tmp_path):
+    # diagnose lives on the base (shared by all kinds); not overridden.
+    assert "diagnose" in Instance.__dict__
+    assert "diagnose" not in SystemContainer.__dict__
+    assert "diagnose" not in VirtualMachine.__dict__

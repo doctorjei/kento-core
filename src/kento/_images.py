@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from kento._diagnosis import PruneScope, ReclaimReport
+from kento._diagnosis import Diagnosis, PruneScope, ReclaimReport
 from kento._references import Digest, OciReference, SourceReference
 from kento.errors import ImageNotFoundError, KentoError, StateError
 
@@ -594,6 +594,41 @@ class LayeredImage(Image):
             if img and (_bare(img) == content_hex or img == rendered_ref):
                 return True
         return False
+
+    def diagnose(self) -> Diagnosis:
+        """Run the read-only IMAGE-domain health checks (§11.8 D3 b).
+
+        Projects the IMAGE-domain findings from the existing
+        ``diagnose.run_diagnostics()`` scan into a typed :class:`Diagnosis`. The
+        IMAGE domain today is the image-HOLD health checks (stale holds +
+        hold/guest content-id drift — the runtime category ``"hold"``).
+
+        **Scope — collection-level, NOT per-image (DISCLOSED).** The runtime
+        hold checks are GLOBAL scans whose findings carry no clean per-image
+        subject (their ``scope`` is ``"host"`` and the image ref is embedded only
+        in the message text, which the additive wrapper must not parse, §2
+        principle 3). So ``image.diagnose()`` returns the **collection-level**
+        IMAGE-domain findings (overall hold health), NOT a per-image filter on
+        ``self``. Richer per-image diagnostics (dangling / stale / missing-layers
+        attributed to a single image) arrive with the image-lifecycle EPIC that
+        refactors ``diagnose.py``; until then a per-image filter would silently
+        return an empty diagnosis (the holds have no per-image subject to match),
+        which is a worse lie than honestly reporting the collection's hold
+        health. This is the under-specification the plan flagged when it deferred
+        ``image.diagnose()`` to this block.
+
+        Performs I/O (the scan) — an explicit, named method (§2 principle 2); the
+        returned ``Diagnosis`` is inert.
+        """
+        import importlib
+
+        from kento._diagnosis import DiagnosisDomain, diagnosis_from_report
+
+        # Reach the diagnose SUBMODULE, not the top-level ``kento.diagnose``
+        # FUNCTION (Block 10's name-collision foot-gun) — see Instance.diagnose.
+        _diagnose = importlib.import_module("kento.diagnose")
+        report = _diagnose.run_diagnostics(None)
+        return diagnosis_from_report(report, domain=DiagnosisDomain.IMAGE)
 
     @staticmethod
     def _coerce_ref(ref: "str | OciReference") -> OciReference:

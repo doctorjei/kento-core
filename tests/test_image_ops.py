@@ -677,3 +677,65 @@ def test_prune_rejects_unsupported_scope_typed_raise():
             LayeredImage.prune(scope=_FakeScope.OTHER)
     # Rejected BEFORE any podman call.
     m_run.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Block 10 — image.diagnose() (§11.8 D3 b). ADDITIVE wrapper over
+# diagnose.run_diagnostics; returns the COLLECTION-level IMAGE-domain findings
+# (hold health). NOT per-image (disclosed: no clean per-image subject today).
+# run_diagnostics is reached via the diagnose SUBMODULE (not the kento.diagnose
+# FUNCTION) — the patch target is kento.diagnose.run_diagnostics.
+# --------------------------------------------------------------------------- #
+
+from kento import Diagnosis, DiagnosisDomain  # noqa: E402
+
+
+def _diag_report(*findings):
+    return {"checks": list(findings),
+            "problem_count": sum(1 for f in findings
+                                 if f["severity"] in ("warn", "error")),
+            "instances_scanned": 0}
+
+
+def _df(category, severity, scope, message="m", remediation=None):
+    return {"category": category, "severity": severity, "scope": scope,
+            "message": message, "remediation": remediation}
+
+
+def test_image_diagnose_returns_image_domain_findings_only():
+    report = _diag_report(
+        _df("hold", "ok", "host", "no stale holds"),
+        _df("apparmor", "ok", "host"),          # HOST — dropped
+        _df("status", "ok", "mybox"),           # INSTANCE — dropped
+        _df("orphan", "warn", "ghost"),         # HOST — dropped
+    )
+    img = _resolved_img(_ref())
+    with patch("kento.diagnose.run_diagnostics",
+               return_value=report) as mock_run:
+        result = img.diagnose()
+    # Global scan (None), then project to the IMAGE domain.
+    mock_run.assert_called_once_with(None)
+    assert isinstance(result, Diagnosis)
+    assert [f.check for f in result.findings] == ["hold"]
+    assert all(f.domain is DiagnosisDomain.IMAGE for f in result.findings)
+
+
+def test_image_diagnose_collection_level_not_per_image():
+    # Two holds, neither attributed to this specific image (scope is "host",
+    # subject None) — both surface (collection-level), proving it is NOT a
+    # per-image filter on self.
+    report = _diag_report(
+        _df("hold", "warn", "host", "stale hold for guest-a", "kento prune"),
+        _df("hold", "warn", "host", "drift for guest-b", "kento scrub guest-b"),
+    )
+    img = _resolved_img(_ref("docker.io/library/alpine:3"))
+    with patch("kento.diagnose.run_diagnostics", return_value=report):
+        result = img.diagnose()
+    assert len(result.findings) == 2
+    assert all(f.domain is DiagnosisDomain.IMAGE for f in result.findings)
+    assert all(f.subject is None for f in result.findings)  # no per-image subj
+    assert result.ok is False
+
+
+def test_image_diagnose_is_instance_method_on_layeredimage():
+    assert "diagnose" in LayeredImage.__dict__
