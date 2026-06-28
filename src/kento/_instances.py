@@ -55,7 +55,7 @@ from kento._storage import StorageMode
 from kento.errors import InstanceNotFoundError, KentoError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from kento._network import GuestTarget, HostBinding
     from kento.errors import StateError
@@ -249,17 +249,30 @@ class Instance(ABC):
 
     @property
     def forwards(self) -> "dict[HostBinding, GuestTarget]":
-        """Port-forward map (§5.7) — GETTER-ONLY in this block.
+        """Port-forward map (§5.7) — the ONE LIVE-capable network settable (M9).
 
-        M9 makes ``forwards`` a LIVE settable field, but the live setter (nft/
-        iptables DNAT + QMP ``hostfwd_add``, protocol-aware multi-forward diff-
-        apply) is the Phase-5 network rework (§5.7C) — genuinely-new live runtime
-        code this additive block does not build. So ``forwards`` stays getter-only
-        here: assigning it raises ``AttributeError`` (the no-setter idiom). The
-        live setter lands with the Phase-5 MINOR; this is a DOCUMENTED incremental
-        gap, NOT a contradiction of M9's locked LIVE semantics.
+        Assign a WHOLE typed value ``inst.forwards = {(proto, None, hport):
+        (None, gport), ...}`` (typed-object stance — sub-edits are ``dict(...)``
+        by the caller / the CLI's RMW). On a **running** instance the setter
+        applies the change LIVE (bridged = nft/iptables DNAT diff-apply against
+        the live-resolved guest IP; VM-usermode = QMP ``hostfwd_add``/``remove``)
+        AND persists; on a **stopped** one it persists only (next boot rebuilds
+        from ``kento-port``). The getter returns the cached snapshot value with no
+        I/O (§2). See the setter for the full live mechanism (§5.7C / §11.2 M9).
         """
         return self._forwards
+
+    @forwards.setter
+    def forwards(self, value: "dict[HostBinding, GuestTarget]") -> None:
+        """Set the whole port-forward map — LIVE on running, persist on stopped.
+
+        The ONLY live-capable network settable (§11.2 M9, §5.7C). Routes through
+        :meth:`_set_forwards_live`, which diffs against the current set, applies
+        removes+adds live (running) via the host firewall (bridged) or QMP
+        (VM-usermode), then persists ``kento-port`` — all under ``kento_lock``,
+        guarded on a LIVE ``is_running`` probe, with catch-reverse rollback.
+        """
+        self._set_forwards_live(value)
 
     # ------------------------------------------------------------------- #
     # Settable properties (§11.2 M9) — base fields shared by all kinds.
@@ -500,6 +513,169 @@ class Instance(ABC):
                 raise
             # Success: the persisted state matches new_params -> update the cache.
             setattr(self, cache_attr, new_cached)
+
+    # ------------------------------------------------------------------- #
+    # forwards — the ONE LIVE-capable network settable (§11.2 M9, §5.7C).
+    #
+    # The live firewall/QMP I/O does not fit the stopped-only ``_set_via_set_cmd``
+    # path (which raises on a running instance), so it gets its OWN engine — but
+    # it MIRRORS the same discipline: ``_check_alive`` -> ``kento_lock`` -> LIVE
+    # ``is_running`` probe inside the lock -> apply -> catch-reverse -> cache on
+    # success. The difference is the running branch APPLIES live (diff-apply +
+    # catch-reverse undo stack) instead of raising, and persistence is sequenced
+    # apply-live-THEN-persist with a rollback that also restores the state file.
+    # ------------------------------------------------------------------- #
+    def _set_forwards_live(
+        self, value: "dict[HostBinding, GuestTarget]") -> None:
+        """Engine for the ``forwards`` setter (§5.7C / §11.2 M9).
+
+        Steps (mirroring ``_set_via_set_cmd`` lock/guard discipline):
+
+        1. ``_check_alive`` (a destroyed handle is unusable, §11.2 M7).
+        2. Validate the NEW set first (re-render every binding -> the §5.7A spec
+           lines, via ``parse_forwards`` over the rendered specs) so a bad value
+           (address form, malformed) raises with NO state touched.
+        3. Acquire ``kento_lock`` (excludes a concurrent start; one acquire here,
+           ``set_cmd`` takes no lock -> deadlock-safe).
+        4. LIVE ``is_running`` probe INSIDE the lock (NOT cached ``status``).
+        5. RUNNING -> compute the diff (``add = new - old``, ``remove = old -
+           new`` keyed by ``HostBinding``), apply removes+adds LIVE (bridged
+           firewall or VM-usermode QMP), pushing each op's INVERSE on an undo
+           stack; THEN persist ``kento-port``. On ANY failure, unwind the undo
+           stack (re-add removed rules / remove added rules) and re-raise.
+           STOPPED -> persist only (next boot rebuilds from state).
+        6. On success only, update the ``_forwards`` cache (§2: getter never
+           re-queries).
+
+        Persistence (``_persist_forwards``) writes ``kento-port`` via the SAME
+        canonical low-level writer the ``kento set --port`` CLI uses
+        (``set_cmd._apply_port_meta``), so the on-disk form is canonical with no
+        second writer — but NOT through ``set_cmd`` itself, which rejects a
+        running instance and would make the live path never succeed.
+        """
+        from kento._network import render_forward_spec, parse_forwards
+        from kento.locking import kento_lock
+
+        self._check_alive()
+
+        # (2) Validate the new set up front — render to spec lines, re-parse to
+        # catch address forms / dupes BEFORE any I/O. parse_forwards over the
+        # rendered specs is the same validation set_cmd will run, surfaced early.
+        new_specs = [render_forward_spec(b, t) for b, t in value.items()]
+        parse_forwards(new_specs)  # raises ValidationError / ForwardAddress...
+
+        with kento_lock():
+            from kento import is_running
+
+            # LIVE probe inside the lock (NOT cached status); a concurrent start
+            # is excluded by the lock we hold (TOCTOU-safe).
+            if not is_running(self._dir, self._mode):
+                # STOPPED: persist only. The next boot rebuilds rules from state.
+                self._persist_forwards(new_specs)
+                self._forwards = dict(value)
+                return
+
+            # RUNNING: diff-apply live, then persist; rollback on any failure.
+            old = self._forwards
+            to_remove = {b: t for b, t in old.items() if b not in value}
+            to_add = {b: t for b, t in value.items()
+                      if b not in old or old[b] != value[b]}
+            # A binding whose target CHANGED is a remove-then-add (its rules point
+            # at the old guest_port); include it in both so the live state ends up
+            # matching ``value`` exactly.
+            for b, t in value.items():
+                if b in old and old[b] != t:
+                    to_remove[b] = old[b]
+
+            undo: list[Callable[[], None]] = []
+            try:
+                # Build the live applier ONLY when there is live work to do — a
+                # no-op diff (e.g. re-assigning the same set) must not raise the
+                # "no live applier for this config" ModeError, and need touch no
+                # firewall/QMP at all (just re-persist the identical file).
+                if to_remove or to_add:
+                    applier = self._forwards_applier()
+                    for binding, target in to_remove.items():
+                        applier.remove(binding, target)
+                        undo.append(
+                            lambda b=binding, t=target: applier.add(b, t))
+                    for binding, target in to_add.items():
+                        applier.add(binding, target)
+                        undo.append(
+                            lambda b=binding, t=target: applier.remove(b, t))
+                # Live state now matches ``value``; persist the state file last.
+                self._persist_forwards(new_specs)
+            except Exception:
+                # Catch-reverse: unwind applied live ops in REVERSE order, then
+                # re-raise the ORIGINAL error (mirrors create.py:_run_cleanup —
+                # best-effort, never masks the real failure).
+                for inverse in reversed(undo):
+                    try:
+                        inverse()
+                    except Exception as rb_err:  # noqa: BLE001 — best-effort
+                        _instances_logger.warning(
+                            "rollback of a forwards op on %s failed: %s",
+                            self._name, rb_err,
+                        )
+                raise
+            self._forwards = dict(value)
+
+    def _persist_forwards(self, specs: "list[str]") -> None:
+        """Persist the forward set to ``kento-port`` (declarative full set, §5.7B).
+
+        Reuses ``set_cmd._apply_port_meta`` — the SAME canonical ``kento-port``
+        writer the ``kento set --port`` CLI uses (it re-renders each spec via
+        ``render_forward_spec`` so the on-disk form is canonical + deduped), one
+        copy, no drift. It is called DIRECTLY, NOT via ``set_cmd``: ``set_cmd``
+        unconditionally rejects a RUNNING instance (set_cmd.py:401 — "Stop it
+        first"), so routing the live (running) persist through it would make the
+        live setter ALWAYS fail-then-rollback (the Blocker the Editor caught).
+        The low-level writer has no such guard — correct here, because by the time
+        we persist on the running path the rules are ALREADY applied live, and the
+        live-vs-stopped decision belongs to ``_set_forwards_live`` (which holds
+        ``kento_lock`` across the whole op), not to the file writer.
+
+        ``"replace"`` writes the N specs; ``"clear"`` unlinks the file when the
+        set is empty (the writer's two declarative actions). Plain file I/O under
+        our held ``kento_lock``.
+        """
+        from kento.set_cmd import _apply_port_meta
+
+        if specs:
+            _apply_port_meta(self._dir, specs, "replace")
+        else:
+            _apply_port_meta(self._dir, [""], "clear")
+
+    def _forwards_applier(
+        self) -> "_BridgedForwardsApplier | _QmpForwardsApplier":
+        """The mode-appropriate live applier (bridged firewall vs VM-usermode QMP).
+
+        * Container modes (lxc / pve-lxc) -> ``_BridgedForwardsApplier`` (host
+          nft/iptables DNAT against the resolved guest IP).
+        * VM-family modes (vm / pve-vm) in **USER (slirp) net-mode** -> the
+          ``_QmpForwardsApplier`` (QMP ``hostfwd_add``/``remove`` over
+          ``qmp.sock``).
+        * A VM-family instance NOT in usermode -> bridged-VM forwarding is not a
+          current capability (§5.7C), so there is no live applier. We raise a
+          clear ``ModeError`` rather than hand back the QMP applier (which would
+          send ``hostfwd_add`` to a VM that has no slirp netdev and fail with an
+          opaque QMP error) — gate C: don't return an applier that invites a
+          misleading failure. This is only reachable on the RUNNING path with a
+          non-empty live diff; the STOPPED path persists without an applier.
+        """
+        if _is_vm_mode(self._mode):
+            if self._network.mode is not NetworkMode.USER:
+                from kento.errors import ModeError
+
+                raise ModeError(
+                    f"cannot apply port forwards live to '{self._name}': live "
+                    "port-forwarding on a VM requires usermode (slirp) "
+                    f"networking, but this VM is in {self._network.mode.value!r} "
+                    "mode (bridged-VM forwarding is not supported). Stop it to "
+                    "change forwards, which apply at next boot."
+                )
+            return _QmpForwardsApplier(self._dir / "qmp.sock", self._name)
+        return _BridgedForwardsApplier(self)
 
     # ------------------------------------------------------------------- #
     # create / transient — the abstract contract (§10.1, §11.0).
@@ -2162,6 +2338,147 @@ def _load_ip_config(container_dir: Path) -> dict[str, str]:
     if fields.get("dns"):
         ip_config["dns1"] = fields["dns"]
     return ip_config
+
+
+# --------------------------------------------------------------------------- #
+# Live-forward appliers (§5.7C) — the per-mode add/remove primitives the running
+# ``forwards`` setter drives. Each exposes ``add(binding, target)`` /
+# ``remove(binding, target)`` for ONE forward; the engine composes the diff and
+# the catch-reverse undo stack on top. Bridged uses the host firewall
+# (portfwd.run_install/run_remove) against the live-resolved guest IP; VM-usermode
+# uses QMP hostfwd_add/remove over qmp.sock. The actual rule commands live in
+# ``kento.portfwd`` (the SINGLE source the parity test pins to the hook).
+# --------------------------------------------------------------------------- #
+
+
+class _BridgedForwardsApplier:
+    """Live nft/iptables DNAT applier for a running container (lxc / pve-lxc).
+
+    Resolves the guest IP ONCE at construction (static ``kento-net`` fast path,
+    else ``lxc-info -n <name> -iH`` — the same resolution the boot hook uses) and
+    the NAT backend once (nft -> iptables -> none, mirroring
+    ``hook.sh:kento_nat_backend``). If the guest IP cannot be determined (DHCP not
+    yet settled) or no backend is present, the FIRST ``add``/``remove`` raises a
+    ``StateError``/``SubprocessError`` — surfaced by the engine and rolled back —
+    rather than silently persisting-only behind the caller's back (§2 principle 5:
+    a running bridged set MUST apply live or fail honestly).
+    """
+
+    def __init__(self, inst: "Instance") -> None:
+        self._inst = inst
+        self._name = inst._name
+        self._ip = _resolve_guest_ip(inst._dir)
+        from kento.portfwd import resolve_backend
+
+        self._backend = resolve_backend()
+
+    def _require_ready(self) -> tuple[str, str]:
+        from kento.errors import StateError, SubprocessError
+
+        if self._ip is None:
+            raise StateError(
+                f"cannot apply port forwards live to running '{self._name}': "
+                "its guest IP is not yet known (DHCP may not have settled). "
+                "Retry once the instance has an address, or stop it first so the "
+                "change persists and applies at next boot."
+            )
+        if self._backend is None:
+            raise SubprocessError(
+                "cannot apply port forwards live: neither nft nor iptables is "
+                "available on the host to install DNAT rules."
+            )
+        return self._backend, self._ip
+
+    def add(self, binding: "HostBinding", target: "GuestTarget") -> None:
+        backend, ip = self._require_ready()
+        from kento.portfwd import run_install
+
+        protocol, _haddr, host_port = binding
+        _gaddr, guest_port = target
+        run_install(backend, ip, protocol, host_port, guest_port, self._name)
+
+    def remove(self, binding: "HostBinding", target: "GuestTarget") -> None:
+        backend, _ip = self._require_ready()
+        from kento.portfwd import run_remove
+
+        protocol, _haddr, host_port = binding
+        run_remove(backend, protocol, host_port, self._name)
+
+
+class _QmpForwardsApplier:
+    """Live QMP ``hostfwd_add``/``hostfwd_remove`` applier for a usermode VM.
+
+    Issues the HMP forward commands over ``qmp.sock`` (the existing QMP monitor
+    socket). A missing socket / non-usermode VM surfaces as ``SubprocessError``
+    on the first op (the VM has no slirp netdev to mutate), surfaced and rolled
+    back by the engine. Bridged-VM forwarding is out of scope (§5.7C).
+    """
+
+    def __init__(self, sock_path: Path, name: str) -> None:
+        self._sock = sock_path
+        self._name = name
+
+    def _require_sock(self) -> Path:
+        from kento.errors import SubprocessError
+
+        if not self._sock.exists():
+            raise SubprocessError(
+                f"cannot apply port forwards live to running '{self._name}': "
+                f"QMP socket not found ({self._sock}). The VM is not running with "
+                "usermode networking, or predates QMP support."
+            )
+        return self._sock
+
+    def add(self, binding: "HostBinding", target: "GuestTarget") -> None:
+        sock = self._require_sock()
+        from kento.portfwd import vm_hostfwd_add
+
+        protocol, _haddr, host_port = binding
+        _gaddr, guest_port = target
+        vm_hostfwd_add(sock, protocol, host_port, guest_port)
+
+    def remove(self, binding: "HostBinding", target: "GuestTarget") -> None:
+        sock = self._require_sock()
+        from kento.portfwd import vm_hostfwd_remove
+
+        protocol, _haddr, host_port = binding
+        vm_hostfwd_remove(sock, protocol, host_port)
+
+
+def _resolve_guest_ip(container_dir: Path) -> str | None:
+    """Resolve a running container's guest IPv4 the way the boot hook does (§5.7C).
+
+    Static fast path: ``kento-net`` ``ip=`` (decompose the CIDR -> bare address).
+    Else ``lxc-info -n <name> -iH`` filtered to the first IPv4 (the DHCP path the
+    hook polls). Returns ``None`` if no address is known (DHCP not yet settled /
+    tool absent) — the caller decides (error on a running bridged set, never a
+    silent persist-only). The container directory name is the lxc name (plain
+    LXC) or the vmid (pve-lxc), which is exactly what ``lxc-info`` expects on PVE.
+    """
+    net_file = container_dir / "kento-net"
+    if net_file.is_file():
+        for line in net_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("ip="):
+                addr = line[len("ip="):].split("/", 1)[0].strip()
+                if addr:
+                    return addr
+    try:
+        result = subprocess.run(
+            ["lxc-info", "-n", container_dir.name, "-iH"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    for token in result.stdout.split():
+        # IPv4 only — our DNAT rules live in the ip family (the hook ignores the
+        # interleaved IPv6 addresses lxc-info prints). A plain dotted quad.
+        parts = token.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            return token
+    return None
 
 
 def _load_forwards(container_dir: Path) -> dict["HostBinding", "GuestTarget"]:

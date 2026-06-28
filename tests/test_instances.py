@@ -964,7 +964,6 @@ from kento.errors import StateError  # noqa: E402
         ("environment", {}),
         ("nesting", True),
         ("name", "renamed"),
-        ("forwards", {}),
     ],
 )
 def test_getter_only_fields_reject_assignment(tmp_path, field, value):
@@ -982,13 +981,221 @@ def test_unprivileged_getter_only(tmp_path):
         inst.unprivileged = True
 
 
-def test_forwards_setter_deferred_to_phase5(tmp_path):
-    # M9 makes forwards LIVE-settable, but that is the Phase-5 network rework.
-    # In THIS block forwards is getter-only -> assignment raises AttributeError.
-    d = _make_lxc(tmp_path)
+# -- forwards setter: the ONE live-capable network settable (§5.7C / M9) -------
+
+
+def _forwards_lxc(tmp_path, port="8080:80", **meta):
+    """A bridged-static LXC dir with a kento-net IP + a kento-port (forwards)."""
+    base = {"kento-net-type": "bridge", "kento-bridge": "lxcbr0",
+            "kento-net": "ip=10.0.3.42/24\ngateway=10.0.3.1",
+            "kento-port": port}
+    base.update(meta)
+    return _make_lxc(tmp_path, **base)
+
+
+def test_forwards_setter_stopped_persists_only(tmp_path):
+    # STOPPED: persist N spec lines to kento-port via the REAL writer (NOT mocked
+    # — the running-guarded set_cmd is never used), update cache, NO live apply.
+    from kento import ForwardProtocol
+    d = _forwards_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
-    with pytest.raises(AttributeError):
+    new = {(ForwardProtocol.TCP, None, 9090): (None, 90),
+           (ForwardProtocol.UDP, None, 5353): (None, 53)}
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.run_install") as inst_add, \
+            patch("kento.portfwd.run_remove") as inst_rm:
+        inst.forwards = new
+    # The real kento-port file holds the canonical declarative full set.
+    assert (d / "kento-port").read_text().splitlines() == ["9090:90", "5353:53/udp"]
+    inst_add.assert_not_called()
+    inst_rm.assert_not_called()
+    assert inst.forwards == new  # cache updated on success
+
+
+def test_forwards_setter_stopped_clear(tmp_path):
+    # STOPPED + empty value -> kento-port unlinked (declarative clear).
+    d = _forwards_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    assert (d / "kento-port").exists()
+    with patch("kento.is_running", return_value=False), \
+            patch("kento.locking.kento_lock"):
         inst.forwards = {}
+    assert not (d / "kento-port").exists()
+    assert inst.forwards == {}
+
+
+def test_forwards_setter_running_bridged_diff_apply(tmp_path):
+    # RUNNING bridged: diff against old {tcp 8080->80}; new adds udp 5353->53 and
+    # keeps tcp 8080 -> exactly one add (udp), zero removes; then persist for REAL.
+    # This is the running SUCCESS path against the actual persist writer — the
+    # coverage gap that hid Blocker 1 (set_cmd would have raised "Stop it first").
+    from kento import ForwardProtocol
+    d = _forwards_lxc(tmp_path, port="8080:80")
+    inst = _snapshot(d, "lxc")
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80),
+           (ForwardProtocol.UDP, None, 5353): (None, 53)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento.portfwd.run_install") as run_install, \
+            patch("kento.portfwd.run_remove") as run_remove:
+        inst.forwards = new
+    # Only the NEW forward (udp 5353->53) is installed; the unchanged tcp is left.
+    run_remove.assert_not_called()
+    run_install.assert_called_once_with(
+        "nft", "10.0.3.42", ForwardProtocol.UDP, 5353, 53, inst.name)
+    # Persisted AFTER live apply, to the REAL kento-port (running set SUCCEEDS).
+    assert (d / "kento-port").read_text().splitlines() == ["8080:80", "5353:53/udp"]
+    assert inst.forwards == new
+
+
+def test_forwards_setter_running_removes_dropped(tmp_path):
+    # RUNNING: dropping a forward removes its rules; changing a target = remove+add.
+    from kento import ForwardProtocol
+    d = _forwards_lxc(tmp_path, port="8080:80\n9090:90")
+    inst = _snapshot(d, "lxc")
+    # Drop 9090; retarget 8080 from :80 to :8080.
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 8080)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento.portfwd.run_install") as run_install, \
+            patch("kento.portfwd.run_remove") as run_remove:
+        inst.forwards = new
+    removed = {c.args[2] for c in run_remove.call_args_list}  # host_port arg
+    assert removed == {8080, 9090}  # 9090 dropped + 8080 retarget-remove
+    run_install.assert_called_once_with(
+        "nft", "10.0.3.42", ForwardProtocol.TCP, 8080, 8080, inst.name)
+    # Real persist reflects the new declarative set (only the retargeted 8080).
+    assert (d / "kento-port").read_text().splitlines() == ["8080:8080"]
+
+
+def test_forwards_setter_running_rollback_on_failure(tmp_path):
+    # A failing live add unwinds every applied op (catch-reverse) and re-raises;
+    # the state file is NOT persisted and the cache is unchanged. This test
+    # GUARDS the unwind itself: it asserts the INVERSE op runs (the removed 8080
+    # is re-added), not merely that the forward ops ran. Mutation-checked: with
+    # the unwind loop disabled, the "8080 re-added" assertion reddens.
+    from kento import ForwardProtocol
+    from kento.errors import SubprocessError
+    d = _forwards_lxc(tmp_path, port="8080:80")
+    inst = _snapshot(d, "lxc")
+    old = dict(inst.forwards)
+    new = {(ForwardProtocol.UDP, None, 5353): (None, 53)}  # remove 8080, add 5353
+    calls = []
+
+    def fake_remove(backend, proto, hport, name):
+        calls.append(("remove", hport))
+
+    def fake_install(backend, ip, proto, hport, gport, name):
+        calls.append(("add", hport))
+        # Fail ONLY the new 5353 add; the rollback re-add of 8080 must succeed so
+        # the unwind completes (and is observable as a second ("add", 8080)).
+        if hport == 5353:
+            raise SubprocessError("port in use")
+
+    # NOTE: set_cmd is deliberately NOT mocked here — the live failure happens in
+    # the add phase, BEFORE persistence, so the real persist writer is never
+    # reached; mocking it is what hid Blocker 1.
+    persist_calls = []
+    real_persist = inst._persist_forwards
+
+    def spy_persist(specs):
+        persist_calls.append(list(specs))
+        return real_persist(specs)
+
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch.object(inst, "_persist_forwards", side_effect=spy_persist), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento.portfwd.run_install", side_effect=fake_install), \
+            patch("kento.portfwd.run_remove", side_effect=fake_remove):
+        with pytest.raises(SubprocessError):
+            inst.forwards = new
+
+    # Forward ops: remove(8080), then add(5353) which fails.
+    assert calls[0] == ("remove", 8080)
+    assert calls[1] == ("add", 5353)
+    # CATCH-REVERSE: the unwind must re-ADD the removed 8080 (the inverse of the
+    # first applied op). Without the unwind loop this assertion fails.
+    assert ("add", 8080) in calls[2:], (
+        f"rollback did not re-add the removed 8080 forward; calls={calls}")
+    assert not persist_calls            # persistence never reached on a live fail
+    assert inst.forwards == old         # cache unchanged
+
+
+def test_forwards_setter_running_ip_unknown_raises(tmp_path):
+    # RUNNING bridged but guest IP not resolvable (no kento-net, lxc-info fails):
+    # the live add raises StateError (never silent persist-only) -> rollback.
+    from kento import ForwardProtocol
+    d = _make_lxc(tmp_path, **{"kento-net-type": "bridge",
+                               "kento-bridge": "lxcbr0", "kento-port": "8080:80"})
+    inst = _snapshot(d, "lxc")
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80),
+           (ForwardProtocol.TCP, None, 9090): (None, 90)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.resolve_backend", return_value="nft"), \
+            patch("kento._instances._resolve_guest_ip", return_value=None):
+        with pytest.raises(StateError):
+            inst.forwards = new
+    # State file untouched — the live failure rolled back BEFORE any persist.
+    assert (d / "kento-port").read_text().splitlines() == ["8080:80"]
+
+
+def test_forwards_setter_running_vm_qmp(tmp_path):
+    # RUNNING usermode VM: live apply goes through QMP hostfwd_add (not firewall),
+    # then persists to the REAL kento-port (running success path).
+    from kento import ForwardProtocol
+    d = _make_vm(tmp_path, **{"kento-net-type": "usermode",
+                              "kento-port": "8080:80"})
+    (d / "qmp.sock").write_text("")  # exists -> applier proceeds
+    inst = _snapshot(d, "vm")
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80),
+           (ForwardProtocol.UDP, None, 5353): (None, 53)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"), \
+            patch("kento.portfwd.vm_hostfwd_add") as qadd, \
+            patch("kento.portfwd.vm_hostfwd_remove") as qrm:
+        inst.forwards = new
+    qrm.assert_not_called()
+    assert qadd.call_count == 1
+    # Called with (sock, proto, hport, gport) — the new udp forward.
+    args = qadd.call_args.args
+    assert args[1:] == (ForwardProtocol.UDP, 5353, 53)
+    assert (d / "kento-port").read_text().splitlines() == ["8080:80", "5353:53/udp"]
+
+
+def test_forwards_setter_running_vm_nonusermode_raises(tmp_path):
+    # MINOR a: a RUNNING non-usermode (e.g. static-bridged) VM has no live
+    # applier — bridged-VM forwarding is out of scope (§5.7C). Setting a forward
+    # raises a clear ModeError (not an opaque QMP failure), state untouched.
+    from kento import ForwardProtocol
+    from kento.errors import ModeError
+    d = _make_vm(tmp_path, **{"kento-net-type": "bridge",
+                              "kento-bridge": "vmbr0"})
+    inst = _snapshot(d, "vm")
+    assert inst.network.mode is not NetworkMode.USER
+    new = {(ForwardProtocol.TCP, None, 8080): (None, 80)}
+    with patch("kento.is_running", return_value=True), \
+            patch("kento.locking.kento_lock"):
+        with pytest.raises(ModeError):
+            inst.forwards = new
+    assert not (d / "kento-port").exists()  # never persisted
+
+
+def test_forwards_setter_rejects_address_form(tmp_path):
+    # An address-bearing value is rejected up front (ForwardAddressNotImplemented),
+    # before any lock / probe / I/O (§5.7A — 1.0 has no per-address bind).
+    from kento import ForwardProtocol, ForwardAddressNotImplemented
+    d = _forwards_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    bad = {(ForwardProtocol.TCP, "127.0.0.1", 8080): (None, 80)}
+    with patch("kento.locking.kento_lock") as lock:
+        with pytest.raises(ForwardAddressNotImplemented):
+            inst.forwards = bad
+    lock.assert_not_called()  # validation precedes the lock
 
 
 # -- Settable setters: stopped-only guard via LIVE is_running probe -----------

@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from kento.errors import ModeError, StateError, SubprocessError
-from kento.suspend import qmp_command, resume, suspend
+from kento.suspend import qmp_command, qmp_hmp, resume, suspend
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,50 @@ def test_qmp_command_multiple_commands(tmp_path):
 def test_qmp_command_socket_absent_raises(tmp_path):
     with pytest.raises(OSError):
         qmp_command(tmp_path / "nope.sock", {"execute": "stop"})
+
+
+# ---------------------------------------------------------------------------
+# qmp_hmp: the human-monitor bridge used by the live forwards setter (§5.7C).
+# ---------------------------------------------------------------------------
+
+def test_qmp_hmp_sends_bridge_and_returns_text(tmp_path):
+    sock_path = tmp_path / "qmp.sock"
+    # hostfwd_add returns empty string on success.
+    reply = json.dumps({"return": ""}).encode() + b"\n"
+    srv = _FakeQMPServer(sock_path, [reply])
+    srv.start()
+
+    out = qmp_hmp(sock_path, "hostfwd_add net0 tcp:127.0.0.1:8080-:80")
+
+    assert out == ""
+    # The command is wrapped in human-monitor-command with command-line arg.
+    assert srv.received[1] == {
+        "execute": "human-monitor-command",
+        "arguments": {"command-line": "hostfwd_add net0 tcp:127.0.0.1:8080-:80"},
+    }
+
+
+def test_qmp_hmp_nonempty_return_is_surfaced(tmp_path):
+    # HMP failures (e.g. port in use) come back as TEXT in `return`, not an error.
+    sock_path = tmp_path / "qmp.sock"
+    reply = json.dumps(
+        {"return": "Could not set up host forwarding rule"}).encode() + b"\n"
+    srv = _FakeQMPServer(sock_path, [reply])
+    srv.start()
+
+    out = qmp_hmp(sock_path, "hostfwd_add net0 tcp:127.0.0.1:8080-:80")
+    assert "Could not set up host forwarding" in out
+
+
+def test_qmp_hmp_qmp_error_raises(tmp_path):
+    sock_path = tmp_path / "qmp.sock"
+    reply = json.dumps(
+        {"error": {"class": "GenericError", "desc": "bad"}}).encode() + b"\n"
+    srv = _FakeQMPServer(sock_path, [reply])
+    srv.start()
+
+    with pytest.raises(ValueError):
+        qmp_hmp(sock_path, "hostfwd_add net0 tcp:127.0.0.1:8080-:80")
 
 
 # ---------------------------------------------------------------------------
