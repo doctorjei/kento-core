@@ -75,6 +75,8 @@ __all__ = [
     "DiskFormat",
     "Layer",
     "Hold",
+    "ManagedStatus",
+    "ImageRecord",
     "Image",
     "LayeredImage",
     "OciImage",
@@ -246,6 +248,323 @@ class Hold:
 
 
 # --------------------------------------------------------------------------- #
+# ManagedStatus + ImageRecord — kento's typed LEDGER ENTRY about an image
+# (§12.4, JC1 — the 1.0 blocker).
+#
+# An ImageRecord is NOT an Image (the artifact, podman store): it is the typed
+# projection of kento's OWN markers about an image — the per-guest kento-image
+# references + the kento-hold.<guest> pins (Hold from SD2) + (future) provenance.
+# Composition (has-a), keyed on the content id. It absorbs id-centricity, the
+# ref<->id duality, the dangling case, and future provenance, keeping Image (§4)
+# clean. The string-returning images.list_images() it REPLACES is removed; the
+# data helpers it shared (images._guest_image_refs) feed ImageRecord.list().
+# --------------------------------------------------------------------------- #
+
+
+class ManagedStatus(str, Enum):
+    """The kento managed-image status (§12.4). 2-state, locked.
+
+    ``str, Enum`` so a member compares/serializes as its wire value
+    (``ManagedStatus.IN_USE == "in-use"``) — the library idiom for closed value
+    sets (NetworkMode / Status / StorageMode / DiskFormat). The two values match
+    the legacy ``kento images`` table's STATUS column EXACTLY (LOCKED run 36 —
+    NOT a 3-state enum; ``dangling`` is a SEPARATE, orthogonal derived bool on
+    ``ImageRecord``, not a status value).
+    """
+
+    IN_USE = "in-use"
+    ORPHANED = "orphaned"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ImageRecord:
+    """kento's typed LEDGER ENTRY about one image, keyed on content id (§12.4).
+
+    The typed projection of kento's own markers about an image — distinct from
+    ``Image`` (§4, the artifact). A frozen, inert value (§2 principle 2 — no I/O
+    on field access); the I/O lives in the explicit classmethods
+    (:meth:`list` / :meth:`get`) and in ``image.record()`` / :meth:`resolve`.
+
+    Fields (§12.4 verbatim):
+
+    * ``id`` — the content **identity**, a ``Digest`` — the KEY. MANDATORY
+      (id-centric; it survives a moved tag, and is the phantom-copy guard). A
+      record is always keyed on resolvable content; a rare legacy tag-only hold
+      whose content is GONE has no ``id`` and is logged + skipped by
+      :meth:`list` rather than represented.
+    * ``refs`` — the tag(s) kento has seen at this id: ``0`` = dangling (no
+      surviving tag), ``N`` = multi-tagged. Sourced from the guest ``kento-image``
+      references that resolve to this id, deduplicated, in a stable order.
+    * ``guests`` — the instance names whose ``kento-image`` references this id.
+    * ``holds`` — the pins (``Hold`` from SD2; ``N`` — one per guest hold). NOT a
+      bool: the typed pins themselves.
+
+    Derived properties (matching today's ``images`` table; all pure, no I/O):
+
+    * ``held`` — ``bool(self.holds)``.
+    * ``in_use`` — ``bool(self.guests)``.
+    * ``dangling`` — ``not self.refs`` (a SEPARATE axis from ``status``: an
+      orphaned image may or may not be dangling, §12.4).
+    * ``status`` — ``IN_USE`` if any guest references it, else ``ORPHANED``.
+
+    ``provenance`` is a FUTURE field (kento-pulled provenance — the image
+    -lifecycle EPIC); it is deliberately NOT added in 1.0 (adding it later is
+    non-breaking).
+    """
+
+    id: Digest
+    refs: tuple[OciReference, ...] = ()
+    guests: tuple[str, ...] = ()
+    holds: tuple["Hold", ...] = ()
+
+    def __post_init__(self) -> None:
+        # Freeze iterable arguments to tuples (the frozen-dataclass coercion
+        # idiom shared with OciImage / ReclaimReport — a frozen dataclass freezes
+        # the binding, not a mutable list behind it).
+        for field_name in ("refs", "guests", "holds"):
+            value = getattr(self, field_name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, field_name, tuple(value))
+
+    # ----- derived properties (pure; match today's images table) -----
+    @property
+    def held(self) -> bool:
+        """True iff a kento hold pins this image (§12.4)."""
+        return bool(self.holds)
+
+    @property
+    def in_use(self) -> bool:
+        """True iff a guest references this image (§12.4)."""
+        return bool(self.guests)
+
+    @property
+    def dangling(self) -> bool:
+        """True iff NO surviving tag references this id (§12.4).
+
+        A SEPARATE, orthogonal axis from :attr:`status` (LOCKED run 36): a
+        held-only image with no guest ref is ``ORPHANED`` AND ``dangling``; an
+        orphaned image that still carries a tag is ``ORPHANED`` but NOT dangling.
+        """
+        return not self.refs
+
+    @property
+    def status(self) -> ManagedStatus:
+        """``IN_USE`` if a guest references this image, else ``ORPHANED`` (§12.4).
+
+        Matches the legacy ``images`` table's STATUS column exactly: in-use means
+        a kento guest references the image; an image present only via a hold (its
+        guest gone) is orphaned.
+        """
+        return ManagedStatus.IN_USE if self.guests else ManagedStatus.ORPHANED
+
+    # ----- ledger navigation — lazy, may raise -----
+    def resolve(self) -> "Image":
+        """Resolve THIS record's content to the live ``Image`` artifact (§12.4).
+
+        The inverse of ``image.record()``. Resolves by content **id** — the
+        record's key — via ``OciImage.get`` against the local store (no network).
+        Performs I/O (an explicit named method, §2 principle 2). **MAY RAISE**
+        ``ImageNotFoundError`` when the content is gone (a dangling record whose
+        layers podman has since reaped, §12.4): the record exists as a ledger
+        marker even when the artifact does not, so resolution is the moment the
+        absence surfaces, as a typed raise (principle 5) — never a sentinel.
+
+        Resolving by the rendered ``id`` (``algorithm:encoded``) lets podman
+        match the content regardless of which (if any) tag still points at it, so
+        a dangling-but-held record still resolves while its layers survive.
+        """
+        return OciImage.get(self.id.render())
+
+    # ----- entry points — reconstruct from kento markers -----
+    @classmethod
+    def list(cls) -> "list[ImageRecord]":
+        """Every kento-MANAGED image as a typed record, grouped by id (§12.4).
+
+        Reconstructs the ledger from kento's markers (like ``Instance.list``
+        builds its snapshot from many ``kento-*`` files): the dataset is every
+        image **referenced by a guest OR pinned by a hold** (today's
+        ``managed = refs | held`` boundary), one record per content **id**.
+
+        Grouping (the id-centric core):
+
+        * Each guest ``kento-image`` reference (``images._guest_image_refs``) is
+          resolved to its content id via ``OciImage.resolve_id`` (the same
+          ``{{.Id}}`` podman boundary the holds use, so the ids compare
+          apples-to-apples). The parsed reference is recorded under that id as a
+          *seen tag* (``refs``); the referencing guests are recorded under it.
+        * Each ``Hold`` (``Hold.list`` from SD2) contributes its content id: a
+          MODERN id-pin already carries a ``Digest``; a LEGACY tag-pin
+          (``OciReference``) is resolved to its id via ``OciImage.resolve_id``.
+
+        **id is mandatory — unresolvable content is logged + skipped** (LOCKED
+        run 36): a guest reference or legacy tag-pin whose content is GONE
+        (``resolve_id`` raises ``ImageNotFoundError``) cannot be keyed, so it is
+        logged and dropped rather than represented with a fabricated id. Modern
+        id-pinned holds always carry their id even for vanished content, so a
+        dangling-but-held image (no tag, ``refs=()``) is still represented.
+
+        TOTAL OVER THE STORE (same stance as ``OciImage.list`` / ``Hold.list``):
+        one unresolvable marker is skipped with a log, never fatal to the whole
+        listing. Ordering is stable — sorted by the rendered id — so the listing
+        is deterministic regardless of marker-scan order.
+        """
+        from kento.images import _guest_image_refs
+
+        # Per-id accumulators. We key the buckets on the rendered Digest string
+        # (a stable, hashable key) and keep the typed Digest alongside.
+        digests: dict[str, Digest] = {}
+        refs: dict[str, dict[str, OciReference]] = {}
+        guests: dict[str, set[str]] = {}
+        holds: dict[str, list[Hold]] = {}
+
+        def _bucket(digest: Digest) -> str:
+            key = digest.render()
+            digests.setdefault(key, digest)
+            refs.setdefault(key, {})
+            guests.setdefault(key, set())
+            holds.setdefault(key, [])
+            return key
+
+        # --- guest references: image string -> [guests] ---
+        for image, guest_names in _guest_image_refs().items():
+            parsed = _parse_legacy_pinned(image)
+            # A guest image string is USUALLY a tag (OciReference); rarely a bare
+            # content id (a Digest), which is the id itself and not a "seen tag".
+            if isinstance(parsed, Digest):
+                digest = parsed
+                ref: OciReference | None = None
+            else:
+                ref = parsed
+                try:
+                    digest = OciImage.resolve_id(image)
+                except ImageNotFoundError:
+                    # Content gone — cannot key this guest reference. Faithful to
+                    # "id mandatory": log + skip rather than fabricate an id.
+                    _images_logger.warning(
+                        "skipping guest reference %r (guests %s): content not "
+                        "resolvable in the local store",
+                        image, ",".join(sorted(guest_names)),
+                    )
+                    continue
+            key = _bucket(digest)
+            if ref is not None:
+                refs[key][ref.render()] = ref
+            guests[key].update(guest_names)
+
+        # --- holds: each pins a content id ---
+        for hold in Hold.list():
+            if isinstance(hold.pinned, Digest):
+                digest = hold.pinned
+            else:
+                # Legacy tag-pin: resolve the ref to its content id. Unresolvable
+                # (content gone) -> log + skip (the rare legacy tag-only hold,
+                # LOCKED run 36).
+                rendered = hold.pinned.render()
+                try:
+                    digest = OciImage.resolve_id(rendered)
+                except ImageNotFoundError:
+                    _images_logger.warning(
+                        "skipping hold for %r: legacy tag-pin %r is not "
+                        "resolvable in the local store (content gone)",
+                        hold.instance, rendered,
+                    )
+                    continue
+            key = _bucket(digest)
+            holds[key].append(hold)
+
+        records: list[ImageRecord] = []
+        for key in digests:
+            records.append(cls(
+                id=digests[key],
+                refs=tuple(refs[key].values()),
+                guests=tuple(sorted(guests[key])),
+                holds=tuple(holds[key]),
+            ))
+        # Stable, deterministic order: by the rendered content id.
+        return sorted(records, key=lambda r: r.id.render())
+
+    @classmethod
+    def get(cls, ref: "str | Digest | OciReference") -> "ImageRecord":
+        """The ledger entry for ONE managed image (§12.4).
+
+        Accepts all three input forms (LOCKED run 36): a ``str`` (a tag, a
+        rendered digest, or a bare content-id hex), a ``Digest``, or an
+        ``OciReference``. Resolves the input to a content id, then returns the
+        matching record from :meth:`list` (so ``get`` reports the SAME composed
+        guest/hold/ref view ``list`` does, never a partial one).
+
+        Raises ``ImageNotFoundError`` when the input does not name a kento
+        -MANAGED image (no record in :meth:`list` is keyed on that id) — a typed
+        raise (principle 5), never a fabricated empty record. Note this is
+        distinct from ``image.record()``, which is TOTAL (an unmanaged image
+        still has an empty record): ``get`` reports only the *managed* set, so a
+        miss is a not-found, matching ``Instance.get`` / ``OciImage.get``.
+        """
+        target = cls._coerce_to_id(ref)
+        rendered = target.render()
+        for record in cls.list():
+            if record.id.render() == rendered:
+                return record
+        raise ImageNotFoundError(
+            f"no kento-managed image record for: {ref}"
+            " — it is neither referenced by a guest nor pinned by a hold."
+            "  Run 'kento images' to see managed images."
+        )
+
+    @classmethod
+    def _for_id(cls, digest: Digest) -> "ImageRecord":
+        """Build the TOTAL record for a content ``id`` (``image.record()`` core).
+
+        Scans the managed dataset (:meth:`list`) for the record keyed on
+        ``digest`` and returns it; if the image is NOT managed (no guest ref, no
+        hold) returns an EMPTY record (``refs``/``guests``/``holds`` empty) rather
+        than ``None`` — ``image.record()`` is TOTAL (§12.4). The image's own
+        resolved id is the key; ``refs`` is derived from the managed markers only
+        (an unmanaged image has seen no kento tag), so an empty record has
+        ``refs=()`` and is therefore ``dangling`` from kento's ledger POV — which
+        is correct: kento holds no marker for it.
+        """
+        rendered = digest.render()
+        for record in cls.list():
+            if record.id.render() == rendered:
+                return record
+        return cls(id=digest)
+
+    @staticmethod
+    def _coerce_to_id(ref: "str | Digest | OciReference") -> Digest:
+        """Resolve a ``str | Digest | OciReference`` input to a content ``Digest``.
+
+        * a ``Digest`` is the id already — returned as-is (no podman call);
+        * an ``OciReference`` is resolved to its content id via
+          ``OciImage.resolve_id`` (raises ``ImageNotFoundError`` if not local);
+        * a ``str`` is interpreted faithfully: a bare 64-hex content id or a
+          rendered ``algorithm:encoded`` digest becomes a ``Digest`` directly
+          (no podman call needed — it IS the id); any other string is a
+          reference, parsed via ``OciReference.parse`` then resolved.
+
+        Never hands an unvalidated string to the shell (§2 principle 3): a string
+        is parsed/typed before any podman call.
+        """
+        if isinstance(ref, Digest):
+            return ref
+        if isinstance(ref, OciReference):
+            return OciImage.resolve_id(ref.render())
+        # A str: a bare content id or a rendered digest is the id itself; any
+        # other string is a reference to resolve.
+        if _RE_BARE_SHA256.match(ref):
+            return _digest_from_podman_id(ref)
+        if ":" in ref:
+            # Could be a rendered digest (algorithm:encoded) OR a repo:tag. A
+            # digest's encoded part is hex of the algorithm's fixed length; try
+            # Digest.parse first and fall back to a reference on failure.
+            try:
+                return Digest.parse(ref)
+            except KentoError:
+                pass
+        return OciImage.resolve_id(OciReference.parse(ref).render())
+
+
+# --------------------------------------------------------------------------- #
 # Image — the abstract resolved-artifact base (§4.1).
 # --------------------------------------------------------------------------- #
 
@@ -360,6 +679,52 @@ class Image(ABC):
         persist across restarts), so the base contract does not destroy it.
         """
 
+    # ----- ledger navigation (§12.4) — lazy method, TOTAL -----
+    def record(self) -> "ImageRecord":
+        """The kento LEDGER entry about THIS image — the inverse of
+        :meth:`ImageRecord.resolve` (§12.4).
+
+        Builds the typed projection of kento's own markers (guest ``kento-image``
+        references + ``kento-hold.<guest>`` holds) for this image's content
+        ``id``. It is the inverse navigation of ``ImageRecord.resolve()`` (which
+        goes record → artifact); this goes artifact → record.
+
+        **TOTAL** — an image that no guest references and no hold pins still has
+        a record (``guests=()``, ``holds=()``); it NEVER returns ``None`` (§12.4).
+        Such an image is simply not in the *managed* dataset
+        ``ImageRecord.list`` reports, but its record is still a well-defined,
+        empty-marker value (``refs`` derived from the image's own resolved
+        identity, never the markers).
+
+        **Lazy METHOD, not a stored field** (§12.4): performs I/O (it scans the
+        kento markers, §2 principle 2), so it is an explicit named call, not a
+        property — and storing it on a frozen ``Image`` would break Image's
+        one-source purity and create a frozen circular reference. The mutual
+        ``ImageRecord`` import is LOCAL to this method (the existing
+        family-cycle pattern; ``ImageRecord`` is defined below in this module).
+
+        The base implementation needs only the image's resolved content ``id``;
+        a member whose identity is NOT a content ``Digest`` (a future writable
+        image) cannot have a content-keyed ledger entry, so the base raises a
+        typed ``StateError`` and a content-addressed member (``OciImage``)
+        supplies its ``id`` via :meth:`_record_id`. (No abstract churn: a single
+        overridable hook, defaulting to "no content id".)
+        """
+        return ImageRecord._for_id(self._record_id())
+
+    def _record_id(self) -> Digest:
+        """The content ``Digest`` this image's ledger entry is keyed on (§12.4).
+
+        Default: an ``Image`` with no content-addressed identity (a future
+        writable image) cannot key a content ledger entry — a typed
+        ``StateError`` rather than a fabricated value (principle 5, gate C).
+        ``OciImage`` overrides this with its resolved ``id``.
+        """
+        raise StateError(
+            f"{type(self).__name__} has no content id; only content-addressed "
+            "images (OciImage) have a kento image-record"
+        )
+
 
 # --------------------------------------------------------------------------- #
 # LayeredImage — the abstract "layering" node (§4.1, AMENDED run 36).
@@ -447,6 +812,15 @@ class OciImage(LayeredImage):
     def is_writable(self) -> bool:
         """OCI store layers are read-only by spec → always ``False`` (§4.1)."""
         return False
+
+    def _record_id(self) -> Digest:
+        """This OCI image's resolved content ``id`` keys its ledger entry (§12.4).
+
+        Overrides the base "no content id" hook with the content-addressed
+        ``Digest`` this handle already carries, so ``image.record()`` builds a
+        ledger entry keyed on the same content id ``ImageRecord.list`` groups by.
+        """
+        return self.id
 
     def __post_init__(self) -> None:
         # Freeze an iterable ``layers`` argument to a tuple (the frozen-dataclass
@@ -587,9 +961,10 @@ class OciImage(LayeredImage):
     def list(cls) -> "list[OciImage]":
         """Enumerate local OCI images as resolved handles (M21).
 
-        Queries ``podman images`` for repository references (new, additive — we
-        do NOT wrap ``images.list_images()``, which renders a DISPLAY TABLE
-        STRING, not objects), then resolves each to an ``OciImage``.
+        Queries ``podman images`` for repository references directly (the
+        whole-store podman view — distinct from ``ImageRecord.list``, which is
+        kento's MANAGED ledger, the guest/hold subset), then resolves each to an
+        ``OciImage``.
 
         TOTAL OVER THE STORE (disclosed policy, grounded in §2 + §7.2's
         ``Status.UNKNOWN`` totality rationale): a single image that fails to

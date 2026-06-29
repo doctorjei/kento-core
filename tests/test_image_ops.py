@@ -463,16 +463,20 @@ def test_is_held_matches_bare_hex_and_prefixed_label():
 # --------------------------------------------------------------------------- #
 
 
-def test_ops_do_not_wrap_display_list_images():
-    # list() must NOT call images.list_images() (a display TABLE STRING).
+def test_ops_query_podman_images_directly():
+    # list() composes the `podman images` enumeration directly. (The former
+    # string-returning images.list_images() it was once asserted NOT to wrap was
+    # REMOVED in SD3 — the library no longer renders a display table; the typed
+    # ImageRecord ledger replaced it. So the guarantee is now structural: there
+    # is no display-table builder to wrap.)
     out = "docker.io/library/ubuntu:latest\n"
-    with patch("kento.images.list_images") as m_display, \
-         patch("kento.subprocess_util.subprocess.run",
-               side_effect=_images_query_run(out)), \
+    with patch("kento.subprocess_util.subprocess.run",
+               side_effect=_images_query_run(out)) as m_run, \
          patch.object(OciImage, "resolve",
                       side_effect=lambda oci: _resolved_img(oci)):
         OciImage.list()
-    m_display.assert_not_called()
+    assert not hasattr(__import__("kento.images", fromlist=["x"]), "list_images")
+    assert m_run.call_args_list[0].args[0][:2] == ["podman", "images"]
 
 
 # --------------------------------------------------------------------------- #
