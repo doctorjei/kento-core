@@ -4,7 +4,7 @@
 Runs on a REAL host (podman store + real images + root for overlay mounts) and
 exercises the typed surface the way a non-kento-cli consumer would (`import
 kento`), covering the I/O-wrapping ops that unit tests (mocked subprocess)
-cannot: LayeredImage.list/get/resolve_id, a pull+remove round-trip, and the
+cannot: OciImage.list/get/resolve_id, a pull+remove round-trip, and the
 real-overlay runtime lifecycle prepare/mount/unmount/release.
 
 Self-contained + cleans up what it creates. Exit 0 = all pass; non-zero on any
@@ -57,7 +57,7 @@ check("flat surface present", lambda: (
     f"{len(kento.__all__)} names"
     if all(hasattr(kento, n) for n in (
         "OciReference", "NetworkConnection", "PlatformProfile", "Status",
-        "StorageMode", "Image", "LayeredImage", "Layer", "Diagnosis",
+        "StorageMode", "Image", "LayeredImage", "OciImage", "Layer", "Diagnosis",
         "ReclaimReport"))
     else (_ for _ in ()).throw(AssertionError("missing a public name"))))
 
@@ -88,34 +88,34 @@ _local = subprocess.run(
     capture_output=True, text=True).stdout
 
 def _list_nonempty():
-    imgs = kento.LayeredImage.list()
+    imgs = kento.OciImage.list()
     assert isinstance(imgs, list)
     # bifrost has tagged images present; an empty list here means every entry
     # silently failed to resolve (the totality guard masking a resolve bug).
     assert imgs, "list() returned 0 — every image failed to resolve (masked bug)"
-    assert all(isinstance(i, kento.LayeredImage) for i in imgs)
+    assert all(isinstance(i, kento.OciImage) for i in imgs)
     assert all(isinstance(i.id, kento.Digest) for i in imgs)
     return f"{len(imgs)} images, all with Digest ids"
 
 
-check("LayeredImage.list() resolves real images", _list_nonempty)
+check("OciImage.list() resolves real images", _list_nonempty)
 
 
 def _get_rootfs():
-    img = kento.LayeredImage.get(ROOTFS_IMAGE)
-    assert isinstance(img, kento.LayeredImage)
+    img = kento.OciImage.get(ROOTFS_IMAGE)
+    assert isinstance(img, kento.OciImage)
     assert isinstance(img.id, kento.Digest), "id is not a Digest"
     assert img.layers, "no layers resolved"
     assert isinstance(img.overlay_root, Path), "overlay_root not a Path"
     return f"{len(img.layers)} layers, id={img.id.render()[:19]}…"
 
 
-check(f"LayeredImage.get({ROOTFS_IMAGE!r})", _get_rootfs)
-check("LayeredImage.resolve_id -> Digest", lambda: (
-    kento.LayeredImage.resolve_id(ROOTFS_IMAGE).render()[:19] + "…"))
+check(f"OciImage.get({ROOTFS_IMAGE!r})", _get_rootfs)
+check("OciImage.resolve_id -> Digest", lambda: (
+    kento.OciImage.resolve_id(ROOTFS_IMAGE).render()[:19] + "…"))
 check("get(absent) raises ImageNotFoundError", lambda: (
     "raised" if _raises(
-        lambda: kento.LayeredImage.get("localhost/does-not-exist:nope"),
+        lambda: kento.OciImage.get("localhost/does-not-exist:nope"),
         kento.ImageNotFoundError)
     else (_ for _ in ()).throw(AssertionError("did not raise"))))
 
@@ -124,8 +124,8 @@ section("D. pull + remove round-trip (self-contained)")
 
 
 def _pull_remove():
-    img = kento.LayeredImage.pull(PULL_IMAGE)
-    assert isinstance(img, kento.LayeredImage)
+    img = kento.OciImage.pull(PULL_IMAGE)
+    assert isinstance(img, kento.OciImage)
     rid = img.id.render()
     # remove the handle we just pulled (not held -> should succeed)
     img.remove()
@@ -141,7 +141,7 @@ section("E. runtime lifecycle on a REAL overlay (root): prepare/mount/unmount/re
 
 
 def _lifecycle():
-    img = kento.LayeredImage.get(ROOTFS_IMAGE)
+    img = kento.OciImage.get(ROOTFS_IMAGE)
     state = Path(tempfile.mkdtemp(prefix="kento-smoke-state-"))
     host = Path(tempfile.mkdtemp(prefix="kento-smoke-host-"))
     mounted = False

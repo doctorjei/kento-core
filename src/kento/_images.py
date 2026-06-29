@@ -1,33 +1,51 @@
-"""The ``Image`` family — resolved, mountable/bootable base artifacts.
+"""The ``Image`` family — directory-tree views of a data source.
 
 A ``SourceReference`` (§3.8, a *locator* — unresolved) **resolves to** an
-``Image`` (this module — the *resolved* base artifact an instance boots from).
-The family is keyed by **representation** (how the base is stored & overlaid),
-orthogonal to the locator's scheme:
+``Image`` (this module). An ``Image`` is **a (possibly writable) directory-tree
+VIEW OF A DATA SOURCE** (§4.1, AMENDED run 36): members may be read-only (OCI,
+content-addressed) OR writable (a volume / dir-backed view). The family is keyed
+by **representation** (how the base is stored & overlaid), orthogonal to the
+locator's scheme:
 
-* ``LayeredImage`` — a union of read-only filesystem layers (overlayfs). The
-  1.0, OCI-backed representation kento ships today.
+* ``LayeredImage`` (ABC) — "the layering": a union of read-only directory layers
+  (overlayfs). Abstract and source-agnostic; the concrete layer shape + identity
+  are decided per subclass.
+* ``OciImage`` — the podman/OCI-store ``LayeredImage``. The ONLY built member for
+  1.0; holds all the OCI/podman specifics (``source: OciReference``, the content
+  ``id``, ``layers``, ``overlay_root``) and the full lifecycle.
 * ``VolumeImage`` — one partition (single fs) over block-overlay. The first
   post-1.0 feature; declared here as a **documented stub** with NO lifecycle.
 * ``CompositeImage`` — Images composited at mount points (the image-lifecycle
   EPIC's mount facility). **Plan only**, NOT built up front; a documented stub.
 
+**Capability vs policy (§4.1).** ``Image.is_writable()`` is the *capability* —
+can the underlying data source be written? — determined by the source, not the
+representation class (``OciImage`` → ``False`` because OCI store layers are
+read-only by spec; a future volume/dir view answers per-source). HOW an instance
+mounts the image (read-only vs read-write) is a separate *policy* carried by
+``instance.storage: StorageMode`` — NOT a field on the image.
+
+**Identity (§4.1, §4.3).** Identity is the ``source`` universally (on the base).
+A content ``Digest`` (``id``) is the *content-addressed addition* a member like
+``OciImage`` carries; it is NOT on the base, because a future writable image's
+identity is its location, not a digest. ``OciImage.id`` is the *resolved* content
+identity and is **not** the locator's OCI-only ``digest`` pin — do not conflate
+the two (§4.3 last bullet).
+
 Two layers, two rules (§2 principle 2). The ``Image`` *dataclass fields* are
-inert, frozen value data (``source`` / ``id`` / ``kernel`` / ``initramfs``);
-they carry no I/O. The **runtime-lifecycle methods** are the named, enumerable
-moments where the handle reaches the outside world — ``prepare`` / ``mount`` /
-``unmount`` / ``release`` (§4.4). These are ADDITIVE wrappers (Phase 2): they
-**delegate** to the existing procedural functions in ``kento.layers`` and
-``kento.vm`` and do NOT reimplement their logic or touch their live callers
-(``create.py`` / ``vm.py`` / ``hook.py`` / the CLI) — that re-point is Phase 6.
+inert, frozen value data; they carry no I/O. The **runtime-lifecycle methods**
+are the named, enumerable moments where the handle reaches the outside world —
+``prepare`` / ``mount`` / ``unmount`` / ``release`` (§4.4). On ``OciImage`` these
+are ADDITIVE wrappers: they **delegate** to the existing procedural functions in
+``kento.layers`` and ``kento.vm`` and do NOT reimplement their logic or touch
+their live callers (``create.py`` / ``vm.py`` / ``hook.py`` / the CLI).
 
-The public surface (``Image``, ``LayeredImage``, ``Layer``, ``DiskFormat``,
-``VolumeImage``, ``CompositeImage``) is re-exported flat from ``kento`` — refer
-to ``kento.LayeredImage``, not ``kento._images.LayeredImage``.
+The public surface (``Image``, ``LayeredImage``, ``OciImage``, ``Layer``,
+``DiskFormat``, ``VolumeImage``, ``CompositeImage``) is re-exported flat from
+``kento`` — refer to ``kento.OciImage``, not ``kento._images.OciImage``.
 
-Spec: ``~/workspace/kento-core-api-design.md`` §2, §4 (the ``Image`` family),
-§3.8 (``Digest`` is the content id; ``Image.id`` is a ``Digest`` and is **not**
-the locator's OCI-only ``digest`` pin — §4.3).
+Spec: ``~/workspace/kento-core-api-design.md`` §4.1 (AMENDED run 36), §4.3, §4.4,
+§12.1; §3.8 (``Digest`` is the content id).
 """
 
 from __future__ import annotations
@@ -49,6 +67,7 @@ __all__ = [
     "Layer",
     "Image",
     "LayeredImage",
+    "OciImage",
     "VolumeImage",
     "CompositeImage",
 ]
@@ -77,7 +96,7 @@ class DiskFormat(str, Enum):
 
 @dataclass(frozen=True)
 class Layer:
-    """One read-only podman-store layer of a ``LayeredImage`` (§4.1).
+    """One read-only podman-store layer of an ``OciImage`` (§4.1).
 
     A pure value (no I/O). ``id`` is the podman internal layer id — the
     ``<id>`` in ``<overlay_root>/<id>/diff``. ``short_link`` is the ``l/<short>``
@@ -99,19 +118,32 @@ class Layer:
 
 @dataclass(frozen=True, kw_only=True)
 class Image(ABC):
-    """A resolved, mountable/bootable base artifact — the family base (§4.1).
+    """A (possibly writable) directory-tree VIEW OF A DATA SOURCE (§4.1).
+
+    Generalized run 36: an ``Image`` is no longer "a resolved read-only base"
+    but a directory-tree view that MAY be read-only (OCI, content-addressed) OR
+    writable (a volume / dir-backed view). Identity is the ``source``
+    universally; a content ``Digest`` is the content-addressed *addition* a
+    member carries (see ``OciImage.id``), NOT a base field — a writable image's
+    identity is its location, not a digest, so a mandatory ``id`` on the base
+    would PRECLUDE writable images (§4.1).
 
     Frozen, inert value fields (§2 principle 2 — a property never performs I/O):
 
     * ``source`` — the ``SourceReference`` locator this resolved from (narrowed
-      to ``OciReference`` on ``LayeredImage``).
-    * ``id`` — the content **identity**, a ``Digest`` (§4.3). This is the
-      *resolved* identity, **not** the locator's OCI-only ``digest`` pin — do
-      not conflate the two (§4.3 last bullet).
+      per subclass, e.g. to ``OciReference`` on ``OciImage``).
     * ``kernel`` / ``initramfs`` — OPTIONAL off-image kernel override for
       Linux/VM direct-kernel-boot, on ANY image (§4.3). ``None`` means use the
-      in-image ``/boot`` (Layered) or the gemet default; ignored for LXC and
-      the future firmware/non-Linux path.
+      in-image ``/boot`` or the gemet default; ignored for LXC and the future
+      firmware/non-Linux path.
+
+    **Capability vs policy (§4.1).** ``is_writable()`` is the *capability* — can
+    the underlying data source be written? — determined by the data source, NOT
+    readable off the representation class for all members (``OciImage`` →
+    ``False``; a future volume/dir view → per-source). It is distinct from the
+    mount *policy* (read-only vs read-write), which is the instance's call via
+    ``instance.storage: StorageMode`` (§8) — there is deliberately NO mount-mode
+    field here.
 
     The **runtime lifecycle** is the abstract contract every concrete image
     implements (§4.4) — two primitives plus their inverses, the named moments
@@ -124,24 +156,40 @@ class Image(ABC):
     * ``unmount`` / ``release`` — the inverses, run in reverse order on
       teardown.
 
-    They are declared ``abstractmethod`` here so ``Image`` is genuinely
-    abstract (cannot be instantiated) and so a concrete subclass that forgets a
-    primitive fails loudly at definition rather than silently no-op'ing (gate
-    C). ``LayeredImage`` implements all four; ``VolumeImage`` / ``CompositeImage``
-    are documented stubs that deliberately leave them unimplemented and so stay
-    abstract/uninstantiable until they are built (§4.5).
+    They — together with ``is_writable`` — are declared ``abstractmethod`` here
+    so ``Image`` is genuinely abstract (cannot be instantiated) and so a concrete
+    subclass that forgets one fails loudly at definition rather than silently
+    no-op'ing (gate C). ``OciImage`` implements all of them; ``VolumeImage`` /
+    ``CompositeImage`` are documented stubs that deliberately leave them
+    unimplemented and so stay abstract/uninstantiable until they are built (§4.5).
 
-    These methods perform I/O (principle 2) and are kept **total functions of
-    their explicit arguments** plus the image's own resolved value: a frozen
-    value cannot carry mutable mount state, so the host directory and the
-    writable state directory are passed in by the caller (kento's create/start
-    routine, which owns that on-disk layout) rather than stashed on the image.
+    The lifecycle methods perform I/O (principle 2) and are kept **total
+    functions of their explicit arguments** plus the image's own resolved value:
+    a frozen value cannot carry mutable mount state, so the host directory and
+    the writable state directory are passed in by the caller (kento's
+    create/start routine, which owns that on-disk layout) rather than stashed on
+    the image.
     """
 
     source: SourceReference
-    id: Digest
     kernel: Path | None = None
     initramfs: Path | None = None
+
+    # ----- capability contract (§4.1) — abstract on the base -----
+    @abstractmethod
+    def is_writable(self) -> bool:
+        """Can the underlying data source be written? (§4.1).
+
+        The image CAPABILITY (data-source-determined), NOT the mount policy
+        (read-only vs read-write), which is the instance's call via
+        ``instance.storage: StorageMode`` (§8). ``OciImage`` → ``False`` (OCI
+        store layers are read-only by spec); a future volume / dir-backed view
+        answers per its own source.
+
+        Abstract here so the family base does not assume read-only-ness (the
+        whole point of the run-36 generalization) and a concrete member that
+        forgets to declare its writability fails loudly (gate C).
+        """
 
     # ----- runtime-lifecycle contract (§4.4) — abstract on the base -----
     @abstractmethod
@@ -172,7 +220,7 @@ class Image(ABC):
     def release(self, state_dir: Path) -> None:
         """Inverse of ``prepare`` — release materialized state (§4.4).
 
-        Run AFTER ``unmount`` on teardown (reverse order). For a ``LayeredImage``
+        Run AFTER ``unmount`` on teardown (reverse order). For an ``OciImage``
         the materialized state is the writable upper/work tree under
         ``state_dir``; releasing it is the caller's storage policy (it may
         persist across restarts), so the base contract does not destroy it.
@@ -180,27 +228,72 @@ class Image(ABC):
 
 
 # --------------------------------------------------------------------------- #
-# LayeredImage — the 1.0, OCI-backed overlayfs representation (§4.1, §4.4).
+# LayeredImage — the abstract "layering" node (§4.1, AMENDED run 36).
 #
-# The only representation with an implemented runtime lifecycle in 1.0. Every
-# lifecycle method is an ADDITIVE wrapper over the existing procedural functions
-# (kento.layers / kento.vm) — it delegates, it does not fork their logic.
+# A union of read-only directory layers (overlayfs). ABSTRACT and
+# source-agnostic: it carries NO concrete fields or methods. The concrete layer
+# shape, identity, and lifecycle are decided per subclass — for 1.0 the only
+# concrete member is ``OciImage`` (below). The shared dir-layer abstraction (a
+# common layer model usable by both OCI and a future ``LocalDirectoryImage``) is
+# deliberately NOT worked out here; it is settled only when ``LocalDirectoryImage``
+# lands (a future block), so that the abstraction is designed against two real
+# members rather than guessed from one. Leaving it a pure marker now avoids
+# baking OCI-shaped assumptions into the shared parent (gate C).
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True, kw_only=True)
-class LayeredImage(Image):
-    """A union of read-only filesystem layers (overlayfs); OCI-only for 1.0.
+class LayeredImage(Image, ABC):
+    """The "layering": a UNION of read-only directory layers (overlayfs) (§4.1).
 
-    ``source`` is narrowed to an ``OciReference``. ``layers`` are the ordered
-    lowerdirs (top→bottom; each ``Layer.id`` is the podman ``<id>`` in
-    ``<overlay_root>/<id>/diff``, §4.1) and ``overlay_root`` is the shared
-    podman-store base — the directory a mount ``chdir``s into so the short
-    ``l/<short>`` lowerdir entries resolve. Both are MANDATORY (§4.1 verbatim —
-    no defaults): a ``LayeredImage`` is by definition a populated union, and a
-    layer-less / rootless one would be a degenerate value whose mount renders
-    ``""`` (gate C). Construct via :meth:`resolve`, or supply both fields
-    explicitly.
+    **ABSTRACT — uninstantiable.** Source-agnostic; it adds nothing concrete over
+    ``Image`` (no fields, no methods). It still inherits ``Image``'s abstract
+    contract (``is_writable`` + ``prepare`` / ``mount`` / ``unmount`` /
+    ``release``), so it remains abstract and cannot be constructed. The concrete
+    layer shape + identity are decided per subclass.
+
+    Judgment call (disclosed): kept a **pure minimal marker** — no shared
+    dir-layer fields/methods yet. That shared abstraction (what OCI and a future
+    ``LocalDirectoryImage`` have in common) is worked out only when the second
+    member lands, so it is designed against two real cases rather than guessed
+    from one. For 1.0 the sole concrete member is ``OciImage``.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# OciImage — the 1.0, OCI/podman-backed overlayfs representation (§4.1, §4.4).
+#
+# The only built ``LayeredImage`` for 1.0; holds ALL the OCI/podman specifics
+# (``source: OciReference``, the content ``id``, ``layers``, ``overlay_root``)
+# and the full content + runtime lifecycle. Every lifecycle method is an ADDITIVE
+# wrapper over the existing procedural functions (kento.layers / kento.vm) — it
+# delegates, it does not fork their logic.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, kw_only=True)
+class OciImage(LayeredImage):
+    """The podman/OCI-store ``LayeredImage`` — the ONLY built member for 1.0.
+
+    Holds everything OCI/podman-specific (§4.1, AMENDED run 36 — demoted here off
+    the base + the abstract ``LayeredImage``):
+
+    * ``source`` is narrowed to an ``OciReference``.
+    * ``id`` — the content **identity**, a ``Digest`` (content-addressed; §4.3).
+      This is the *resolved* identity, **not** the locator's OCI-only ``digest``
+      pin — do not conflate the two (§4.3 last bullet). It lives HERE (not on the
+      base) because identity is content-addressed only for content-addressed
+      members; a writable image's identity is its location.
+    * ``layers`` are the ordered lowerdirs (top→bottom; each ``Layer.id`` is the
+      podman ``<id>`` in ``<overlay_root>/<id>/diff``, §4.1) and ``overlay_root``
+      is the shared podman-store base — the directory a mount ``chdir``s into so
+      the short ``l/<short>`` lowerdir entries resolve. Both are MANDATORY (§4.1
+      verbatim — no defaults): an ``OciImage`` is by definition a populated union,
+      and a layer-less / rootless one would be a degenerate value whose mount
+      renders ``""`` (gate C). Construct via :meth:`resolve`, or supply both
+      fields explicitly.
+
+    ``is_writable()`` is ``False``: OCI store layers are read-only by spec.
 
     The absolute lowerdir is the uniform join ``<overlay_root>/<id>/diff`` over
     ``layers``. ``overlay_root`` is a real ``Path`` per §4.1 (never
@@ -213,8 +306,13 @@ class LayeredImage(Image):
     """
 
     source: OciReference
+    id: Digest
     layers: tuple[Layer, ...]
     overlay_root: Path
+
+    def is_writable(self) -> bool:
+        """OCI store layers are read-only by spec → always ``False`` (§4.1)."""
+        return False
 
     def __post_init__(self) -> None:
         # Freeze an iterable ``layers`` argument to a tuple (the frozen-dataclass
@@ -228,11 +326,11 @@ class LayeredImage(Image):
     #
     # The typed entry point. Wraps the procedural resolvers in kento.layers
     # and the typed Digest resolver below; builds a fully-populated, frozen
-    # LayeredImage. This is the boundary where a string ref becomes a value.
+    # OciImage. This is the boundary where a string ref becomes a value.
     # ------------------------------------------------------------------- #
     @classmethod
-    def resolve(cls, source: OciReference) -> "LayeredImage":
-        """Resolve an ``OciReference`` to a populated ``LayeredImage`` (§4.3).
+    def resolve(cls, source: OciReference) -> "OciImage":
+        """Resolve an ``OciReference`` to a populated ``OciImage`` (§4.3).
 
         Delegates to ``layers.resolve_layers`` (podman query — raises
         ``ImageNotFoundError`` when the image is not in the local store) and
@@ -304,19 +402,19 @@ class LayeredImage(Image):
     # ------------------------------------------------------------------- #
     # Content lifecycle (§4.4, §11.5 M19–M21/M23) — acquire / enumerate /
     # remove. ADDITIVE wrappers over kento.layers / podman; produce/manage
-    # LayeredImages (the 1.0 OCI-store representation, §4.4).
+    # OciImages (the 1.0 OCI-store representation, §4.4).
     #
     # PLACEMENT (disclosed): §11.5 phrases these `Image.pull -> Self`, but for
-    # 1.0 they are OCI-store ops that produce/manage LayeredImages (§4.4), and
-    # `Image` is a genuine ABC (abstract prepare/mount/...) that cannot be
-    # instantiated — so a classmethod resolving to `cls(...)` only works on the
-    # concrete LayeredImage. They live here as LayeredImage classmethods
-    # (`pull`/`get`/`list`) + instance `remove`; `Self` is satisfied (cls IS
-    # LayeredImage). A future base-`Image` dispatch (when VolumeImage fetch
-    # lands) is purely additive / non-breaking.
+    # 1.0 they are OCI-store ops that produce/manage OciImages (§4.4), and
+    # `Image`/`LayeredImage` are genuine ABCs (abstract is_writable +
+    # prepare/mount/...) that cannot be instantiated — so a classmethod resolving
+    # to `cls(...)` only works on the concrete OciImage. They live here as
+    # OciImage classmethods (`pull`/`get`/`list`) + instance `remove`; `Self` is
+    # satisfied (cls IS OciImage). A future base-`Image` dispatch (when
+    # VolumeImage fetch lands) is purely additive / non-breaking.
     # ------------------------------------------------------------------- #
     @classmethod
-    def pull(cls, ref: "str | OciReference") -> "LayeredImage":
+    def pull(cls, ref: "str | OciReference") -> "OciImage":
         """Acquire an OCI image from a registry into the local store (M19).
 
         ``podman pull <ref>``, then resolve the now-local image to a populated
@@ -340,7 +438,7 @@ class LayeredImage(Image):
         return cls.resolve(oci)
 
     @classmethod
-    def get(cls, ref: "str | OciReference") -> "LayeredImage":
+    def get(cls, ref: "str | OciReference") -> "OciImage":
         """Resolve an ALREADY-LOCAL image to a handle; no network (M20).
 
         Read-only: :meth:`resolve` queries the local podman store only (no
@@ -352,12 +450,12 @@ class LayeredImage(Image):
         return cls.resolve(cls._coerce_ref(ref))
 
     @classmethod
-    def list(cls) -> "list[LayeredImage]":
+    def list(cls) -> "list[OciImage]":
         """Enumerate local OCI images as resolved handles (M21).
 
         Queries ``podman images`` for repository references (new, additive — we
         do NOT wrap ``images.list_images()``, which renders a DISPLAY TABLE
-        STRING, not objects), then resolves each to a ``LayeredImage``.
+        STRING, not objects), then resolves each to an ``OciImage``.
 
         TOTAL OVER THE STORE (disclosed policy, grounded in §2 + §7.2's
         ``Status.UNKNOWN`` totality rationale): a single image that fails to
@@ -377,7 +475,7 @@ class LayeredImage(Image):
              "--format", "{{.Repository}}:{{.Tag}}"],
             "list images",
         )
-        images: list[LayeredImage] = []
+        images: list[OciImage] = []
         for line in result.stdout.splitlines():
             entry = line.strip()
             # podman renders a dangling (untagged) image as "<none>:<none>";
@@ -804,17 +902,25 @@ class VolumeImage(Image):
 
     **STUB — NOT BUILT IN 1.0 (§4.5).** The fields are declared per §4.1 so the
     family shape is visible and the ``Image`` ABC is shown to accommodate the
-    block representation non-breakingly (principle 7), but **no runtime
-    lifecycle is implemented**: ``VolumeImage`` therefore inherits ``Image``'s
-    abstract ``prepare``/``mount``/``unmount``/``release`` unimplemented and is
-    consequently **abstract / uninstantiable** until the feature lands. Do not
-    construct it; do not wire it into resolution.
+    block representation non-breakingly (principle 7), but **no capability or
+    runtime lifecycle is implemented**: ``VolumeImage`` therefore inherits
+    ``Image``'s abstract ``is_writable`` + ``prepare``/``mount``/``unmount``/
+    ``release`` unimplemented and is consequently **abstract / uninstantiable**
+    until the feature lands. Leaving them inherited-abstract (rather than adding
+    a stub-raise body) is the minimum that keeps the stub uninstantiable while
+    declaring nothing it would have to re-decide when built. Do not construct it;
+    do not wire it into resolution.
 
     Fields (§4.1):
 
-    * ``path`` — the resolved read-only base partition image.
+    * ``path`` — the resolved base partition image.
     * ``format`` — ``DiskFormat`` (RAW | QCOW2).
     * ``backing`` — block backing chain (qcow2); the base may itself be a chain.
+    * ``id`` — ``Digest | None``: a content ``Digest`` when read-only /
+      content-addressed, ``None`` when writable (identity = location, not a
+      digest). Declared here rather than on the base because identity is
+      content-addressed only for content-addressed members (§4.1, run-36
+      demotion); a ``VolumeImage`` may be either, hence the ``| None``.
 
     The per-instance writable UPPER is created at ``prepare`` and governed by
     ``StorageMode`` — it is instance/runtime state, NOT a field here (§4.3).
@@ -826,6 +932,7 @@ class VolumeImage(Image):
     path: Path
     format: DiskFormat
     backing: "VolumeImage | None"
+    id: Digest | None
 
 
 # --------------------------------------------------------------------------- #
@@ -838,14 +945,14 @@ class CompositeImage(Image):
     """Images composited at mount points — **PLAN ONLY, not built up front**.
 
     **STUB — NOT BUILT (§4.5).** ``mounts`` maps a mountpoint to an ``Image``,
-    e.g. ``{"/": LayeredImage, "/home": VolumeImage}`` — this is the
-    image-lifecycle EPIC's mount facility / per-path persistence ("persistent
-    ``/home`` over an ephemeral root"); the root mount (``"/"``) is the bootable
-    one. Declared with its field per §4.1 so the ``Image`` ABC is shown to
-    accommodate composition non-breakingly (principle 7), but **no runtime
-    lifecycle is implemented** — it inherits ``Image``'s abstract primitives
-    unimplemented and is therefore **abstract / uninstantiable** until it is
-    built. Do not construct it; do not wire it into resolution.
+    e.g. ``{"/": OciImage, "/home": VolumeImage}`` — this is the image-lifecycle
+    EPIC's mount facility / per-path persistence ("persistent ``/home`` over an
+    ephemeral root"); the root mount (``"/"``) is the bootable one. Declared with
+    its field per §4.1 so the ``Image`` ABC is shown to accommodate composition
+    non-breakingly (principle 7), but **no capability or runtime lifecycle is
+    implemented** — it inherits ``Image``'s abstract ``is_writable`` + lifecycle
+    primitives unimplemented and is therefore **abstract / uninstantiable** until
+    it is built. Do not construct it; do not wire it into resolution.
     """
 
     mounts: dict[str, Image]

@@ -1,9 +1,9 @@
 """Tests for the ``Image`` content-lifecycle handle ops (Block 06 — kento._images).
 
-``LayeredImage.pull`` / ``get`` / ``list`` / ``remove`` (§4.4, §11.5 M19–M23).
+``OciImage.pull`` / ``get`` / ``list`` / ``remove`` (§4.4, §11.5 M19–M23).
 All are ADDITIVE wrappers over kento.layers / podman; the tests assert
 DELEGATION (no forked podman/hold logic) and the disclosed judgment calls:
-method placement (classmethods on LayeredImage), ``list()`` partial-failure
+method placement (classmethods on OciImage), ``list()`` partial-failure
 policy (total over the store — skip-with-log), and ``str | OciReference``
 normalization (parse a str BEFORE shelling out). All I/O is mocked (no real
 podman). Baseline 1442 passed / 1 skipped must stay green.
@@ -17,7 +17,7 @@ import pytest
 
 from kento import (
     ImageNotFoundError,
-    LayeredImage,
+    OciImage,
     MalformedReference,
     OciReference,
 )
@@ -36,10 +36,10 @@ def _ok(args):
 
 
 def _resolved_img(ref):
-    """A populated LayeredImage to stand in for a resolve() result."""
+    """A populated OciImage to stand in for a resolve() result."""
     from kento import Digest, Layer
 
-    return LayeredImage(
+    return OciImage(
         source=ref,
         id=Digest.parse(DIGEST_STR),
         layers=(Layer(id="ID1", short_link=""),),
@@ -57,8 +57,8 @@ def test_pull_runs_podman_pull_then_resolves():
     sentinel = _resolved_img(ref)
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=lambda *a, **k: _ok(a[0])) as m_run, \
-         patch.object(LayeredImage, "resolve", return_value=sentinel) as m_res:
-        img = LayeredImage.pull(ref)
+         patch.object(OciImage, "resolve", return_value=sentinel) as m_res:
+        img = OciImage.pull(ref)
 
     # Delegation: podman pull <rendered ref>, then resolve(ref).
     pull_cmds = [c.args[0] for c in m_run.call_args_list]
@@ -71,14 +71,14 @@ def test_pull_accepts_str_and_parses_before_shelling_out():
     # A str ref is parsed/validated through OciReference.parse BEFORE podman.
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=lambda *a, **k: _ok(a[0])) as m_run, \
-         patch.object(LayeredImage, "resolve",
+         patch.object(OciImage, "resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        img = LayeredImage.pull("ubuntu:latest")
+        img = OciImage.pull("ubuntu:latest")
 
     # resolve() received a parsed OciReference, not the raw string.
     (called_ref,), _ = m_res.call_args
     assert isinstance(called_ref, OciReference)
-    assert isinstance(img, LayeredImage)
+    assert isinstance(img, OciImage)
     assert ["podman", "pull", called_ref.render()] in \
         [c.args[0] for c in m_run.call_args_list]
 
@@ -86,14 +86,14 @@ def test_pull_accepts_str_and_parses_before_shelling_out():
 def test_pull_malformed_str_raises_before_any_podman_call():
     with patch("kento.subprocess_util.subprocess.run") as m_run:
         with pytest.raises(MalformedReference):
-            LayeredImage.pull("UPPER/case@bad")  # invalid ref grammar
+            OciImage.pull("UPPER/case@bad")  # invalid ref grammar
     m_run.assert_not_called()  # never reached the shell
 
 
 def test_pull_no_force_param():
     import inspect
 
-    sig = inspect.signature(LayeredImage.pull)
+    sig = inspect.signature(OciImage.pull)
     assert "force" not in sig.parameters  # M19: force DROPPED
 
 
@@ -106,7 +106,7 @@ def test_pull_raises_typed_on_podman_failure():
 
     with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
         with pytest.raises(SubprocessError):
-            LayeredImage.pull(ref)
+            OciImage.pull(ref)
 
 
 # --------------------------------------------------------------------------- #
@@ -118,8 +118,8 @@ def test_get_delegates_to_resolve_no_pull():
     ref = _ref("ubuntu:latest")
     sentinel = _resolved_img(ref)
     with patch("kento.subprocess_util.subprocess.run") as m_run, \
-         patch.object(LayeredImage, "resolve", return_value=sentinel) as m_res:
-        img = LayeredImage.get(ref)
+         patch.object(OciImage, "resolve", return_value=sentinel) as m_res:
+        img = OciImage.get(ref)
 
     m_res.assert_called_once_with(ref)
     assert img is sentinel
@@ -129,9 +129,9 @@ def test_get_delegates_to_resolve_no_pull():
 
 
 def test_get_accepts_str():
-    with patch.object(LayeredImage, "resolve",
+    with patch.object(OciImage, "resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        LayeredImage.get("ubuntu:latest")
+        OciImage.get("ubuntu:latest")
     (called_ref,), _ = m_res.call_args
     assert isinstance(called_ref, OciReference)
 
@@ -140,10 +140,10 @@ def test_get_absent_raises_not_fabricated():
     # resolve() raises ImageNotFoundError when the image isn't local — get
     # propagates it; it does NOT fabricate a handle.
     ref = _ref("ghost:latest")
-    with patch.object(LayeredImage, "resolve",
+    with patch.object(OciImage, "resolve",
                       side_effect=ImageNotFoundError("absent")):
         with pytest.raises(ImageNotFoundError):
-            LayeredImage.get(ref)
+            OciImage.get(ref)
 
 
 def test_get_absent_raises_through_the_REAL_resolve_path():
@@ -155,7 +155,7 @@ def test_get_absent_raises_through_the_REAL_resolve_path():
     with patch("kento.layers.resolve_layers",
                side_effect=ImageNotFoundError("not in local store")):
         with pytest.raises(ImageNotFoundError):
-            LayeredImage.get(ref)
+            OciImage.get(ref)
 
 
 def test_get_absent_raises_when_resolve_id_returns_empty_REAL_path():
@@ -170,7 +170,7 @@ def test_get_absent_raises_when_resolve_id_returns_empty_REAL_path():
                return_value=("/store/overlay", "ID1/diff")), \
          patch("kento.layers.resolve_image_id", return_value=""):
         with pytest.raises(ImageNotFoundError):
-            LayeredImage.get(ref)
+            OciImage.get(ref)
 
 
 def test_pull_absent_after_pull_raises_through_REAL_resolve_path():
@@ -183,7 +183,7 @@ def test_pull_absent_after_pull_raises_through_REAL_resolve_path():
          patch("kento.layers.resolve_layers",
                side_effect=ImageNotFoundError("still absent")):
         with pytest.raises(ImageNotFoundError):
-            LayeredImage.pull(ref)
+            OciImage.pull(ref)
 
 
 # --------------------------------------------------------------------------- #
@@ -202,25 +202,25 @@ def test_list_enumerates_and_resolves_each():
     out = "docker.io/library/ubuntu:latest\nquay.io/fedora:39\n"
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)) as m_run, \
-         patch.object(LayeredImage, "resolve",
+         patch.object(OciImage, "resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        imgs = LayeredImage.list()
+        imgs = OciImage.list()
 
     # Delegation: a `podman images` query (NOT images.list_images()).
     query = m_run.call_args_list[0].args[0]
     assert query[:2] == ["podman", "images"]
     assert len(imgs) == 2
     assert m_res.call_count == 2
-    assert all(isinstance(i, LayeredImage) for i in imgs)
+    assert all(isinstance(i, OciImage) for i in imgs)
 
 
 def test_list_skips_dangling_none_entries():
     out = "<none>:<none>\ndocker.io/library/ubuntu:latest\n"
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)), \
-         patch.object(LayeredImage, "resolve",
+         patch.object(OciImage, "resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        imgs = LayeredImage.list()
+        imgs = OciImage.list()
     assert len(imgs) == 1  # the <none>:<none> dangling entry is skipped
     assert m_res.call_count == 1
 
@@ -237,8 +237,8 @@ def test_list_total_over_store_skips_unresolvable_entry():
 
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)), \
-         patch.object(LayeredImage, "resolve", side_effect=_resolve):
-        imgs = LayeredImage.list()
+         patch.object(OciImage, "resolve", side_effect=_resolve):
+        imgs = OciImage.list()
     # The good image survives; the unresolvable one is dropped, not raised.
     assert len(imgs) == 1
     assert imgs[0].source.name == "image"
@@ -254,13 +254,13 @@ def test_list_raises_when_enumeration_query_itself_fails():
 
     with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
         with pytest.raises(SubprocessError):
-            LayeredImage.list()
+            OciImage.list()
 
 
 def test_list_empty_store_returns_empty_list():
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run("")):
-        assert LayeredImage.list() == []
+        assert OciImage.list() == []
 
 
 # --------------------------------------------------------------------------- #
@@ -469,9 +469,9 @@ def test_ops_do_not_wrap_display_list_images():
     with patch("kento.images.list_images") as m_display, \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)), \
-         patch.object(LayeredImage, "resolve",
+         patch.object(OciImage, "resolve",
                       side_effect=lambda oci: _resolved_img(oci)):
-        LayeredImage.list()
+        OciImage.list()
     m_display.assert_not_called()
 
 
@@ -513,7 +513,7 @@ def _dispatch_run(*, dangling, rmi_fail=()):
 def test_prune_signature_is_locked_scope_only_no_dry_run():
     import inspect
 
-    sig = inspect.signature(LayeredImage.prune)
+    sig = inspect.signature(OciImage.prune)
     # Exactly one param `scope`, keyword-only, default PruneScope.DANGLING.
     assert list(sig.parameters) == ["scope"]
     p = sig.parameters["scope"]
@@ -525,7 +525,7 @@ def test_prune_signature_is_locked_scope_only_no_dry_run():
     assert "dry_run" not in sig.parameters
     assert "yes" not in sig.parameters
     # It is a classmethod (store-level GC), mirroring pull/get/list.
-    assert isinstance(inspect.getattr_static(LayeredImage, "prune"), classmethod)
+    assert isinstance(inspect.getattr_static(OciImage, "prune"), classmethod)
 
 
 def test_prune_removes_dangling_and_reports_dry_run_false():
@@ -535,7 +535,7 @@ def test_prune_removes_dangling_and_reports_dry_run_false():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
-        report = LayeredImage.prune()
+        report = OciImage.prune()
 
     assert isinstance(report, ReclaimReport)
     # prune EXECUTES — never a dry run (locked sig has no dry_run param).
@@ -558,7 +558,7 @@ def test_prune_empty_store_returns_empty_report():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[])) as m_run:
-        report = LayeredImage.prune()
+        report = OciImage.prune()
 
     assert report == ReclaimReport(dry_run=False, reclaimed=(), failed=())
     # No rmi attempted on an empty dangling set.
@@ -575,7 +575,7 @@ def test_prune_NEVER_touches_a_held_image_even_if_listed_via_label():
          patch("kento.images._holds", return_value=[("guest-a", ID_A)]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
-        report = LayeredImage.prune()
+        report = OciImage.prune()
 
     # ID_A is held → NEVER removed; only the genuinely-unreferenced ID_B is.
     assert set(report.reclaimed) == {ID_B}
@@ -591,7 +591,7 @@ def test_prune_held_skip_via_holds_image_field_no_label():
          patch("kento.images._holds", return_value=[("guest-a", ID_A)]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
-        report = LayeredImage.prune()
+        report = OciImage.prune()
 
     assert set(report.reclaimed) == {ID_B}
     rmi_cmds = [c.args[0] for c in m_run.call_args_list if "rmi" in c.args[0]]
@@ -605,7 +605,7 @@ def test_prune_reuses_existing_hold_knowledge_no_forked_logic():
          patch("kento.images._holds", return_value=[]) as m_holds, \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A])):
-        LayeredImage.prune()
+        OciImage.prune()
     assert m_ids.called
     assert m_holds.called
 
@@ -619,7 +619,7 @@ def test_prune_surfaces_rmi_refusal_in_failed_not_swallowed():
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B],
                                          rmi_fail=[ID_A])):
-        report = LayeredImage.prune()
+        report = OciImage.prune()
 
     assert report.reclaimed == (ID_B,)            # batch continued past ID_A
     assert len(report.failed) == 1
@@ -641,7 +641,7 @@ def test_prune_raises_typed_when_enumeration_query_fails():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
         with pytest.raises(SubprocessError):
-            LayeredImage.prune()
+            OciImage.prune()
 
 
 def test_prune_dedupes_repeated_dangling_ids():
@@ -650,7 +650,7 @@ def test_prune_dedupes_repeated_dangling_ids():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_A])) as m_run:
-        report = LayeredImage.prune()
+        report = OciImage.prune()
 
     assert report.reclaimed == (ID_A,)
     rmi_calls = [c for c in m_run.call_args_list
@@ -674,7 +674,7 @@ def test_prune_rejects_unsupported_scope_typed_raise():
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A])) as m_run:
         with pytest.raises(ValidationError):
-            LayeredImage.prune(scope=_FakeScope.OTHER)
+            OciImage.prune(scope=_FakeScope.OTHER)
     # Rejected BEFORE any podman call.
     m_run.assert_not_called()
 
@@ -738,4 +738,4 @@ def test_image_diagnose_collection_level_not_per_image():
 
 
 def test_image_diagnose_is_instance_method_on_layeredimage():
-    assert "diagnose" in LayeredImage.__dict__
+    assert "diagnose" in OciImage.__dict__

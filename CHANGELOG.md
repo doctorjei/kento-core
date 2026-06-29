@@ -21,6 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Image` family hierarchy refactor (storage-depth pass, block SD1).** The
+  typed `Image` family is generalized and split (`.devN` — the public library
+  API carries no stability promise yet, so this structural change is allowed and
+  cheap now). `Image` (ABC) is now *a (possibly writable) directory-tree view of
+  a data source*: the content `id: Digest` is **demoted off the base** onto the
+  content-addressed member, and a new abstract `is_writable() -> bool` capability
+  is added (distinct from the instance's mount policy, `StorageMode`).
+  `LayeredImage` becomes an **abstract** "layering" node, and a new concrete
+  **`OciImage`** holds all OCI/podman specifics — `source: OciReference`, `id`,
+  `layers`, `overlay_root`, the resolve/pull/get/list/prune/remove ops, and the
+  prepare/mount/unmount/release lifecycle (`is_writable()` → `False`). `OciImage`
+  is now exported from `kento` and is the type the entry points return; refer to
+  `kento.OciImage` instead of the now-abstract `kento.LayeredImage`. `VolumeImage`
+  (`id: Digest | None`) and `CompositeImage` stay reserved design-only stubs
+  reconciled to the new base. **No behavior or wire change** — `pull`/`get`/
+  `list`/`prune`/`remove` and the overlay lifecycle behave identically; this is a
+  pure restructure + identity-placement change.
+
 - **Friendlier hook error when the overlay upperdir is on an unsupported
   filesystem.** When the pre-start hook's overlay mount fails, kento now prints
   an actionable message instead of the bare `kento-hook: error: overlay mount
