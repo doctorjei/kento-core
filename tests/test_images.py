@@ -1,9 +1,22 @@
-"""Tests for kento images / kento prune (image listing + safe GC)."""
+"""Tests for kento image GC (``kento prune`` orphaned-hold collector).
+
+The former string-returning ``list_images()`` was REMOVED in SD3 (the library no
+longer renders the ``kento images`` table; the typed ``ImageRecord`` ledger
+replaced it — see ``test_image_record.py``). This file now covers ``prune()``
+(the orphaned-hold GC, Delta-1 backlog) plus a guard that the string surface is
+gone.
+"""
 
 import subprocess
 from unittest.mock import patch
 
-from kento.images import list_images, prune
+import kento.images as images_mod
+from kento.images import prune
+
+
+def test_list_images_string_surface_removed():
+    """SD3: the string-returning ``list_images`` is gone (classes-only seam)."""
+    assert not hasattr(images_mod, "list_images")
 
 
 def _mk_guest(base, dir_name, image, name=None):
@@ -27,83 +40,6 @@ def _holds_mock(holds):
             result.stdout = "".join(f"{n}\t{img}\n" for n, img in holds)
         return result
     return _run
-
-
-# --- list_images ---------------------------------------------------------
-
-
-def test_list_in_use_and_orphaned(tmp_path):
-    lxc = tmp_path / "lxc"
-    vm = tmp_path / "vm"
-    lxc.mkdir()
-    vm.mkdir()
-    _mk_guest(lxc, "box", "imageA:latest", name="box")
-    # Hold for A (guest exists) + orphaned hold for B (no guest).
-    holds = [("box", "imageA:latest"), ("ghost", "imageB:latest")]
-
-    with patch("kento.images.LXC_BASE", lxc), \
-         patch("kento.images.VM_BASE", vm), \
-         patch("kento.images.subprocess.run", side_effect=_holds_mock(holds)):
-        result = list_images()
-
-    assert "imageA:latest" in result
-    assert "imageB:latest" in result
-    assert "in-use" in result
-    assert "orphaned" in result
-    # A has a hold and a guest; B is orphaned.
-    lines = result.splitlines()
-    a_line = next(l for l in lines if "imageA" in l)
-    b_line = next(l for l in lines if "imageB" in l)
-    assert "in-use" in a_line and "yes" in a_line and "box" in a_line
-    assert "orphaned" in b_line and "yes" in b_line
-
-
-def test_list_in_use_filter_hides_orphaned(tmp_path):
-    lxc = tmp_path / "lxc"
-    vm = tmp_path / "vm"
-    lxc.mkdir()
-    vm.mkdir()
-    _mk_guest(lxc, "box", "imageA:latest", name="box")
-    holds = [("box", "imageA:latest"), ("ghost", "imageB:latest")]
-
-    with patch("kento.images.LXC_BASE", lxc), \
-         patch("kento.images.VM_BASE", vm), \
-         patch("kento.images.subprocess.run", side_effect=_holds_mock(holds)):
-        result = list_images(in_use_only=True)
-
-    assert "imageA:latest" in result
-    assert "imageB:latest" not in result
-
-
-def test_list_no_managed_images(tmp_path):
-    lxc = tmp_path / "lxc"
-    vm = tmp_path / "vm"
-    lxc.mkdir()
-    vm.mkdir()
-
-    with patch("kento.images.LXC_BASE", lxc), \
-         patch("kento.images.VM_BASE", vm), \
-         patch("kento.images.subprocess.run", side_effect=_holds_mock([])):
-        result = list_images()
-
-    assert "No kento-managed images." in result
-
-
-def test_list_image_referenced_no_hold(tmp_path):
-    """A guest-referenced image with no hold still shows, HOLD=no, in-use."""
-    lxc = tmp_path / "lxc"
-    vm = tmp_path / "vm"
-    lxc.mkdir()
-    vm.mkdir()
-    _mk_guest(lxc, "box", "imageA:latest", name="box")
-
-    with patch("kento.images.LXC_BASE", lxc), \
-         patch("kento.images.VM_BASE", vm), \
-         patch("kento.images.subprocess.run", side_effect=_holds_mock([])):
-        result = list_images()
-
-    line = next(l for l in result.splitlines() if "imageA" in l)
-    assert "no" in line and "in-use" in line
 
 
 # --- prune dry-run -------------------------------------------------------

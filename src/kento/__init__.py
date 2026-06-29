@@ -37,8 +37,8 @@ from kento._storage import (  # noqa: F401  (public re-export)
     StorageMode,
 )
 from kento._images import (  # noqa: F401  (public re-export)
-    DiskFormat, Layer, Hold, Image, LayeredImage, OciImage, VolumeImage,
-    CompositeImage,
+    DiskFormat, Layer, Hold, ManagedStatus, ImageRecord, Image, LayeredImage,
+    OciImage, VolumeImage, CompositeImage,
 )
 from kento._instances import (  # noqa: F401  (public re-export)
     Instance, SystemContainer, VirtualMachine,
@@ -72,6 +72,8 @@ __all__ = [
     "CompositeImage",
     # hold pin value type (storage-depth SD2 — kento._images)
     "Hold",
+    # typed managed-image ledger (storage-depth SD3, JC1 — kento._images)
+    "ManagedStatus", "ImageRecord",
     # instance family handles (Block 08 — kento._instances)
     "Instance", "SystemContainer", "VirtualMachine",
     # module-level helpers (defined in this module)

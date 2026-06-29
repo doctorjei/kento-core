@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `ImageRecord` managed-image ledger (storage-depth pass, block SD3 —
+  the JC1 1.0 blocker).** A new frozen value type
+  `ImageRecord{id: Digest, refs: tuple[OciReference, ...], guests: tuple[str,
+  ...], holds: tuple[Hold, ...]}` — the typed projection of kento's OWN markers
+  about an image (the per-guest `kento-image` references + the
+  `kento-hold.<guest>` pins from SD2), keyed on content `id` (NOT the `Image`
+  artifact). Derived properties `held` / `in_use` / `dangling` (`= not refs`, a
+  SEPARATE axis from status) / `status` (`ManagedStatus.IN_USE` if any guest
+  references it, else `ORPHANED`) match the legacy `kento images` table exactly.
+  Entry points `ImageRecord.list() -> list[ImageRecord]` (the managed dataset —
+  every image referenced-by-a-guest OR pinned-by-a-hold, grouped by content id,
+  sorted by id) and `ImageRecord.get(str | Digest | OciReference)` (one record,
+  raises `ImageNotFoundError` if not managed). Bidirectional lazy navigation:
+  `image.record() -> ImageRecord` (TOTAL — empty markers, never `None`) and
+  `ImageRecord.resolve() -> Image` (resolves by content id, MAY raise if the
+  content is gone). A `ManagedStatus` enum (`{IN_USE = "in-use", ORPHANED =
+  "orphaned"}`) is added and re-exported. A rare legacy tag-only hold (or guest
+  reference) whose content is gone is logged and skipped — `id` is mandatory.
+  (`.devN` — the public library API carries no stability promise yet.)
+- **Removed the string-returning `kento.images.list_images()`.** The library no
+  longer renders the `kento images` table (the last classes-only seam for
+  images): `ImageRecord.list()` returns the typed records and the CLI formats
+  them. The procedural data helpers it shared (`_guest_image_refs` etc.) survive
+  and now feed `ImageRecord.list()`. (Internal `.devN` library change.)
 - **Typed `Hold` prune-protection pin (storage-depth pass, block SD2).** A new
   frozen value type `Hold{instance: str, pinned: Digest | OciReference}` typing
   the existing `kento-hold.<guest>` containers that pin a content-addressed

@@ -1,18 +1,26 @@
-"""kento images / kento prune — image listing and safe garbage collection.
+"""kento image GC + the data helpers behind the typed image ledger.
 
 Each kento guest pins its OCI image against `podman prune` via a stopped
 hold container named ``kento-hold.<guestname>`` carrying the label
-``io.kento.hold-for=<guestname>`` (see layers.py). These two bare-only
-commands report on and reclaim those holds:
+``io.kento.hold-for=<guestname>`` (see layers.py).
 
-- ``kento images`` is read-only: it lists kento-managed images, marking
-  which are in-use vs orphaned and whether a hold pins them.
-- ``kento prune`` is destructive but conservative: it removes only
-  *orphaned* hold containers (a ``kento-hold.<name>`` whose guest no
-  longer exists) and then the images those holds freed (only if no
-  surviving guest references them and no remaining hold pins them). It
-  NEVER touches a hold whose guest still exists and NEVER runs
-  ``podman prune -a``.
+This module holds:
+
+- the orphaned-hold garbage collector ``prune()`` (Delta-1 backlog: the CLI
+  bare ``prune`` was re-pointed off it in Block 21 — it is still the typed
+  hold-GC's eventual home, but is not wired to the CLI here);
+- the procedural data helpers (``_guest_image_refs`` / ``_guest_names`` /
+  ``_holds`` / ``_hold_image_ids``) that read kento's on-disk + podman markers.
+  These feed ``Hold.list()`` (SD2) and ``ImageRecord.list()`` (SD3) — the typed
+  ledger surface that REPLACED the former string-returning ``list_images()``
+  (the library no longer renders the ``kento images`` table; the CLI formats the
+  typed ``ImageRecord``s, §12.4).
+
+``prune`` is destructive but conservative: it removes only *orphaned* hold
+containers (a ``kento-hold.<name>`` whose guest no longer exists) and then the
+images those holds freed (only if no surviving guest references them and no
+remaining hold pins them). It NEVER touches a hold whose guest still exists and
+NEVER runs ``podman prune -a``.
 """
 
 import logging
@@ -125,51 +133,6 @@ def _hold_image_ids() -> dict[str, str]:
         if held_for and image_id and image_id != "<no value>":
             ids[held_for] = image_id
     return ids
-
-
-def list_images(in_use_only: bool = False) -> str:
-    """List kento-managed images (read-only).
-
-    A managed image is any image referenced by a guest or pinned by a
-    hold container. Each row reports the image, the referencing guests,
-    whether a hold pins it, and an in-use/orphaned status.
-
-    Returns the rendered table as a string (no trailing newline).
-    """
-    refs = _guest_image_refs()
-    holds = _holds()
-
-    held_images: set[str] = {img for _, img in holds if img}
-
-    managed = set(refs) | held_images
-    if not managed:
-        return "No kento-managed images."
-
-    rows = []
-    for image in sorted(managed):
-        guests = refs.get(image, [])
-        status = "in-use" if guests else "orphaned"
-        if in_use_only and status != "in-use":
-            continue
-        guests_cell = ",".join(guests) if guests else "-"
-        hold_cell = "yes" if image in held_images else "no"
-        rows.append((image, guests_cell, hold_cell, status))
-
-    if not rows:
-        return "No kento-managed images."
-
-    headers = ("IMAGE", "GUESTS", "HOLD", "STATUS")
-    widths = []
-    for i, header in enumerate(headers):
-        col_max = max((len(row[i]) for row in rows), default=0)
-        widths.append(max(len(header), col_max))
-
-    lines = []
-    lines.append("  ".join(h.ljust(w) for h, w in zip(headers, widths)))
-    lines.append("  ".join("-" * w for w in widths))
-    for row in rows:
-        lines.append("  ".join(val.ljust(w) for val, w in zip(row, widths)))
-    return "\n".join(lines)
 
 
 def prune(yes: bool = False) -> tuple[str, int]:
