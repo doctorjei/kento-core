@@ -37,7 +37,8 @@ from kento._storage import (  # noqa: F401  (public re-export)
     StorageMode,
 )
 from kento._images import (  # noqa: F401  (public re-export)
-    DiskFormat, Layer, Image, LayeredImage, VolumeImage, CompositeImage,
+    DiskFormat, Layer, Image, LayeredImage, OciImage, VolumeImage,
+    CompositeImage,
 )
 from kento._instances import (  # noqa: F401  (public re-export)
     Instance, SystemContainer, VirtualMachine,
@@ -66,8 +67,8 @@ __all__ = [
     "PlatformMode", "PlatformProfile", "Status",
     # root-storage value type (Block 03 — kento._storage)
     "StorageMode",
-    # image family value types (Block 05 — kento._images)
-    "DiskFormat", "Layer", "Image", "LayeredImage", "VolumeImage",
+    # image family value types (Block 05 / SD1 — kento._images)
+    "DiskFormat", "Layer", "Image", "LayeredImage", "OciImage", "VolumeImage",
     "CompositeImage",
     # instance family handles (Block 08 — kento._instances)
     "Instance", "SystemContainer", "VirtualMachine",

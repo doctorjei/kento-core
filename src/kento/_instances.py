@@ -2206,8 +2206,8 @@ def _image_to_ref(image: "str | OciReference | Image") -> str:
     * ``OciReference`` — rendered via :meth:`OciReference.render` (the canonical
       reference string; never re-split by hand, §2 principle 3).
     * ``Image``        — a resolved image handle; we render its ``source``
-      locator (``OciReference.render``). This lets a caller pass a
-      ``LayeredImage`` it already pulled without re-typing the ref.
+      locator (``OciReference.render``). This lets a caller pass an
+      ``OciImage`` it already pulled without re-typing the ref.
 
     Any other type is a typed ``ValidationError`` (§2 principle 5 — a clear
     boundary error, not a stringify-and-hope).

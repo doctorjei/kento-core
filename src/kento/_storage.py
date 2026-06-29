@@ -42,15 +42,15 @@ class StorageMode(str, Enum):
     """How an instance's writable root is materialized (§8).
 
     * ``OVERLAY`` — the default. fs-overlay (overlayfs lowerdir + upper, over a
-      ``LayeredImage``); the upper is **PERSISTENT** across restarts. The only
-      mode kento ships today.
+      layered image — the ``OciImage`` kento ships today); the upper is
+      **PERSISTENT** across restarts. The only mode kento ships today.
     * ``EPHEMERAL_IMAGE`` — block-overlay (qcow2 CoW / ``snapshot=on`` /
       dm-snapshot over a read-only base); **disposed on stop**. The impl is a
       FUTURE feature (kento is overlay/virtiofs-only today); this block ships the
       enum *value* only, so the 1.0 surface reserves the field.
 
     ``StorageMode`` (the writable strategy) is **orthogonal** to the ``Image``
-    representation (§4): an ``OVERLAY`` ``LayeredImage`` and an
+    representation (§4): an ``OVERLAY`` over a layered image (``OciImage``) and an
     ``EPHEMERAL_IMAGE`` flatten-to-disk are two writable strategies over the
     same resolved base. The enum grows by adding values (§2 principle 7) — e.g.
     a future ``PERSISTENT_IMAGE`` (block-overlay that survives restarts) is a new

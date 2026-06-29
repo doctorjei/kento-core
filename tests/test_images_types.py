@@ -1,10 +1,13 @@
-"""Tests for the typed ``Image`` family (Block 05 — kento._images).
+"""Tests for the typed ``Image`` family (Block 05 / SD1 — kento._images).
 
-Structure + frozen-ness; ``Image.id`` / ``LayeredImage.resolve_id`` totality;
-``LayeredImage`` resolution + runtime lifecycle as ADDITIVE wrappers (asserting
-DELEGATION to kento.layers / kento.vm, not reimplementation); ``DiskFormat``;
-the documented stubs are declared + abstract/uninstantiable; flat re-exports
-reachable as ``kento.X``. All I/O is mocked (no real podman / mounts).
+Structure + frozen-ness; the SD1 hierarchy (``Image`` generalized — no ``id`` on
+the base + abstract ``is_writable()``; ``LayeredImage`` now ABSTRACT; ``OciImage``
+the concrete OCI member carrying ``id`` + lifecycle); ``OciImage.id`` /
+``OciImage.resolve_id`` totality; ``OciImage`` resolution + runtime lifecycle as
+ADDITIVE wrappers (asserting DELEGATION to kento.layers / kento.vm, not
+reimplementation); ``DiskFormat``; the documented stubs are declared +
+abstract/uninstantiable; flat re-exports reachable as ``kento.X``. All I/O is
+mocked (no real podman / mounts).
 """
 
 import dataclasses
@@ -24,6 +27,7 @@ from kento import (
     Layer,
     LayeredImage,
     MalformedReference,
+    OciImage,
     OciReference,
     VolumeImage,
 )
@@ -46,7 +50,7 @@ def _digest():
 
 
 def test_flat_reexports_reachable():
-    for name in ("Image", "LayeredImage", "Layer", "DiskFormat",
+    for name in ("Image", "LayeredImage", "OciImage", "Layer", "DiskFormat",
                  "VolumeImage", "CompositeImage"):
         assert hasattr(kento, name)
         assert name in kento.__all__
@@ -74,13 +78,32 @@ def test_layer_is_frozen_value():
 
 
 # --------------------------------------------------------------------------- #
-# Image ABC — uninstantiable; abstract contract
+# Image ABC — generalized (SD1): no `id` on the base, abstract `is_writable()`,
+# uninstantiable, abstract lifecycle contract.
 # --------------------------------------------------------------------------- #
 
 
 def test_image_abc_uninstantiable():
+    # Image is abstract (abstract is_writable + lifecycle), so even with all of
+    # its OWN fields supplied it cannot be instantiated.
     with pytest.raises(TypeError):
-        Image(source=_ref(), id=_digest())  # type: ignore[abstract]
+        Image(source=_ref())  # type: ignore[abstract]
+
+
+def test_image_base_has_no_id_field():
+    # SD1: `id: Digest` was DEMOTED off the base onto OciImage (a writable image
+    # has no content digest → identity = location). Re-adding `id` to the base
+    # would reintroduce the constraint this move removed → this guard reddens.
+    field_names = {f.name for f in dataclasses.fields(Image)}
+    assert "id" not in field_names
+    assert field_names == {"source", "kernel", "initramfs"}
+
+
+def test_image_declares_is_writable_abstract():
+    # SD1: is_writable() is the capability contract, abstract on the base so the
+    # family does not assume read-only-ness. Mutation guard (gate C): removing
+    # the @abstractmethod (or giving the base a body) reddens this.
+    assert "is_writable" in Image.__abstractmethods__
 
 
 def test_image_declares_lifecycle_abstract():
@@ -89,18 +112,59 @@ def test_image_declares_lifecycle_abstract():
 
 
 # --------------------------------------------------------------------------- #
-# LayeredImage — structure, frozen, narrowed source
+# LayeredImage — now ABSTRACT (SD1): the "layering" node, uninstantiable, no
+# OCI-specific fields. OciImage IS-A LayeredImage IS-A Image.
 # --------------------------------------------------------------------------- #
 
 
-def test_layeredimage_fields_and_frozen():
-    img = LayeredImage(
+def test_layeredimage_is_abstract_uninstantiable():
+    # SD1: LayeredImage is now abstract (the layering concept). It inherits the
+    # abstract is_writable + lifecycle from Image and adds NO concrete impl, so
+    # it cannot be constructed.
+    assert LayeredImage.__abstractmethods__ >= {
+        "is_writable", "prepare", "mount", "unmount", "release"}
+    with pytest.raises(TypeError):
+        LayeredImage(source=_ref())  # type: ignore[abstract]
+
+
+def test_layeredimage_is_a_image():
+    assert issubclass(LayeredImage, Image)
+
+
+def test_layeredimage_carries_no_oci_fields():
+    # SD1: the OCI/podman specifics (id, layers, overlay_root) live on OciImage,
+    # NOT the abstract LayeredImage. LayeredImage only has the base Image fields.
+    field_names = {f.name for f in dataclasses.fields(LayeredImage)}
+    assert field_names == {"source", "kernel", "initramfs"}
+
+
+def test_ociimage_is_a_layeredimage_is_a_image():
+    # The SD1 hierarchy: OciImage <: LayeredImage <: Image.
+    assert issubclass(OciImage, LayeredImage)
+    assert issubclass(OciImage, Image)
+
+
+def test_ociimage_is_writable_is_false():
+    # SD1: OCI store layers are read-only by spec → is_writable() is False.
+    # Mutation guard (gate C): flipping the body to True reddens this.
+    img = _img_with_root()
+    assert img.is_writable() is False
+
+
+# --------------------------------------------------------------------------- #
+# OciImage — structure, frozen, narrowed source, content id
+# --------------------------------------------------------------------------- #
+
+
+def test_ociimage_fields_and_frozen():
+    img = OciImage(
         source=_ref(),
         id=_digest(),
         layers=(Layer(id="x", short_link="lx"),),
         overlay_root=Path("/store/overlay"),
     )
     assert isinstance(img, Image)
+    assert isinstance(img, OciImage)
     assert img.source.scheme == "oci"
     assert img.id == _digest()
     assert img.kernel is None and img.initramfs is None
@@ -109,8 +173,8 @@ def test_layeredimage_fields_and_frozen():
         img.id = _digest()  # type: ignore[misc]
 
 
-def test_layeredimage_layers_list_frozen_to_tuple():
-    img = LayeredImage(
+def test_ociimage_layers_list_frozen_to_tuple():
+    img = OciImage(
         source=_ref(), id=_digest(),
         layers=[Layer(id="x", short_link="")],  # a list argument
         overlay_root=Path("/store/overlay"),
@@ -118,25 +182,36 @@ def test_layeredimage_layers_list_frozen_to_tuple():
     assert isinstance(img.layers, tuple)
 
 
-def test_layeredimage_layers_and_overlay_root_are_mandatory():
+def test_ociimage_layers_and_overlay_root_are_mandatory():
     # §4.1 verbatim: both fields are required (no defaults). A layer-less /
-    # rootless LayeredImage is the degenerate value the mandatory fields exist
+    # rootless OciImage is the degenerate value the mandatory fields exist
     # to prevent (gate C) — construction without them must fail.
     with pytest.raises(TypeError):
-        LayeredImage(source=_ref(), id=_digest())  # type: ignore[call-arg]
+        OciImage(source=_ref(), id=_digest())  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        LayeredImage(  # type: ignore[call-arg]
+        OciImage(  # type: ignore[call-arg]
             source=_ref(), id=_digest(),
             layers=(Layer(id="x", short_link=""),),
         )  # missing overlay_root
     with pytest.raises(TypeError):
-        LayeredImage(  # type: ignore[call-arg]
+        OciImage(  # type: ignore[call-arg]
             source=_ref(), id=_digest(), overlay_root=Path("/store"),
         )  # missing layers
 
 
-def test_layeredimage_kernel_override_carried():
-    img = LayeredImage(
+def test_ociimage_id_is_mandatory():
+    # SD1: `id` is demoted onto OciImage and stays MANDATORY there (an OCI image
+    # is content-addressed). Construction without it must fail.
+    with pytest.raises(TypeError):
+        OciImage(  # type: ignore[call-arg]
+            source=_ref(),
+            layers=(Layer(id="x", short_link=""),),
+            overlay_root=Path("/store/overlay"),
+        )
+
+
+def test_ociimage_kernel_override_carried():
+    img = OciImage(
         source=_ref(), id=_digest(),
         layers=(Layer(id="x", short_link=""),),
         overlay_root=Path("/store/overlay"),
@@ -147,13 +222,13 @@ def test_layeredimage_kernel_override_carried():
 
 
 # --------------------------------------------------------------------------- #
-# Image.id totality — resolve_id raises (never returns ""/None)
+# OciImage.id totality — resolve_id raises (never returns ""/None)
 # --------------------------------------------------------------------------- #
 
 
 def test_resolve_id_returns_typed_digest():
     with patch("kento.layers.resolve_image_id", return_value=DIGEST_STR) as m:
-        digest = LayeredImage.resolve_id("ubuntu:latest")
+        digest = OciImage.resolve_id("ubuntu:latest")
     assert isinstance(digest, Digest)
     assert digest.render() == DIGEST_STR
     m.assert_called_once_with("ubuntu:latest")
@@ -164,13 +239,13 @@ def test_resolve_id_raises_on_empty_not_sentinel():
     # surface must RAISE, never yield the sentinel (principle 5).
     with patch("kento.layers.resolve_image_id", return_value=""):
         with pytest.raises(ImageNotFoundError, match="could not resolve content id"):
-            LayeredImage.resolve_id("ghost:latest")
+            OciImage.resolve_id("ghost:latest")
 
 
 def test_resolve_id_raises_on_malformed_digest():
     with patch("kento.layers.resolve_image_id", return_value="not-a-digest"):
         with pytest.raises(MalformedReference):
-            LayeredImage.resolve_id("weird:latest")
+            OciImage.resolve_id("weird:latest")
 
 
 # --------------------------------------------------------------------------- #
@@ -190,7 +265,7 @@ def test_resolve_id_normalizes_bare_hex_to_sha256_digest():
     # The real-podman shape: {{.Id}} is a bare 64-char hex, NO "sha256:" prefix.
     assert ":" not in BARE_SHA and len(BARE_SHA) == 64
     with patch("kento.layers.resolve_image_id", return_value=BARE_SHA) as m:
-        digest = LayeredImage.resolve_id("ubuntu:latest")
+        digest = OciImage.resolve_id("ubuntu:latest")
     assert isinstance(digest, Digest)
     assert digest.algorithm == "sha256"
     assert digest.encoded == BARE_SHA          # bare hex preserved verbatim
@@ -201,7 +276,7 @@ def test_resolve_id_normalizes_bare_hex_to_sha256_digest():
 def test_resolve_id_bare_hex_strips_whitespace_via_resolve_image_id():
     # resolve_image_id already .strip()s; a clean bare hex normalizes fine.
     with patch("kento.layers.resolve_image_id", return_value=SHA):
-        digest = LayeredImage.resolve_id("ubuntu:latest")
+        digest = OciImage.resolve_id("ubuntu:latest")
     assert digest.encoded == SHA
     assert digest.render() == DIGEST_STR
 
@@ -210,7 +285,7 @@ def test_resolve_id_prefixed_form_still_parses_faithfully():
     # Some podman/docker builds DO emit "algorithm:encoded" — that path must
     # still parse faithfully (and keep a non-sha256 algorithm intact).
     with patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        digest = LayeredImage.resolve_id("ubuntu:latest")
+        digest = OciImage.resolve_id("ubuntu:latest")
     assert digest.render() == DIGEST_STR
 
 
@@ -220,11 +295,11 @@ def test_resolve_id_garbage_bare_id_still_raises_typed():
     for bad in ("not-a-digest", "z" * 64, "abc123", "a" * 63):
         with patch("kento.layers.resolve_image_id", return_value=bad):
             with pytest.raises(MalformedReference):
-                LayeredImage.resolve_id("weird:latest")
+                OciImage.resolve_id("weird:latest")
 
 
 # --------------------------------------------------------------------------- #
-# LayeredImage.resolve — delegates to layers.resolve_layers /
+# OciImage.resolve — delegates to layers.resolve_layers /
 # to_overlay_lowerdir / resolve_image_id (does not reimplement them)
 # --------------------------------------------------------------------------- #
 
@@ -236,7 +311,7 @@ def test_resolve_delegates_and_populates():
          patch("kento.layers.to_overlay_lowerdir",
                return_value=("/store/overlay", "ID1/diff:ID2/diff")) as m_ovl, \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR) as m_id:
-        img = LayeredImage.resolve(ref)
+        img = OciImage.resolve(ref)
 
     # Delegation: each wrapped function was called with the rendered ref.
     m_layers.assert_called_once_with(ref.render())
@@ -244,7 +319,7 @@ def test_resolve_delegates_and_populates():
         "/store/overlay/ID1/diff:/store/overlay/ID2/diff")
     m_id.assert_called_once_with(ref.render())
 
-    assert isinstance(img, LayeredImage)
+    assert isinstance(img, OciImage)
     assert img.source is ref
     assert img.overlay_root == Path("/store/overlay")
     assert img.id.render() == DIGEST_STR
@@ -264,7 +339,7 @@ def test_resolve_propagates_image_not_found():
     with patch("kento.layers.resolve_layers",
                side_effect=ImageNotFoundError("nope")):
         with pytest.raises(ImageNotFoundError):
-            LayeredImage.resolve(ref)
+            OciImage.resolve(ref)
 
 
 def test_resolve_derives_root_when_to_overlay_yields_none(tmp_path):
@@ -277,7 +352,7 @@ def test_resolve_derives_root_when_to_overlay_yields_none(tmp_path):
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir", return_value=("", abs_layers)), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        img = LayeredImage.resolve(ref)
+        img = OciImage.resolve(ref)
     assert img.overlay_root == Path("/store/overlay")
     assert img.layers == (
         Layer(id="ID1", short_link=""),
@@ -297,7 +372,7 @@ def test_resolve_raises_on_no_shared_root():
          patch("kento.layers.to_overlay_lowerdir", return_value=("", abs_layers)), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
         with pytest.raises(StateError, match="common store root"):
-            LayeredImage.resolve(ref)
+            OciImage.resolve(ref)
 
 
 def test_resolve_raises_on_non_diff_entry():
@@ -308,7 +383,7 @@ def test_resolve_raises_on_non_diff_entry():
          patch("kento.layers.to_overlay_lowerdir", return_value=("", abs_layers)), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
         with pytest.raises(StateError, match="<root>/<id>/diff"):
-            LayeredImage.resolve(ref)
+            OciImage.resolve(ref)
 
 
 def test_resolve_reads_short_link_from_link_file(tmp_path):
@@ -324,7 +399,7 @@ def test_resolve_reads_short_link_from_link_file(tmp_path):
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir", return_value=(str(root), "")), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        img = LayeredImage.resolve(ref)
+        img = OciImage.resolve(ref)
     assert img.layers == (
         Layer(id="ABCID", short_link="SHORTLINK"),
         Layer(id="DEFID", short_link=""),
@@ -339,7 +414,7 @@ def test_resolve_reads_short_link_from_link_file(tmp_path):
 
 
 def _img_with_root():
-    return LayeredImage(
+    return OciImage(
         source=_ref("ubuntu:latest"),
         id=_digest(),
         layers=(Layer(id="ID1", short_link="s1"),
@@ -426,9 +501,10 @@ def test_lifecycle_does_not_call_subprocess_directly(tmp_path):
 
 
 def test_volumeimage_is_abstract_stub():
-    # Inherits Image's abstract primitives unimplemented -> uninstantiable.
+    # SD1: inherits Image's abstract is_writable + lifecycle primitives
+    # unimplemented -> stays uninstantiable design stub (NOT built out).
     assert VolumeImage.__abstractmethods__ >= {
-        "prepare", "mount", "unmount", "release"}
+        "is_writable", "prepare", "mount", "unmount", "release"}
     with pytest.raises(TypeError):
         VolumeImage(  # type: ignore[abstract]
             source=_ref(), id=_digest(),
@@ -437,20 +513,37 @@ def test_volumeimage_is_abstract_stub():
 
 
 def test_volumeimage_declares_fields():
+    # SD1 reconciliation: VolumeImage gains `id: Digest | None` (content Digest
+    # when ro/content-addressed, None when writable). path/format/backing per §4.1.
     fields = {f.name for f in dataclasses.fields(VolumeImage)}
-    assert {"path", "format", "backing"} <= fields
+    assert {"path", "format", "backing", "id"} <= fields
+
+
+def test_volumeimage_id_is_optional_digest():
+    # SD1: VolumeImage.id is `Digest | None` — None expresses a writable
+    # (location-identified) volume, a content Digest expresses a ro one. Both
+    # must type-check as the field; we only assert the annotation here since the
+    # stub is uninstantiable (no construction).
+    id_field = next(
+        f for f in dataclasses.fields(VolumeImage) if f.name == "id")
+    assert "Digest" in str(id_field.type) and "None" in str(id_field.type)
 
 
 def test_compositeimage_is_abstract_stub():
     assert CompositeImage.__abstractmethods__ >= {
-        "prepare", "mount", "unmount", "release"}
+        "is_writable", "prepare", "mount", "unmount", "release"}
+    # SD1: CompositeImage no longer has an `id` field (demoted off the base);
+    # it inherits no concrete impl, so it stays uninstantiable.
     with pytest.raises(TypeError):
-        CompositeImage(source=_ref(), id=_digest(), mounts={})  # type: ignore[abstract]
+        CompositeImage(source=_ref(), mounts={})  # type: ignore[abstract]
 
 
 def test_compositeimage_declares_fields():
     fields = {f.name for f in dataclasses.fields(CompositeImage)}
     assert "mounts" in fields
+    # SD1: `id` is NOT a CompositeImage field (off the base; CompositeImage is
+    # not content-addressed — its identity is its composition).
+    assert "id" not in fields
 
 
 # --------------------------------------------------------------------------- #
