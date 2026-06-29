@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kento.diagnose()` accepts an optional `name`.** `kento.diagnose(name)`
+  narrows the host-wide scan to the HOST checks plus the one resolved instance's
+  checks (raising `InstanceNotFoundError` on a miss), projecting them UNFILTERED
+  into a typed `Diagnosis` — preserving today's named-`diagnose` wire. This is
+  deliberately distinct from `instance.diagnose()`, which filters to the
+  INSTANCE domain + self. Additive and back-compatible (`name` defaults to
+  `None`, the unchanged host-wide behavior). Lets the CLI's named `diagnose`
+  consume a typed object instead of reaching the `kento.diagnose` submodule's
+  flat dict, completing the classes-only library↔CLI seam.
+
 ## [1.6.0.dev4] - 2026-06-28
 
 > **Library-API milestone (kento-core only; CLI unchanged at `kento 1.6.2`).**

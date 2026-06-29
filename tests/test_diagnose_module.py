@@ -153,3 +153,58 @@ def test_module_diagnose_returns_typed_value_not_dict():
         result = kento.diagnose()
     assert isinstance(result, Diagnosis)
     assert not isinstance(result, dict)
+
+
+# --------------------------------------------------------------------------- #
+# kento.diagnose(name=...) — Block 22: the optional `name` param.
+# `name=None` is unchanged (asserted above). A `name` narrows via
+# run_diagnostics but the projection stays UNFILTERED (host + that instance),
+# preserving today's named wire — deliberately NOT instance.diagnose()'s
+# INSTANCE+self filter. An unknown name propagates InstanceNotFoundError.
+# --------------------------------------------------------------------------- #
+
+
+def test_module_diagnose_named_passes_name_and_keeps_all_findings():
+    # run_diagnostics(name) already narrows to host + that one instance; the
+    # projection must NOT additionally filter (no domain/subject filter) — both
+    # the HOST finding and the named instance's INSTANCE findings survive.
+    report = _report(
+        _df("apparmor", "ok", "host"),          # HOST — must be KEPT
+        _df("status", "ok", "mybox"),           # INSTANCE (the named one)
+        _df("portfwd", "warn", "mybox"),        # INSTANCE (the named one)
+    )
+    with patch("kento.diagnose.run_diagnostics",
+               return_value=report) as mock_run:
+        result = kento.diagnose("mybox")
+    # Narrowed via run_diagnostics(name), NOT run_diagnostics(None).
+    mock_run.assert_called_once_with("mybox")
+    assert isinstance(result, Diagnosis)
+    # UNFILTERED: the HOST apparmor finding is retained alongside the instance's.
+    assert {f.check for f in result.findings} == {
+        "apparmor", "status", "portfwd"}
+    domains = {f.domain for f in result.findings}
+    assert DiagnosisDomain.HOST in domains       # host finding NOT dropped
+    assert DiagnosisDomain.INSTANCE in domains
+    assert {f.check for f in result.problems} == {"portfwd"}
+    assert result.ok is False
+
+
+def test_module_diagnose_unknown_name_propagates():
+    from kento import InstanceNotFoundError
+
+    def boom(name=None):
+        raise InstanceNotFoundError("no instance named 'ghost'.")
+
+    with patch("kento.diagnose.run_diagnostics", boom):
+        with pytest.raises(InstanceNotFoundError):
+            kento.diagnose("ghost")
+
+
+def test_module_diagnose_name_none_explicit_equals_default():
+    # An explicit name=None calls run_diagnostics(None) exactly like the default.
+    with patch("kento.diagnose.run_diagnostics",
+               return_value=_report()) as mock_run:
+        result = kento.diagnose(name=None)
+    mock_run.assert_called_once_with(None)
+    assert isinstance(result, Diagnosis)
+    assert result.findings == ()
