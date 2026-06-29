@@ -559,25 +559,37 @@ def check_name_conflict(name: str, target_namespace: str) -> bool:
 from kento import diagnose as _diagnose_submodule  # noqa: E402,F401  (cache it FIRST)
 
 
-def diagnose() -> "Diagnosis":  # noqa: F821  (Diagnosis re-exported above)
-    """Run the global, host-wide diagnostic scan (§11.8 D3 b).
+def diagnose(name: str | None = None) -> "Diagnosis":  # noqa: F821  (Diagnosis re-exported above)
+    """Run the host-wide (or named) diagnostic scan (§11.8 D3 b).
 
-    Runs the existing ``kento.diagnose.run_diagnostics()`` (the whole-host scan:
-    HOST pre-flight checks + every image + every instance across both
-    namespaces, read-only / silent — it REPORTS, never reaps) and projects ALL
-    flat findings into a typed :class:`Diagnosis` (all three domains —
-    INSTANCE / IMAGE / HOST). This is the module-level companion to
-    ``instance.diagnose()`` (one instance's INSTANCE findings) and
-    ``image.diagnose()`` (the IMAGE domain); it mirrors the future
-    ``kento.version()`` as a property of the library, and is what ``kento
-    diagnose`` (no instance argument) maps to.
+    Runs the existing ``kento.diagnose.run_diagnostics(name)`` and projects ALL
+    flat findings — UNFILTERED — into a typed :class:`Diagnosis`. Two modes,
+    distinguished only by the optional ``name``:
+
+    * ``name=None`` (default) — the whole-host scan: HOST pre-flight checks +
+      every image + every instance across both namespaces (all three domains —
+      INSTANCE / IMAGE / HOST), read-only / silent (it REPORTS, never reaps).
+      This is what ``kento diagnose`` (no instance argument) maps to.
+    * ``name=<str>`` — the same scan narrowed by ``run_diagnostics`` to the HOST
+      checks plus the ONE resolved instance's checks (raising
+      :class:`InstanceNotFoundError` on a miss, propagated unchanged). The
+      findings are projected UNFILTERED, preserving today's named-``diagnose``
+      wire (host findings + that instance's findings). This is DELIBERATELY
+      different from ``instance.diagnose()`` (M11), which filters to the
+      INSTANCE domain + itself and drops the host findings; the module-level
+      function is the legacy named-wire preserver, the handle method is the
+      narrowed per-instance view.
+
+    The module-level companion to ``instance.diagnose()`` (one instance's
+    INSTANCE findings) and ``image.diagnose()`` (the IMAGE domain); it mirrors
+    the future ``kento.version()`` as a property of the library.
 
     Performs I/O (the scan) via an explicit module-level call (§2 principle 2);
     the returned ``Diagnosis`` is an inert value type.
     """
     from kento._diagnosis import diagnosis_from_report
 
-    report = _diagnose_submodule.run_diagnostics(None)
+    report = _diagnose_submodule.run_diagnostics(name)
     return diagnosis_from_report(report)
 
 
