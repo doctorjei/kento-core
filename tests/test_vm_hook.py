@@ -1,5 +1,6 @@
 """Tests for VM hookscript generation."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -129,6 +130,50 @@ class TestGenerateVmHook:
         # invocation), not the search loop above it.
         virtiofsd_idx = hook.index('$VIRTIOFSD --socket-path=')
         assert mount_idx < inject_idx < virtiofsd_idx
+
+    def test_overlay_mount_failure_is_actionable(self):
+        """The overlay-mount-failure handler must emit the same generous,
+        actionable diagnostic hook.sh emits — naming the writable upperdir, its
+        fstype, the tmpfile+RENAME_WHITEOUT cause (virtiofs), and the tmpfs /
+        ext4-or-xfs / KENTO_STATE_DIR remediation — while keeping the existing
+        'overlay mount failed' landmark line."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        # Landmark line 1 preserved (other tests index on this).
+        assert "overlay mount failed" in hook
+        # fstype detection via the -T (target) form, degrading to "unknown".
+        assert 'findmnt -no FSTYPE -T "$STATE_DIR"' in hook
+        assert '_upper_fstype="unknown"' in hook
+        # Names the writable layer and reports its fstype inline.
+        assert "$STATE_DIR/upper" in hook
+        assert "on $_upper_fstype" in hook
+        # Cause: tmpfile + RENAME_WHITEOUT, e.g. virtiofs; honest "may not".
+        assert "RENAME_WHITEOUT" in hook
+        assert "virtiofs" in hook
+        assert "may not support" in hook
+        # Remediation: tmpfs or a real (ext4/xfs) fs, or KENTO_STATE_DIR.
+        assert "tmpfs" in hook
+        assert "ext4/xfs" in hook
+        assert "KENTO_STATE_DIR" in hook
+        # Still a hard failure.
+        assert "exit 1" in hook
+
+    def test_generated_script_is_valid_posix_shell(self, tmp_path):
+        """The hookscript is built from a Python f-string with doubled braces
+        ({{ }}) for literal shell braces; a mis-escaped brace would either break
+        the f-string at import or emit invalid shell. Write the generated script
+        and `sh -n` it to prove it parses as valid POSIX shell."""
+        hook = generate_vm_hook(
+            Path("/var/lib/kento/vm/test"), "/a:/b", "test",
+            Path("/var/lib/kento/vm/test"),
+        )
+        script = tmp_path / "kento-hook"
+        script.write_text(hook)
+        result = subprocess.run(
+            ["sh", "-n", str(script)], capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"generated hookscript failed `sh -n`:\n{result.stderr}"
+        )
 
 
 class TestGenerateSnippetsWrapper:

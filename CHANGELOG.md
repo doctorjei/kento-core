@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tmpfs or ext4/xfs at `$STATE_DIR` or set `KENTO_STATE_DIR`. This is the
   classic nested-LXC-in-VM (virtiofs root) failure dogfooded by seadog. The
   mount still fails (correctly); only the diagnostics improved — no behavior
-  or exit-code change on any path.
+  or exit-code change on any path. The same actionable message now also covers
+  the VM-mode PVE hookscript's host-side overlay mount (`vm_hook.py`), so a
+  `$STATE_DIR` on an overlay-incapable filesystem reports identically across
+  LXC and VM modes.
 
 ## [1.6.0.dev4] - 2026-06-28
 
