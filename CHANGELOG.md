@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consume a typed object instead of reaching the `kento.diagnose` submodule's
   flat dict, completing the classes-only library↔CLI seam.
 
+### Changed
+
+- **Friendlier hook error when the overlay upperdir is on an unsupported
+  filesystem.** When the pre-start hook's overlay mount fails, kento now prints
+  an actionable message instead of the bare `kento-hook: error: overlay mount
+  failed`: it names the writable layer path (`$STATE_DIR/upper`), reports the
+  filesystem type hosting it, and explains the likely cause and remediation —
+  the upper/work dirs need a filesystem that supports tmpfile +
+  RENAME_WHITEOUT (e.g. virtiofs, a common VM root, lacks them), so mount a
+  tmpfs or ext4/xfs at `$STATE_DIR` or set `KENTO_STATE_DIR`. This is the
+  classic nested-LXC-in-VM (virtiofs root) failure dogfooded by seadog. The
+  mount still fails (correctly); only the diagnostics improved — no behavior
+  or exit-code change on any path.
+
 ## [1.6.0.dev4] - 2026-06-28
 
 > **Library-API milestone (kento-core only; CLI unchanged at `kento 1.6.2`).**

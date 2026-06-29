@@ -617,6 +617,142 @@ def test_unprivileged_overlay_reentry_exits_zero(hook_fixture, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Overlay-mount FAILURE handler — actionable, honest message
+# ---------------------------------------------------------------------------
+
+def test_overlay_mount_failure_emits_actionable_message(hook_fixture, tmp_path):
+    """A failed overlay mount must produce a self-explanatory error.
+
+    Regression for the seadog ask: inside a VM whose root is virtiofs the
+    overlay *upperdir* can't be hosted (virtiofs lacks tmpfile +
+    RENAME_WHITEOUT), the mount fails, and the only message kento used to
+    print was ``kento-hook: error: overlay mount failed`` — which points
+    nowhere. The enriched handler at the shared ``) || { ... }`` site
+    (covering both the idmapped and privileged mounts) must now name the
+    writable layer path (``$STATE_DIR/upper``), report the filesystem type
+    hosting it, and explain the likely cause + remediation (mount a tmpfs
+    or ext4/xfs at ``$STATE_DIR``, or set ``KENTO_STATE_DIR``; only the
+    upper/work dirs need it).
+
+    We don't depend on a true unsupported-fs (CI rarely has virtiofs and
+    root); the *message generation* is the unit under test. We force the
+    overlay mount to fail deterministically — for any user, root or not —
+    by shadowing ``mount`` on PATH with a stub that exits 1. The layer
+    dirs still exist, so the hook reaches the mount call (not the earlier
+    layer-existence guard) and lands in the failure handler.
+
+    This test is mutation-sensitive: revert the handler enrichment back to
+    the bare one-liner and the ``$STATE_DIR/upper`` / remediation
+    assertions go red.
+    """
+    # Stub `mount` so the overlay mount fails regardless of privilege. It
+    # still echoes a kernel-ish line to stderr so we also confirm the raw
+    # mount stderr is preserved (not swallowed) alongside our message.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    mount_stub = bindir / "mount"
+    mount_stub.write_text(
+        "#!/bin/sh\n"
+        "echo 'mount: stub: overlay mount forced to fail' >&2\n"
+        "exit 1\n"
+    )
+    mount_stub.chmod(0o755)
+
+    env = dict(hook_fixture.env)
+    env["LXC_HOOK_TYPE"] = "pre-mount"
+    env["LIBMOUNT_FORCE_MOUNT2"] = "always"
+    # Prepend the stub dir so our `mount` shadows the real one. Keep the
+    # real dirs too (findmnt and friends must still resolve).
+    env["PATH"] = f"{bindir}:{env.get('PATH', '/usr/sbin:/usr/bin:/sbin:/bin')}"
+
+    state_dir = hook_fixture.state_dir
+    rootfs = hook_fixture.rootfs
+
+    try:
+        result = subprocess.run(
+            ["sh", str(hook_fixture.hook_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        # Still fails closed with exit 1.
+        assert result.returncode == 1, (
+            f"hook should exit 1 on overlay-mount failure, got "
+            f"{result.returncode}.\nstdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+
+        stderr = result.stderr
+
+        # Backstop: the original generic line is still present.
+        assert "overlay mount failed" in stderr, (
+            f"handler should still report 'overlay mount failed'; got:\n{stderr}"
+        )
+
+        # (1) Names the writable layer path $STATE_DIR/upper. This is the
+        # load-bearing enrichment — reverting to the bare one-liner drops it.
+        upper = f"{state_dir}/upper"
+        assert upper in stderr, (
+            f"error must name the writable layer path {upper!r} so the user "
+            f"knows WHICH path is the problem; got:\n{stderr}"
+        )
+
+        # (2) Reports the filesystem type hosting the upper (resolved via
+        # findmnt -T). The exact fs varies by host, but the message must
+        # carry an "on <fstype>" clause — never crash, never omit it.
+        assert "on " in stderr and "upper" in stderr, (
+            f"error must report the filesystem type hosting the upper "
+            f"('... on <fstype>'); got:\n{stderr}"
+        )
+
+        # (3) Explains the cause: the upper fs may not support an overlay
+        # upperdir (needs tmpfile + RENAME_WHITEOUT; virtiofs lacks them).
+        assert "RENAME_WHITEOUT" in stderr, (
+            f"error must explain the missing overlay-upper requirement "
+            f"(tmpfile + RENAME_WHITEOUT); got:\n{stderr}"
+        )
+        assert "virtiofs" in stderr, (
+            f"error should name virtiofs as the common culprit; got:\n{stderr}"
+        )
+
+        # (4) Honest wording: likely-cause, not asserted-cause.
+        assert "may not support" in stderr, (
+            f"wording must be honest ('may not support'), since the exact "
+            f"kernel reason isn't known at handler time; got:\n{stderr}"
+        )
+
+        # (5) Actionable remediation: tmpfs/ext4/xfs at $STATE_DIR, or
+        # KENTO_STATE_DIR; only upper/work need it.
+        assert "tmpfs" in stderr, (
+            f"remediation must mention mounting a tmpfs; got:\n{stderr}"
+        )
+        assert ("ext4" in stderr or "xfs" in stderr), (
+            f"remediation must mention a real fs (ext4/xfs); got:\n{stderr}"
+        )
+        assert "KENTO_STATE_DIR" in stderr, (
+            f"remediation must mention setting KENTO_STATE_DIR; got:\n{stderr}"
+        )
+        assert str(state_dir) in stderr, (
+            f"remediation must name the actual $STATE_DIR to act on "
+            f"({state_dir}); got:\n{stderr}"
+        )
+
+        # The raw mount stderr is preserved, not swallowed.
+        assert "stub: overlay mount forced to fail" in stderr, (
+            f"the underlying mount's own stderr should be surfaced too; "
+            f"got:\n{stderr}"
+        )
+
+    finally:
+        # The stub never mounts anything, but be defensive in case a real
+        # mount slipped through (e.g. PATH ordering surprise under root).
+        if _is_mountpoint(rootfs):
+            subprocess.run(["umount", str(rootfs)], check=False, capture_output=True)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
