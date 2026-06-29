@@ -465,7 +465,28 @@ case "$HOOK_TYPE" in
                 -o "lowerdir=$LAYERS,upperdir=$STATE_DIR/upper,workdir=$STATE_DIR/work" \
                 "$ROOTFS"
         fi
-        ) || { echo "kento-hook: error: overlay mount failed" >&2; exit 1; }
+        ) || {
+            # Overlay mount failed (both the idmapped path above and the
+            # privileged path land here). The most common hard-to-diagnose
+            # cause is the writable layer ($STATE_DIR/upper) sitting on a
+            # filesystem that cannot host an overlay upperdir — it needs
+            # tmpfile + RENAME_WHITEOUT support, which e.g. virtiofs (a common
+            # VM root) lacks. We don't always know the exact kernel reason at
+            # this point, so the wording stays "may not support" (likely cause,
+            # not asserted). findmnt is util-linux (already used above); we use
+            # -T/--target so a non-mountpoint $STATE_DIR resolves to its
+            # containing filesystem (a bare $STATE_DIR is rarely its own mount).
+            # Degrade gracefully to "unknown" if it yields nothing.
+            _upper_fstype=$(findmnt -no FSTYPE -T "$STATE_DIR" 2>/dev/null | head -1 || true)
+            [ -n "$_upper_fstype" ] || _upper_fstype="unknown"
+            echo "kento-hook: error: overlay mount failed" >&2
+            echo "kento-hook: the container's writable layer ($STATE_DIR/upper, on $_upper_fstype) is on a" >&2
+            echo "kento-hook: filesystem that may not support an overlay upperdir (it needs tmpfile +" >&2
+            echo "kento-hook: RENAME_WHITEOUT -- e.g. virtiofs, common as a VM root, lacks them)." >&2
+            echo "kento-hook: Mount a tmpfs or a real (ext4/xfs) filesystem at $STATE_DIR and retry, or set" >&2
+            echo "kento-hook: KENTO_STATE_DIR to one. Only the upper/work dirs need it; the image store can stay put." >&2
+            exit 1
+        }
 
         # Guest config injection — shared with VM / PVE-VM modes. Runs with the
         # ORIGINAL cwd (the mount subshell's chdir did not leak); $ROOTFS and
