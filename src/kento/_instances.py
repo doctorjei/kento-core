@@ -337,9 +337,12 @@ class Instance(ABC):
         and are deliberately not counted; ``work`` is transient staging and is
         likewise excluded (§12.2).
 
-        Returns the apparent byte size via ``du -sb`` (``--bytes``: a true byte
-        count, not 512-byte / 1K disk blocks — the value a consumer expects from
-        ``disk_usage``). Failure modes:
+        Returns the **allocated** byte size via ``du -s --block-size=1`` (the
+        bytes actually occupied on disk — the sum of block allocations, scaled to
+        a byte count). This is true disk usage, not the apparent byte count
+        (``du -sb``): a sparse file or sub-block tail counts only the blocks it
+        occupies, which is the figure a consumer asking "how much disk is this
+        instance using" expects. Failure modes:
 
         * **Upper directory absent** (no writes yet, or a fully-ephemeral cell-#1
           instance) -> ``0``. Checked BEFORE running ``du`` so the common
@@ -358,7 +361,7 @@ class Instance(ABC):
         if not upper.is_dir():
             return 0
         result = subprocess.run(
-            ["du", "-sb", str(upper)],
+            ["du", "-s", "--block-size=1", str(upper)],
             capture_output=True,
             text=True,
         )

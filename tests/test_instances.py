@@ -333,7 +333,8 @@ def test_disk_usage_counts_populated_upper(tmp_path):
         inst = _instances._load_snapshot(d, "lxc")
     used = inst.disk_usage()
     assert isinstance(used, int)
-    # du -sb counts the dir + file; at minimum the payload's bytes are included.
+    # du allocated-size counts the dir + file; a 4096-byte file occupies at
+    # least one full block, so the allocated total is >= the payload bytes.
     assert used >= len(payload)
 
 
@@ -362,9 +363,11 @@ def test_disk_usage_unparseable_output_returns_zero(tmp_path, caplog):
     assert any("parse du output" in r.message for r in caplog.records)
 
 
-def test_disk_usage_uses_byte_block_size(tmp_path):
-    # Mutation-guard on the du mechanism: assert the -sb (bytes) flag is used,
-    # not -sh (human) — a human string would not parse to the right int.
+def test_disk_usage_uses_allocated_block_size(tmp_path):
+    # Mutation-guard on the du mechanism: assert the ALLOCATED basis flags
+    # (du -s --block-size=1, byte-scaled disk usage) are used, not -sb (apparent)
+    # and not -sh (human) — a human string would not parse to the right int and
+    # apparent bytes would over-report sparse / sub-block tails.
     d = _make_lxc(tmp_path)
     (d / "upper").mkdir()
     with patch("kento.is_running", return_value=False):
@@ -377,7 +380,7 @@ def test_disk_usage_uses_byte_block_size(tmp_path):
 
     with patch("kento._instances.subprocess.run", side_effect=_fake_run):
         assert inst.disk_usage() == 123
-    assert captured["cmd"][:2] == ["du", "-sb"]
+    assert captured["cmd"][:3] == ["du", "-s", "--block-size=1"]
 
 
 # --------------------------------------------------------------------------- #
