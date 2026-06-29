@@ -57,6 +57,7 @@ from kento.errors import InstanceNotFoundError, KentoError
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
+    from kento._images import Hold
     from kento._network import GuestTarget, HostBinding
     from kento.errors import StateError
 
@@ -198,6 +199,7 @@ class Instance(ABC):
     _nesting: bool
     _created: datetime
     _environment: dict[str, str]
+    _hold: "Hold | None"
 
     # ------------------------------------------------------------------- #
     # Getter-only properties (§11.2 M9): identity + observed + create-time
@@ -268,6 +270,20 @@ class Instance(ABC):
     def environment(self) -> "dict[str, str]":
         """Create-time environment (no ``set --env`` today, §11.0). Getter-only."""
         return self._environment
+
+    @property
+    def hold(self) -> "Hold | None":
+        """This instance's prune-protection pin, or ``None`` (§12.3). Getter-only.
+
+        The ``Hold`` (``kento-hold.<name>``) that pins this instance's image
+        against ``podman prune`` — the cached snapshot value, loaded at
+        get/list/refresh (eager, §2 principle 2 — a property returns cached
+        state and performs NO I/O on access). ``None`` when no hold exists (an
+        adopted/legacy/pre-hold guest). Getter-only: a hold is created/removed
+        by the procedural pin lifecycle (``layers.py``), never assigned onto an
+        instance handle. The global view of all holds is ``Hold.list()``.
+        """
+        return self._hold
 
     @property
     def forwards(self) -> "dict[HostBinding, GuestTarget]":
@@ -2619,6 +2635,7 @@ def _load_snapshot(container_dir: Path, mode: str) -> Instance:
     inst._nesting = (_read_meta(container_dir, "kento-nesting") == "1")
     inst._created = _load_created(container_dir)
     inst._environment = _load_environment(container_dir)
+    inst._hold = _load_hold(name)
 
     # Subclass-specific fields (backing fields; ``unprivileged`` is getter-only,
     # ``lxc_args``/``qemu_args`` are settable in Block 11 — both backed by ``_``).
@@ -3149,6 +3166,60 @@ def _orphan_vmid(container_dir: Path, mode: str) -> str | None:
         return _read_meta(container_dir, "kento-vmid")
     # pve (pve-lxc): the dir name is the vmid.
     return container_dir.name
+
+
+def _load_hold(name: str) -> "Hold | None":
+    """Load THIS instance's own prune-protection hold, or ``None`` (§12.3).
+
+    The instance's hold is the stopped podman container ``kento-hold.<name>``.
+    This is a SINGLE targeted ``podman container inspect`` for that one hold
+    (NOT ``Hold.list()`` filtered) so that ``Instance.list()`` of N instances
+    stays O(N) podman calls, not O(N²) — eager-loading per principle 2 without
+    making the collection path quadratic (brief JC1).
+
+    Faithful to BOTH hold shapes (§2 principle 1), via the SAME parsing the
+    global ``Hold.list()`` uses:
+
+    * a non-empty ``io.kento.hold-image-id`` label → MODERN id-pin → ``Digest``
+      (``_digest_from_podman_id``);
+    * else the ``.Image`` field → LEGACY pin → ``OciReference`` (or a ``Digest``
+      for a bare-id ``.Image``, ``_parse_legacy_pinned`` / JC3).
+
+    TOTAL: no hold (the inspect fails — most instances have a hold, but an
+    adopted/legacy/pre-hold guest may not) → ``None``; a hold with neither an
+    id label nor a ``.Image`` → ``None`` with a log (no faithful pin to build,
+    mirroring ``Hold.list``'s skip-and-log). Reuses the existing
+    ``layers._hold_pinned_id`` id-label reader; the ``.Image`` is read with one
+    more inspect only on the legacy branch (the common modern path is one call).
+    """
+    from kento._images import Hold, _digest_from_podman_id, _parse_legacy_pinned
+    from kento.layers import _hold_pinned_id, _podman_cmd
+
+    hold_name = f"kento-hold.{name}"
+    image_id = _hold_pinned_id(name)
+    if image_id:
+        return Hold(instance=name, pinned=_digest_from_podman_id(image_id))
+
+    # No id label → legacy (or no hold at all). Read the hold's .Image; a failed
+    # inspect (no such container) means this instance has no hold → None.
+    try:
+        result = subprocess.run(
+            [*_podman_cmd(), "container", "inspect", hold_name,
+             "--format", "{{.Image}}"],
+            capture_output=True, text=True,
+        )
+    except Exception:  # noqa: BLE001 — a missing podman is "no observable hold"
+        return None
+    if result.returncode != 0:
+        return None
+    image = result.stdout.strip()
+    if not image or image == "<no value>":
+        _instances_logger.warning(
+            "hold %s has no image-id label and no .Image; treating as no hold",
+            hold_name,
+        )
+        return None
+    return Hold(instance=name, pinned=_parse_legacy_pinned(image))
 
 
 def _load_resources(container_dir: Path) -> dict[str, int]:

@@ -51,6 +51,7 @@ Spec: ``~/workspace/kento-core-api-design.md`` §4.1 (AMENDED run 36), §4.3, §
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -62,9 +63,18 @@ from kento.errors import ImageNotFoundError, KentoError, StateError
 
 _images_logger = logging.getLogger("kento")
 
+# A bare podman content id as it appears in a hold's ``.Image`` field: a 64-char
+# lowercase sha256 hex with NO ``algorithm:`` prefix and no repository/tag. Such
+# a value is an image ID, not an OCI reference, so ``Hold.list`` builds a Digest
+# from it rather than feeding it to ``OciReference.parse`` (§12.3 / JC3). Anchored
+# + ASCII so a 64-char *tag* (which would contain non-hex chars or live after a
+# repo path) is not misread as an id.
+_RE_BARE_SHA256 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+
 __all__ = [
     "DiskFormat",
     "Layer",
+    "Hold",
     "Image",
     "LayeredImage",
     "OciImage",
@@ -109,6 +119,130 @@ class Layer:
 
     id: str
     short_link: str
+
+
+# --------------------------------------------------------------------------- #
+# Hold — a typed view of one kento prune-protection pin (§12.3).
+#
+# A hold pins a content-addressed image against ``podman prune`` so a live or
+# stopped instance can't have its layers reaped. Physically it is a STOPPED
+# podman container named ``kento-hold.<guest>`` carrying the label
+# ``io.kento.hold-for=<guest>`` and EITHER an ``io.kento.hold-image-id`` label
+# (modern, an id-pin) OR a tag-pinned ``.Image`` (legacy, older podman without
+# the id label) — see layers.create_image_hold / images._holds /
+# images._hold_image_ids for the ground truth this wraps.
+#
+# This is an ADDITIVE typed READ: it wraps the existing procedural queries and
+# does NOT change how holds are created/removed/re-pinned (that stays the
+# layers.py path). Holds + Digest are the content-addressed concept (the podman
+# store); they do not apply to writable images (§12.3).
+# --------------------------------------------------------------------------- #
+
+
+def _digest_from_podman_id(raw: str) -> Digest:
+    """Normalize a podman content-id string to a typed ``Digest`` (§3.2).
+
+    The podman boundary (mirrors ``OciImage.resolve_id``): the
+    ``io.kento.hold-image-id`` label records ``layers.resolve_image_id``'s
+    output, which on real podman is a **bare 64-char sha256 hex with NO
+    ``algorithm:`` prefix** (e.g. ``279c3d3b…``); some podman/docker builds DO
+    carry the prefix. A bare hex is correctly not a valid ``Digest`` *string*
+    (§3.8 grammar = ``algorithm:encoded``), so we normalize HERE without
+    loosening the grammar:
+
+    * prefixed (``algorithm:encoded``) → ``Digest.parse`` (faithful — a
+      non-sha256 algorithm survives, no sha256 assumption);
+    * bare hex → ``Digest(algorithm="sha256", encoded=<hex>)``. The constructor
+      runs the SAME ``validate_digest`` (sha256 => exactly 64 lowercase hex), so
+      a garbage id raises a typed ``MalformedReference`` rather than building a
+      bad ``Digest`` (gate C: no malformed value escapes).
+    """
+    if ":" in raw:
+        return Digest.parse(raw)
+    return Digest(algorithm="sha256", encoded=raw)
+
+
+def _parse_legacy_pinned(image: str) -> Digest | OciReference:
+    """Parse a legacy hold's ``.Image`` field to ``Digest`` | ``OciReference``.
+
+    A legacy hold (older podman, no ``io.kento.hold-image-id`` label) pins via
+    its container's ``.Image`` field. That field is USUALLY a tag reference
+    (e.g. ``docker.io/library/debian:12``) → ``OciReference.parse`` (§2
+    principle 3 — never re-split a reference by hand). But podman may also
+    render ``.Image`` as a **bare content id** (a 64-char sha256 hex with no
+    ``algorithm:`` prefix and no path/tag), which ``OciReference.parse`` would
+    reject as a bare-identifier name (it is an id, not a ref). We detect that
+    shape and build a ``Digest`` instead — faithful to BOTH legacy ``.Image``
+    forms (§12.3 / JC3).
+    """
+    if _RE_BARE_SHA256.match(image):
+        return _digest_from_podman_id(image)
+    return OciReference.parse(image)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Hold:
+    """A typed view of one kento prune-protection pin (§12.3).
+
+    A frozen, inert value (§2 principle 2 — no I/O on access). ``instance`` is
+    the guest the hold pins for (the ``io.kento.hold-for`` label). ``pinned`` is
+    the pinned image identity, faithful to BOTH physical hold shapes (§2
+    principle 1 — neither form is normalized away):
+
+    * a ``Digest`` — the MODERN id-pin, from the ``io.kento.hold-image-id``
+      label (a content id);
+    * an ``OciReference`` — the LEGACY tag-pin, from the hold container's
+      ``.Image`` field on older podman that predates the id label.
+
+    The container name ``kento-hold.<instance>`` is DERIVABLE from ``instance``
+    (principle 7), so it is NOT a field — add it only if a real consumer needs
+    it (none does in 1.0). Created/removed/re-pinned via the procedural
+    ``layers.py`` path; this type is the READ projection only.
+    """
+
+    instance: str
+    pinned: Digest | OciReference
+
+    @classmethod
+    def list(cls) -> list[Hold]:
+        """Return every kento hold, typed and sorted by instance name (§12.3).
+
+        Wraps the existing procedural queries AS-IS: ``images._holds()`` (the
+        ``(held_for, .Image)`` pairs) joined with ``images._hold_image_ids()``
+        (the ``held_for -> io.kento.hold-image-id`` map). For each hold:
+
+        * a non-empty id label present → MODERN id-pin, ``pinned`` is a
+          ``Digest`` (``_digest_from_podman_id``);
+        * no id label → LEGACY tag-pin, ``pinned`` is parsed from the ``.Image``
+          field (``_parse_legacy_pinned`` — an ``OciReference``, or a ``Digest``
+          for a bare-id ``.Image``, JC3).
+
+        Mirrors ``Instance.list()`` (collection-scoped, global). Sorted by
+        ``instance`` for a stable, deterministic listing (JC4). A hold whose
+        legacy ``.Image`` is empty (no id label and no ``.Image``) is SKIPPED
+        WITH A LOG — there is no faithful ``pinned`` to build, and one
+        unparseable hold must not hide every healthy one (the same totality
+        stance ``Instance.list`` takes over the store).
+        """
+        from kento.images import _hold_image_ids, _holds
+
+        ids = _hold_image_ids()
+        holds: list[Hold] = []
+        for held_for, image in _holds():
+            image_id = ids.get(held_for, "")
+            if image_id:
+                pinned: Digest | OciReference = _digest_from_podman_id(image_id)
+            elif image:
+                pinned = _parse_legacy_pinned(image)
+            else:
+                # No id label AND no .Image — nothing faithful to pin to.
+                _images_logger.warning(
+                    "skipping hold for %r: no image-id label and no .Image",
+                    held_for,
+                )
+                continue
+            holds.append(cls(instance=held_for, pinned=pinned))
+        return sorted(holds, key=lambda h: h.instance)
 
 
 # --------------------------------------------------------------------------- #
