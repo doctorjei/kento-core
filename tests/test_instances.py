@@ -257,6 +257,130 @@ def test_snapshot_storage_explicit_and_unknown(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# SD4a — overlay storage surface: instance.upper / .work (cached, I/O-free)
+# and instance.disk_usage() (explicit I/O method). §12.2.
+# --------------------------------------------------------------------------- #
+
+
+def test_upper_work_default_to_container_dir(tmp_path):
+    # No kento-state redirect => state_dir falls back to the container dir.
+    d = _make_lxc(tmp_path)
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    assert inst.upper == d / "upper"
+    assert inst.work == d / "work"
+
+
+def test_upper_work_follow_kento_state_redirect(tmp_path):
+    # A kento-state redirect points upper/work at an alternate state dir (the
+    # KENTO_STATE_DIR / overlay-on-overlay sidestep). Same derivation as info.py.
+    state = tmp_path / "alt-state"
+    state.mkdir()
+    d = _make_lxc(tmp_path, **{"kento-state": str(state)})
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    assert inst.upper == state / "upper"
+    assert inst.work == state / "work"
+    # NOT the container dir (guards the redirect — mutation test (a)).
+    assert inst.upper != d / "upper"
+
+
+def test_upper_work_are_getter_only(tmp_path):
+    d = _make_lxc(tmp_path)
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    with pytest.raises(AttributeError):
+        inst.upper = Path("/x")  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        inst.work = Path("/x")  # type: ignore[misc]
+
+
+def test_upper_work_access_is_io_free(tmp_path):
+    # Principle 2: reading the property does NO I/O. Build the snapshot, then
+    # patch subprocess.run AND Path.is_dir to blow up, and assert property access
+    # never touches them.
+    d = _make_lxc(tmp_path)
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    with patch("kento._instances.subprocess.run",
+               side_effect=AssertionError("property did I/O via subprocess")):
+        with patch.object(Path, "is_dir",
+                          side_effect=AssertionError("property stat'd disk")):
+            # Pure cached reads — neither patch should fire.
+            assert inst.upper == d / "upper"
+            assert inst.work == d / "work"
+
+
+def test_disk_usage_zero_when_upper_absent(tmp_path):
+    # No upper dir created => 0, and du is NEVER spawned (checked before the call).
+    d = _make_lxc(tmp_path)
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    assert not inst.upper.exists()
+    with patch("kento._instances.subprocess.run",
+               side_effect=AssertionError("du spawned for absent upper")):
+        assert inst.disk_usage() == 0
+
+
+def test_disk_usage_counts_populated_upper(tmp_path):
+    # Real du over a populated upper => the byte count is > 0 and matches.
+    d = _make_lxc(tmp_path)
+    upper = d / "upper"
+    upper.mkdir()
+    payload = b"x" * 4096
+    (upper / "blob").write_bytes(payload)
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    used = inst.disk_usage()
+    assert isinstance(used, int)
+    # du -sb counts the dir + file; at minimum the payload's bytes are included.
+    assert used >= len(payload)
+
+
+def test_disk_usage_du_failure_returns_zero(tmp_path, caplog):
+    # du non-zero exit => 0 with a logged warning (observational, not a guard).
+    d = _make_lxc(tmp_path)
+    (d / "upper").mkdir()
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    fake = MagicMock(returncode=1, stdout="", stderr="du: cannot read")
+    with patch("kento._instances.subprocess.run", return_value=fake):
+        with caplog.at_level("WARNING"):
+            assert inst.disk_usage() == 0
+    assert any("du failed" in r.message for r in caplog.records)
+
+
+def test_disk_usage_unparseable_output_returns_zero(tmp_path, caplog):
+    d = _make_lxc(tmp_path)
+    (d / "upper").mkdir()
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    fake = MagicMock(returncode=0, stdout="not-a-number\n", stderr="")
+    with patch("kento._instances.subprocess.run", return_value=fake):
+        with caplog.at_level("WARNING"):
+            assert inst.disk_usage() == 0
+    assert any("parse du output" in r.message for r in caplog.records)
+
+
+def test_disk_usage_uses_byte_block_size(tmp_path):
+    # Mutation-guard on the du mechanism: assert the -sb (bytes) flag is used,
+    # not -sh (human) — a human string would not parse to the right int.
+    d = _make_lxc(tmp_path)
+    (d / "upper").mkdir()
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "lxc")
+    captured = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout="123\t/x\n", stderr="")
+
+    with patch("kento._instances.subprocess.run", side_effect=_fake_run):
+        assert inst.disk_usage() == 123
+    assert captured["cmd"][:2] == ["du", "-sb"]
+
+
+# --------------------------------------------------------------------------- #
 # Status resolver — total, ORPHAN / UNKNOWN domain states.
 # --------------------------------------------------------------------------- #
 

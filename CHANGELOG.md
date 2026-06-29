@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Instance overlay-storage surface (storage-depth pass, block SD4a).** The
+  base `Instance` now exposes the writable-root model (§12.2, cell #2 — ro base
+  layers + a full overlay): `instance.upper: Path` (the overlay UPPERDIR =
+  `state_dir/"upper"`, where the instance's writes land) and `instance.work:
+  Path` (the overlayfs WORKDIR = `state_dir/"work"`, copy-up/rename staging).
+  `state_dir` is the `kento-state` redirect if present, else the container
+  directory (the same derivation the `info` wire uses). Both are cached,
+  getter-only properties resolved ONCE in the hydrate path (a single
+  `kento-state` read feeds both), so reading them performs NO I/O (principle 2),
+  matching `instance.hold` (SD2). New explicit I/O method `instance.disk_usage()
+  -> int` returns the byte size of the upper dir via `du -sb` (upper-only — the
+  ro base layers are not counted); `0` when the upper dir is absent (no writes
+  yet) or on a `du` failure (logged). Library-internal (`.devN`); no CLI or wire
+  change (the `_projection.py` re-point is the deferred SD4b).
 - **Typed `ImageRecord` managed-image ledger (storage-depth pass, block SD3 —
   the JC1 1.0 blocker).** A new frozen value type
   `ImageRecord{id: Digest, refs: tuple[OciReference, ...], guests: tuple[str,
