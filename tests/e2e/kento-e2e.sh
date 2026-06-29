@@ -1213,7 +1213,14 @@ run_phase5b_scoped_stop() {
     fi
 
     # ----- Test B: scoped stop succeeds AND ground truth says stopped -----
-    run_kento "$KTO_STOP" "$scope" stop "$name"
+    # M6 (Block 09/19): default `stop` is graceful-NEVER-kill and raises
+    # StopTimeout (rc=1) if the guest does not shut down within the grace
+    # window. This assertion needs a GUARANTEED stop to then cross-check ground
+    # truth, so it uses `--force` (the M6 way to ensure the guest is down). The
+    # SCOPING under test is unchanged: `kento <scope> stop -f <name>` still acts
+    # only on the named instance, and gt_stopped() checks that named instance.
+    # (Default-stop happy path is covered by Phase 5 #107 and by Test C below.)
+    run_kento "$KTO_STOP" "$scope" stop -f "$name"
     if [ "$RUN_TIMED_OUT" -eq 1 ]; then
         fail "$label: scoped stop succeeds + ground truth stopped" \
             "TIMEOUT after ${KTO_STOP}s" "$RUN_OUTPUT"
@@ -1245,6 +1252,11 @@ run_phase5b_scoped_stop() {
     fi
 
     # ----- Test C: idempotent scoped stop on already-stopped -----
+    # Deliberately a DEFAULT (graceful, no `--force`) stop: M6 short-circuits on
+    # the already-stopped state (stop.py's is_running pre-check logs "Already
+    # stopped" and returns BEFORE the grace/StopTimeout path), so this is also a
+    # genuine default-stop happy-path check — it must NOT raise StopTimeout on an
+    # instance that is already down. Relies on Test B having stopped it.
     run_kento "$KTO_STOP" "$scope" stop "$name"
     if [ "$RUN_RC" -eq 0 ] && echo "$RUN_OUTPUT" | grep -q "Already stopped"; then
         pass "$label: scoped stop is idempotent (Already stopped)"
@@ -1264,7 +1276,14 @@ run_phase5b_scoped_stop() {
         skip "$label: scoped stop on running does NOT short-circuit" \
             "could not restart for regression check"
     else
-        run_kento "$KTO_STOP" "$scope" stop "$name"
+        # `--force` so the stop reliably completes (M6: a default stop can raise
+        # StopTimeout/rc=1 on a contended guest that misses its grace window,
+        # which would mask THIS test's intent). The mode-resolution path under
+        # test in _dispatch_multi (resolve the running instance's mode, do NOT
+        # bail with "Already stopped") is identical for force vs default — so the
+        # regression guard is fully preserved: a running instance must NOT report
+        # "Already stopped".
+        run_kento "$KTO_STOP" "$scope" stop -f "$name"
         if [ "$RUN_TIMED_OUT" -eq 1 ]; then
             fail "$label: scoped stop on running does NOT short-circuit" \
                 "TIMEOUT after ${KTO_STOP}s" "$RUN_OUTPUT"
