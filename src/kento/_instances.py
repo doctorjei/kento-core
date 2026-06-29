@@ -200,6 +200,15 @@ class Instance(ABC):
     _created: datetime
     _environment: dict[str, str]
     _hold: "Hold | None"
+    # Overlay UPPERDIR / WORKDIR (§12.2 cell #2). Derived ONCE in the hydrate path
+    # from the ``kento-state`` redirect (state_dir/"upper" and state_dir/"work"),
+    # cached so the public ``upper``/``work`` properties do ZERO I/O on access
+    # (§2 principle 2) — exactly like ``_hold`` (SD2). NOT the lower dir (= the ro
+    # base layers, the instance's baked ``kento-layers``) and NOT the merged
+    # ``$ROOTFS`` (the realized composite). ``work`` is overlayfs copy-up/rename
+    # STAGING — a path only, never modeled as an image (§12.2).
+    _upper: Path
+    _work: Path
 
     # ------------------------------------------------------------------- #
     # Getter-only properties (§11.2 M9): identity + observed + create-time
@@ -284,6 +293,87 @@ class Instance(ABC):
         instance handle. The global view of all holds is ``Hold.list()``.
         """
         return self._hold
+
+    @property
+    def upper(self) -> Path:
+        """The overlay UPPERDIR — where this instance's writes land (§12.2).
+
+        In the 1.0 writable-root model (cell #2: ro base + full overlay), the
+        overlayfs ``upperdir`` is the single writable layer; the ro base layers
+        are the ``lowerdir`` and are NOT part of this path. Resolved as
+        ``state_dir/"upper"`` where ``state_dir`` is the ``kento-state`` redirect
+        if present, else the container directory (the same derivation the legacy
+        ``info`` wire uses).
+
+        Cached: the ``kento-state`` redirect is read ONCE in the hydrate path
+        (get/list/refresh) and ``state_dir/"upper"`` cached, so reading this
+        property performs NO I/O (§2 principle 2 — a property returns the cached
+        snapshot, never queries the backend). The path is returned whether or not
+        it exists on disk (existence is observed by ``disk_usage()``, which does
+        the I/O). Getter-only: a snapshot's storage location is fixed.
+        """
+        return self._upper
+
+    @property
+    def work(self) -> Path:
+        """The overlayfs WORKDIR — copy-up/rename staging (§12.2). Getter-only.
+
+        overlayfs requires an empty ``workdir`` on the same filesystem as the
+        ``upperdir`` for atomic copy-up and rename operations; it is internal
+        staging, NOT a layer and NOT modeled as an image (§12.2). Resolved as
+        ``state_dir/"work"`` from the SAME single ``kento-state`` read that backs
+        :attr:`upper`, and cached identically — so this property does NO I/O on
+        access (§2 principle 2). Getter-only.
+        """
+        return self._work
+
+    def disk_usage(self) -> int:
+        """Bytes written by this instance = the size of the overlay UPPERDIR.
+
+        An explicit I/O HANDLE METHOD — NOT a property — because it shells out to
+        ``du`` to measure the on-disk tree (§2 principle 2: I/O lives in named
+        methods, never behind a property). Measures :attr:`upper` ONLY: the lower
+        layers are the read-only base image (shared, not "used" by this instance)
+        and are deliberately not counted; ``work`` is transient staging and is
+        likewise excluded (§12.2).
+
+        Returns the apparent byte size via ``du -sb`` (``--bytes``: a true byte
+        count, not 512-byte / 1K disk blocks — the value a consumer expects from
+        ``disk_usage``). Failure modes:
+
+        * **Upper directory absent** (no writes yet, or a fully-ephemeral cell-#1
+          instance) -> ``0``. Checked BEFORE running ``du`` so the common
+          no-writes-yet case never spawns a process and never logs.
+        * **``du`` non-zero exit / unparseable output** -> ``0`` with a logged
+          warning. Rationale: ``disk_usage`` is observational, not a guard — a
+          transient ``du`` failure (a racing scrub removing the tree, a
+          permission blip) should surface as "nothing measured" rather than crash
+          a caller iterating instances or rendering a list. ``0`` is the same
+          sentinel as the absent case and is unambiguous against a real size
+          (a populated upper is always > 0); the log line preserves the honesty
+          (the failure is recorded, not silently swallowed). Mirrors the legacy
+          ``info._get_size`` "?"-on-error stance, in the typed ``int`` domain.
+        """
+        upper = self._upper
+        if not upper.is_dir():
+            return 0
+        result = subprocess.run(
+            ["du", "-sb", str(upper)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            _instances_logger.warning(
+                "du failed for %s (exit %d): %s",
+                upper, result.returncode, result.stderr.strip(),
+            )
+            return 0
+        try:
+            return int(result.stdout.split()[0])
+        except (IndexError, ValueError):
+            _instances_logger.warning("could not parse du output for %s: %r",
+                                      upper, result.stdout)
+            return 0
 
     @property
     def forwards(self) -> "dict[HostBinding, GuestTarget]":
@@ -2636,6 +2726,14 @@ def _load_snapshot(container_dir: Path, mode: str) -> Instance:
     inst._created = _load_created(container_dir)
     inst._environment = _load_environment(container_dir)
     inst._hold = _load_hold(name)
+    # Overlay paths (§12.2): resolve the ``kento-state`` redirect ONCE and cache
+    # both derived paths, so ``upper``/``work`` are I/O-free on access (principle
+    # 2). state_dir = the redirect if present, else the container dir — the SAME
+    # derivation the legacy ``info`` wire uses (info.py: state_text or dir).
+    state_text = _read_meta(container_dir, "kento-state")
+    state_dir = Path(state_text) if state_text else container_dir
+    inst._upper = state_dir / "upper"
+    inst._work = state_dir / "work"
 
     # Subclass-specific fields (backing fields; ``unprivileged`` is getter-only,
     # ``lxc_args``/``qemu_args`` are settable in Block 11 — both backed by ``_``).
