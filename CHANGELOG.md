@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `Hold` prune-protection pin (storage-depth pass, block SD2).** A new
+  frozen value type `Hold{instance: str, pinned: Digest | OciReference}` typing
+  the existing `kento-hold.<guest>` containers that pin a content-addressed
+  image against `podman prune`. `pinned` is faithful to BOTH physical hold
+  shapes (no normalization): a `Digest` for the modern `io.kento.hold-image-id`
+  id-pin, or an `OciReference` for a legacy tag-pinned `.Image` (a bare-id
+  `.Image` is recognized as a content id and typed as a `Digest`). Two read
+  views of the same holds: `Hold.list() -> list[Hold]` (global, sorted by
+  instance) and `instance.hold -> Hold | None` (the instance's own pin, cached
+  in the get/list snapshot — eager, no I/O on access). Additive typed READS
+  that wrap the existing procedural hold machinery; how holds are
+  created/removed/re-pinned is unchanged. (`.devN` — the public library API
+  carries no stability promise yet.)
 - **`kento.diagnose()` accepts an optional `name`.** `kento.diagnose(name)`
   narrows the host-wide scan to the HOST checks plus the one resolved instance's
   checks (raising `InstanceNotFoundError` on a miss), projecting them UNFILTERED
