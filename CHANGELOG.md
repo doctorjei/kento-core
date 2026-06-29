@@ -19,10 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   getter-only properties resolved ONCE in the hydrate path (a single
   `kento-state` read feeds both), so reading them performs NO I/O (principle 2),
   matching `instance.hold` (SD2). New explicit I/O method `instance.disk_usage()
-  -> int` returns the byte size of the upper dir via `du -sb` (upper-only — the
-  ro base layers are not counted); `0` when the upper dir is absent (no writes
-  yet) or on a `du` failure (logged). Library-internal (`.devN`); no CLI or wire
-  change (the `_projection.py` re-point is the deferred SD4b).
+  -> int` returns the **allocated** byte size of the upper dir via `du -s
+  --block-size=1` (upper-only — the ro base layers are not counted); `0` when the
+  upper dir is absent (no writes yet) or on a `du` failure (logged).
+  Library-internal (`.devN`); no CLI or wire change (the `_projection.py`
+  re-point is the deferred SD4b).
 - **Typed `ImageRecord` managed-image ledger (storage-depth pass, block SD3 —
   the JC1 1.0 blocker).** A new frozen value type
   `ImageRecord{id: Digest, refs: tuple[OciReference, ...], guests: tuple[str,
@@ -71,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flat dict, completing the classes-only library↔CLI seam.
 
 ### Changed
+
+- **`instance.disk_usage()` now reports ALLOCATED disk usage (storage-depth
+  pass, block SD4b).** The basis changed from apparent bytes (`du -sb`) to the
+  bytes actually occupied on disk (`du -s --block-size=1`) — the figure a
+  consumer asking "how much disk is this instance using" expects (sparse files
+  and sub-block tails count only the blocks they occupy). Upper-only,
+  `0`-if-absent, and `0`-on-error+log are unchanged. Library-internal (`.devN`).
 
 - **`Image` family hierarchy refactor (storage-depth pass, block SD1).** The
   typed `Image` family is generalized and split (`.devN` — the public library
