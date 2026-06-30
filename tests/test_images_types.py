@@ -37,7 +37,7 @@ DIGEST_STR = f"sha256:{SHA}"
 
 
 def _ref(s="docker.io/library/ubuntu:latest"):
-    return OciReference.parse(s)
+    return OciReference.parse(s).unwrap()
 
 
 def _digest():

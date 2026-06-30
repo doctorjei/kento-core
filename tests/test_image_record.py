@@ -48,7 +48,7 @@ def _digest(hex64):
 
 
 def _ref(s):
-    return OciReference.parse(s)
+    return OciReference.parse(s).unwrap()
 
 
 # --------------------------------------------------------------------------- #
