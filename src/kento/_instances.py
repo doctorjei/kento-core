@@ -51,6 +51,7 @@ from kento._network import (
 )
 from kento._platform import PlatformMode, PlatformProfile, Status
 from kento._references import OciReference, SourceReference
+from kento._result import Ok, Result, _error_from
 from kento._storage import StorageMode
 from kento.errors import InstanceNotFoundError, KentoError
 
@@ -1249,27 +1250,39 @@ class Instance(ABC):
     # ------------------------------------------------------------------- #
     # M5 — start: boot the instance; self-update status (§11.2).
     # ------------------------------------------------------------------- #
-    def start(self) -> None:
+    def start(self) -> Result[None]:
         """Boot the instance (M5, §11.2) — wraps ``start.start``.
 
-        Delegates to the existing mode-aware ``start.start`` (which dispatches on
-        ``self._mode`` internally: vm / pve-vm / pve / lxc), then self-updates the
-        cached ``status`` from a fresh live probe (§10.2 — a lifecycle method DOES
-        I/O and reflects the new state). ``start.start`` is idempotent (a no-op on
-        an already-running instance), so a redundant ``start()`` is safe and the
-        re-resolved status is still correct.
+        Public Result boundary (Result-propagation sweep, Block S3): delegates to
+        the existing mode-aware ``start.start`` (which dispatches on ``self._mode``
+        internally: vm / pve-vm / pve / lxc), then self-updates the cached
+        ``status`` from a fresh live probe (§10.2 — a lifecycle method DOES I/O and
+        reflects the new state). ``start.start`` is idempotent (a no-op on an
+        already-running instance), so a redundant ``start()`` is safe and the
+        re-resolved status is still correct. On success returns ``Ok(None)``.
 
         Self-update via the Block-08 ``_resolve_status`` rather than a hard-coded
         ``Status.RUNNING``: re-resolving is the honest value (it picks up ORPHAN /
         UNKNOWN, and does not claim RUNNING if the boot silently failed to take),
         and it reuses the one status resolver instead of forking a second notion
         of "running".
-        """
-        self._check_alive()
-        from kento import start as start_mod
 
-        start_mod.start(self.name, container_dir=self._dir, mode=self._mode)
-        self._status = _resolve_status(self._dir, self._mode)
+        Any ``KentoError`` raised inside the body — ``_check_alive``'s
+        ``InstanceNotFoundError`` on a dead handle, or a ``SubprocessError`` /
+        ``StateError`` from the delegated ``start.start`` — is caught at this
+        boundary and converted to an ``Error`` with the real kind (KIND-FIDELITY
+        rule). ``start.start`` STAYS RAISING (internal control flow). A
+        non-``KentoError`` is a panic and propagates.
+        """
+        try:
+            self._check_alive()
+            from kento import start as start_mod
+
+            start_mod.start(self.name, container_dir=self._dir, mode=self._mode)
+            self._status = _resolve_status(self._dir, self._mode)
+            return Ok(value=None)
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M6 — stop: graceful-or-forced shutdown (§11.2, LOCKED).
@@ -1277,18 +1290,22 @@ class Instance(ABC):
     # Default graceful grace window (seconds) when ``timeout`` is None (§11.2 M6).
     _STOP_DEFAULT_TIMEOUT = 15
 
-    def stop(self, *, timeout: int | None = None, force: bool = False) -> None:
+    def stop(
+        self, *, timeout: int | None = None, force: bool = False
+    ) -> Result[None]:
         """Stop the instance (M6, §11.2 — LOCKED) — wraps ``stop.shutdown``.
 
-        Delivers the full LOCKED M6 semantics. The typed layer owns ALL the
-        timing/decision logic; ``stop.shutdown`` supplies the per-mode graceful
-        and forced primitives (its graceful path is now genuinely no-kill —
-        ``--nokill`` on LXC, no-SIGKILL on VM, no ``--forceStop`` on PVE — so a
-        stubborn guest is left running for our re-probe):
+        Public Result boundary (Result-propagation sweep, Block S3). Delivers the
+        full LOCKED M6 semantics. The typed layer owns ALL the timing/decision
+        logic; ``stop.shutdown`` supplies the per-mode graceful and forced
+        primitives (its graceful path is now genuinely no-kill — ``--nokill`` on
+        LXC, no-SIGKILL on VM, no ``--forceStop`` on PVE — so a stubborn guest is
+        left running for our re-probe):
 
         * ``force=False`` — graceful only, NEVER hard-kills. Issue a graceful
-          stop, then re-probe: if still running, raise
-          ``StopTimeout("cannot stop; try force")`` (the instance is left up).
+          stop, then re-probe: if still running, the internal
+          ``StopTimeout("cannot stop; try force")`` is raised and caught at this
+          boundary → ``Error(STOP_TIMEOUT)`` (the instance is left up).
         * ``force=True``, ``timeout`` None/0 — immediate hard kill.
         * ``force=True``, ``timeout > 0`` — grace that long, THEN kill: a graceful
           stop, a bounded liveness poll up to ``timeout`` seconds, then a hard
@@ -1297,80 +1314,102 @@ class Instance(ABC):
         ``timeout`` is the grace window; the post-elapse action differs — report
         (raise) vs kill — and the DEFAULT differs by case (§11.2 M6): graceful
         ``None`` => 15s; forced ``None`` => 0 (immediate). Self-updates ``status``
-        from a fresh probe afterward (§10.2).
+        from a fresh probe afterward (§10.2). On success returns ``Ok(None)``.
+
+        The whole body is wrapped: the LOCKED graceful-timeout ``StopTimeout``
+        (most-specific-first → ``STOP_TIMEOUT``, NOT its parent ``INVALID_STATE``),
+        a ``SubprocessError`` from a failed kill, or ``_check_alive``'s
+        ``InstanceNotFoundError`` are all caught here and converted to an ``Error``
+        with the real kind (KIND-FIDELITY rule). ``stop.shutdown`` STAYS RAISING.
         """
-        self._check_alive()
-        from kento import stop as stop_mod
+        try:
+            self._check_alive()
+            from kento import stop as stop_mod
 
-        # Default grace window. Graceful: None => 15s. Forced: None => 0
-        # (immediate kill); only an explicit timeout>0 buys a forced grace window.
-        if timeout is None:
-            grace = 0 if force else self._STOP_DEFAULT_TIMEOUT
-        else:
-            grace = timeout
+            # Default grace window. Graceful: None => 15s. Forced: None => 0
+            # (immediate kill); only an explicit timeout>0 buys a forced grace
+            # window.
+            if timeout is None:
+                grace = 0 if force else self._STOP_DEFAULT_TIMEOUT
+            else:
+                grace = timeout
 
-        if force and grace <= 0:
-            # Immediate hard kill: no grace window requested.
-            stop_mod.shutdown(
-                self.name, force=True,
-                container_dir=self._dir, mode=self._mode,
-            )
-            self._status = _resolve_status(self._dir, self._mode)
-            return
-
-        # Both remaining paths begin with a genuine graceful (no-kill) stop.
-        stop_mod.shutdown(
-            self.name, graceful_only=True,
-            container_dir=self._dir, mode=self._mode,
-        )
-        # Give the guest the grace window to actually go down.
-        went_down = _wait_until_down(self._dir, self._mode, grace)
-
-        if not went_down:
-            if force:
-                # force + timeout>0: grace elapsed, still up -> hard kill now.
+            if force and grace <= 0:
+                # Immediate hard kill: no grace window requested.
                 stop_mod.shutdown(
                     self.name, force=True,
                     container_dir=self._dir, mode=self._mode,
                 )
-            else:
-                # Graceful only: NEVER kill -> report it is still running. Resolve
-                # status first so the handle reflects the still-running reality.
                 self._status = _resolve_status(self._dir, self._mode)
-                from kento.errors import StopTimeout
+                return Ok(value=None)
 
-                raise StopTimeout("cannot stop; try force")
+            # Both remaining paths begin with a genuine graceful (no-kill) stop.
+            stop_mod.shutdown(
+                self.name, graceful_only=True,
+                container_dir=self._dir, mode=self._mode,
+            )
+            # Give the guest the grace window to actually go down.
+            went_down = _wait_until_down(self._dir, self._mode, grace)
 
-        self._status = _resolve_status(self._dir, self._mode)
+            if not went_down:
+                if force:
+                    # force + timeout>0: grace elapsed, still up -> hard kill now.
+                    stop_mod.shutdown(
+                        self.name, force=True,
+                        container_dir=self._dir, mode=self._mode,
+                    )
+                else:
+                    # Graceful only: NEVER kill -> report it is still running.
+                    # Resolve status first so the handle reflects the
+                    # still-running reality.
+                    self._status = _resolve_status(self._dir, self._mode)
+                    from kento.errors import StopTimeout
+
+                    raise StopTimeout("cannot stop; try force")
+
+            self._status = _resolve_status(self._dir, self._mode)
+            return Ok(value=None)
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M7 — destroy: stop (if needed) + remove instance + writable layer (§11.2).
     # ------------------------------------------------------------------- #
-    def destroy(self, *, force: bool = False) -> None:
+    def destroy(self, *, force: bool = False) -> Result[None]:
         """Destroy the instance (M7, §11.2) — wraps ``destroy.destroy``.
 
-        Removes the instance and its writable layer, and releases this instance's
-        OWN image hold (never the image — that is ``prune``'s job; ``destroy.py``
-        calls ``remove_image_hold`` for this guest only). ``force=True`` →
+        Public Result boundary (Result-propagation sweep, Block S3). Removes the
+        instance and its writable layer, and releases this instance's OWN image
+        hold (never the image — that is ``prune``'s job; ``destroy.py`` calls
+        ``remove_image_hold`` for this guest only). ``force=True`` →
         force-stop-then-remove (``destroy.destroy`` hard-stops a running instance
         before removal); ``force=False`` on a running instance raises
-        ``StateError`` (``destroy.destroy``'s guard) rather than killing it.
+        ``StateError`` (``destroy.destroy``'s guard) — caught here and returned as
+        ``Error(INVALID_STATE)`` — rather than killing it. On success returns
+        ``Ok(None)``.
 
-        After this returns the backing instance is gone, so the handle is marked
-        DEAD: a subsequent lifecycle/refresh call on it raises
-        ``InstanceNotFoundError`` (via ``_check_alive``) instead of acting on a
-        removed directory. We do NOT self-update ``status`` to a sentinel —
-        there is no "destroyed" ``Status`` (the enum models a live instance's
-        state); the dead flag is the honest signal that the handle is spent.
+        After a successful destroy the backing instance is gone, so the handle is
+        marked DEAD: a subsequent lifecycle/refresh call on it returns
+        ``Error(INSTANCE_NOT_FOUND)`` (via ``_check_alive`` at its own boundary)
+        instead of acting on a removed directory. We do NOT self-update ``status``
+        to a sentinel — there is no "destroyed" ``Status`` (the enum models a live
+        instance's state); the dead flag is the honest signal that the handle is
+        spent. ``_dead`` is set ONLY on the success path (inside the try, after the
+        delegate returns) — a failed destroy leaves the handle alive, so the error
+        path never marks it dead. ``destroy.destroy`` STAYS RAISING.
         """
-        self._check_alive()
-        from kento import destroy as destroy_mod
+        try:
+            self._check_alive()
+            from kento import destroy as destroy_mod
 
-        destroy_mod.destroy(
-            self.name, force, container_dir=self._dir, mode=self._mode,
-        )
-        # Only on success: the instance is gone, so the handle is spent.
-        self._dead = True
+            destroy_mod.destroy(
+                self.name, force, container_dir=self._dir, mode=self._mode,
+            )
+            # Only on success: the instance is gone, so the handle is spent.
+            self._dead = True
+            return Ok(value=None)
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M8 — scrub: reset the writable upper layer + re-pin hold (§11.2).
@@ -1528,7 +1567,7 @@ class Instance(ABC):
     # ------------------------------------------------------------------- #
     # M12 — attach: interactive console/TTY; ON THE BASE (§11.3, all modes).
     # ------------------------------------------------------------------- #
-    def attach(self) -> None:
+    def attach(self) -> Result[None]:
         """Attach to the guest console/TTY — BLOCKS until detach (M12, §11.3).
 
         On the BASE ``Instance`` because the capability is genuinely shared by
@@ -1553,22 +1592,33 @@ class Instance(ABC):
         ``attach.attach`` as a typed ``StateError`` — that propagates, it is not
         swallowed (and leaves ``attach_exit_code`` unchanged).
 
-        Raises ``InstanceNotFoundError`` via ``_check_alive`` if the handle was
-        destroyed.
+        Public Result boundary (Result-propagation sweep, Block S3): a destroyed
+        handle (``_check_alive``'s ``InstanceNotFoundError``) or a genuine
+        failure-to-attach (``attach.attach``'s ``StateError`` — no serial socket,
+        not a tty, can't connect) is caught here and returned as an ``Error`` with
+        the real kind; on a clean detach returns ``Ok(None)`` (the wrapped tool's
+        exit code is captured on :attr:`attach_exit_code`, NOT in the Result —
+        ``-> Result[None]`` preserves the locked int→None mapping). ``attach.attach``
+        STAYS RAISING.
         """
-        self._check_alive()
-        from kento import attach as attach_mod
+        try:
+            self._check_alive()
+            from kento import attach as attach_mod
 
-        # Run the interactive session. The wrapped tool's exit code is not the
-        # method's RETURN value (§11.3: attach is a console, not a status check),
-        # but we STORE it on the handle + log it (Jei-ruled refinement) so it is
-        # not lost. Pass only the name — attach.attach re-resolves across both
-        # namespaces; the dead-handle case is pre-empted by _check_alive above.
-        code = attach_mod.attach(self.name)
-        self._attach_exit_code = code
-        _instances_logger.info(
-            "attach session for %s exited with code %s", self.name, code,
-        )
+            # Run the interactive session. The wrapped tool's exit code is not the
+            # method's RETURN value (§11.3: attach is a console, not a status
+            # check), but we STORE it on the handle + log it (Jei-ruled refinement)
+            # so it is not lost. Pass only the name — attach.attach re-resolves
+            # across both namespaces; the dead-handle case is pre-empted by
+            # _check_alive above.
+            code = attach_mod.attach(self.name)
+            self._attach_exit_code = code
+            _instances_logger.info(
+                "attach session for %s exited with code %s", self.name, code,
+            )
+            return Ok(value=None)
+        except KentoError as exc:
+            return _error_from(exc)
 
     @property
     def attach_exit_code(self) -> int | None:
@@ -1777,7 +1827,11 @@ class SystemContainer(Instance):
         try:
             yield inst
         finally:
-            inst.destroy(force=True)
+            # ``destroy`` now returns a ``Result`` (Block S3); ``.unwrap()`` so a
+            # FAILED teardown still RAISES out of this ``finally`` exactly as it
+            # did before the conversion — a silently-discarded ``Error`` would
+            # leak the transient instance (gate A/C).
+            inst.destroy(force=True).unwrap()
 
     # ------------------------------------------------------------------- #
     # M13 — exec: run a command in the guest, return its exit code (§11.3).
@@ -1790,7 +1844,7 @@ class SystemContainer(Instance):
         tty: bool = False,
         user: str | None = None,
         env: "dict[str, str] | None" = None,
-    ) -> int:
+    ) -> Result[int]:
         """Run ``command`` in the guest, returning its exit code (M13, §11.3).
 
         ON ``SystemContainer`` only (the base lacks it, and a VM has no in-guest
@@ -1803,22 +1857,27 @@ class SystemContainer(Instance):
         * ``user`` — run as that guest user (``runuser -u <user> -- ``).
         * ``env`` — set in the guest (in-guest ``env K=V … `` prefix).
 
-        Returns the command's exit code and does NOT raise on a non-zero code
-        (§11.9, M13: non-zero is normal information — ``grep`` returning 1 is a
-        result, not an exception — and the caller decides what it means). A
-        genuine inability to RUN the command (instance gone, ``require_root``,
-        empty command) still raises the runtime's typed error. ``exec_cmd``
-        raises ``ModeError`` for vm/pve-vm — unreachable here since ``exec`` lives
-        only on ``SystemContainer`` (LXC family), but it remains the backstop.
-
-        Raises ``InstanceNotFoundError`` via ``_check_alive`` on a dead handle.
+        Public Result boundary (Result-propagation sweep, Block S3): returns
+        ``Ok(<exit code>)``, and an ``Ok`` carries the command's exit code even
+        when it is NON-ZERO — a non-zero code does NOT raise and is NOT an
+        ``Error`` (§11.9, M13: non-zero is normal information — ``grep`` returning
+        1 is a result, not an exception — the caller decides what it means). Only a
+        genuine inability to RUN the command (instance gone via ``_check_alive``,
+        ``require_root``, empty command, or ``exec_cmd``'s ``ModeError`` backstop
+        for vm/pve-vm — unreachable here since ``exec`` lives only on
+        ``SystemContainer``) is a ``KentoError``, caught at this boundary and
+        returned as an ``Error`` with the real kind. ``exec_cmd.exec_cmd`` STAYS
+        RAISING; a non-``KentoError`` panics.
         """
-        self._check_alive()
-        from kento import exec_cmd as exec_cmd_mod
+        try:
+            self._check_alive()
+            from kento import exec_cmd as exec_cmd_mod
 
-        return exec_cmd_mod.exec_cmd(
-            self.name, list(command), tty=tty, user=user, env=env,
-        )
+            return Ok(value=exec_cmd_mod.exec_cmd(
+                self.name, list(command), tty=tty, user=user, env=env,
+            ))
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M14 — logs: line-oriented journal stream (§11.3). ADDITIVE generator —
@@ -1832,7 +1891,7 @@ class SystemContainer(Instance):
         follow: bool = False,
         lines: int | None = None,
         args: "Sequence[str]" = (),
-    ) -> "Iterator[str]":
+    ) -> "Result[Iterator[str]]":
         """Line-oriented journal stream from the guest (M14, §11.3).
 
         ON ``SystemContainer`` only (VM logs are unsupported today — §11.3).
@@ -1864,14 +1923,26 @@ class SystemContainer(Instance):
         log line is human text; a stray non-UTF-8 byte must not crash the stream,
         and there is no raw-bytes API in 1.0 — §11.3 defers encoding).
 
-        ``_check_alive`` runs eagerly (a destroyed handle raises
-        ``InstanceNotFoundError`` at the call, not lazily on first ``next()``);
-        the subprocess is spawned lazily inside the generator so the child's
-        lifetime is bounded by iteration.
+        ``_check_alive`` runs eagerly (a destroyed handle's
+        ``InstanceNotFoundError`` is caught at THIS boundary → ``Error`` at the
+        call, not lazily on first ``next()``); the subprocess is spawned lazily
+        inside the generator so the child's lifetime is bounded by iteration.
+
+        Public Result boundary (Result-propagation sweep, Block S3): the EAGER
+        ``KentoError``s — ``_check_alive``'s ``InstanceNotFoundError`` and
+        ``_logs_argv``'s ``ValidationError`` for a negative ``lines`` — are caught
+        here and returned as an ``Error`` with the real kind. The success value is
+        the ``Iterator[str]`` itself, returned in ``Ok``. A subprocess-spawn
+        failure occurs LAZILY inside the generator on first ``next()`` and is NOT
+        caught here (the generator is the value, not part of this boundary's
+        body) — the same lazy contract this method had before the conversion.
         """
-        self._check_alive()
-        argv = self._logs_argv(follow=follow, lines=lines, args=args)
-        return _stream_lines(argv)
+        try:
+            self._check_alive()
+            argv = self._logs_argv(follow=follow, lines=lines, args=args)
+            return Ok(value=_stream_lines(argv))
+        except KentoError as exc:
+            return _error_from(exc)
 
     def _logs_argv(
         self, *, follow: bool, lines: int | None, args: "Sequence[str]" = (),
@@ -2093,58 +2164,78 @@ class VirtualMachine(Instance):
         try:
             yield inst
         finally:
-            inst.destroy(force=True)
+            # ``destroy`` now returns a ``Result`` (Block S3); ``.unwrap()`` so a
+            # FAILED teardown still RAISES out of this ``finally`` exactly as it
+            # did before the conversion — a silently-discarded ``Error`` would
+            # leak the transient VM (gate A/C).
+            inst.destroy(force=True).unwrap()
 
     # ------------------------------------------------------------------- #
     # M17 — suspend: pause vCPUs to RAM; VM-only; self-update status (§11.4).
     # ------------------------------------------------------------------- #
-    def suspend(self) -> None:
+    def suspend(self) -> Result[None]:
         """Pause the VM's vCPUs to RAM (M17, §11.4) — wraps ``suspend.suspend``.
 
-        VM-only (this method lives only on ``VirtualMachine``). Wraps
-        ``suspend.suspend`` (QMP ``stop`` for plain vm / ``qm suspend`` for
-        pve-vm) — a *pause to RAM*, NOT a shutdown: the VM process keeps running
-        and its memory is retained. ``suspend.suspend`` raises ``StateError`` if
-        the VM is not running and ``SubprocessError`` if the QMP/qm call fails;
-        those propagate (no silent no-op, §2 principle 5).
+        Public Result boundary (Result-propagation sweep, Block S3). VM-only (this
+        method lives only on ``VirtualMachine``). Wraps ``suspend.suspend`` (QMP
+        ``stop`` for plain vm / ``qm suspend`` for pve-vm) — a *pause to RAM*, NOT
+        a shutdown: the VM process keeps running and its memory is retained.
+        ``suspend.suspend`` raises ``StateError`` if the VM is not running and
+        ``SubprocessError`` if the QMP/qm call fails; both are caught at this
+        boundary and returned as an ``Error`` with the real kind (no silent no-op,
+        §2 principle 5). ``suspend.suspend`` STAYS RAISING. On success returns
+        ``Ok(None)``.
 
         Self-updates ``status`` to ``SUSPENDED`` (M17 — brief JC4): on success we
         write the ``_status`` BACKING field directly (the public ``status`` is
-        getter-only — §11.2 M9). Unlike ``start``/``stop``, we set the LITERAL
-        ``Status.SUSPENDED`` rather than re-resolving via ``_resolve_status``,
-        because that resolver CANNOT see SUSPENDED yet (it wraps a plain
-        ``is_running`` bool that reports a paused VM as RUNNING — disclosed in
-        ``_resolve_status``'s own docstring, §7.3). Re-resolving would
+        getter-only — §11.2 M9), INSIDE the try after the delegate returns so a
+        failed suspend never mutates the cached status. Unlike ``start``/``stop``,
+        we set the LITERAL ``Status.SUSPENDED`` rather than re-resolving via
+        ``_resolve_status``, because that resolver CANNOT see SUSPENDED yet (it
+        wraps a plain ``is_running`` bool that reports a paused VM as RUNNING —
+        disclosed in ``_resolve_status``'s own docstring, §7.3). Re-resolving would
         incorrectly overwrite the just-set SUSPENDED with RUNNING; the literal is
         the honest cached value after a successful suspend.
         """
-        self._check_alive()
-        from kento import suspend as suspend_mod
+        try:
+            self._check_alive()
+            from kento import suspend as suspend_mod
 
-        suspend_mod.suspend(self.name)
-        self._status = Status.SUSPENDED
+            suspend_mod.suspend(self.name)
+            self._status = Status.SUSPENDED
+            return Ok(value=None)
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M18 — resume: un-pause vCPUs; VM-only; self-update status (§11.4).
     # ------------------------------------------------------------------- #
-    def resume(self) -> None:
+    def resume(self) -> Result[None]:
         """Un-pause the VM's vCPUs (M18, §11.4) — wraps ``suspend.resume``.
 
-        VM-only. Wraps ``suspend.resume`` (QMP ``cont`` / ``qm resume``). Mirrors
+        Public Result boundary (Result-propagation sweep, Block S3). VM-only.
+        Wraps ``suspend.resume`` (QMP ``cont`` / ``qm resume``). Mirrors
         :meth:`suspend`: ``suspend.resume`` raises ``StateError`` (not running) /
-        ``SubprocessError`` (call failed), which propagate.
+        ``SubprocessError`` (call failed); both are caught here and returned as an
+        ``Error`` with the real kind. ``suspend.resume`` STAYS RAISING. On success
+        returns ``Ok(None)``.
 
         Self-updates ``status`` to ``RUNNING`` (M18 — brief JC4) by writing the
-        ``_status`` backing field with the LITERAL ``Status.RUNNING`` — the same
-        rationale as ``suspend``: ``_resolve_status`` already reports a paused VM
-        as RUNNING, so a literal RUNNING after a successful un-pause is correct
-        and avoids a redundant probe.
+        ``_status`` backing field with the LITERAL ``Status.RUNNING`` (inside the
+        try after the delegate returns) — the same rationale as ``suspend``:
+        ``_resolve_status`` already reports a paused VM as RUNNING, so a literal
+        RUNNING after a successful un-pause is correct and avoids a redundant
+        probe.
         """
-        self._check_alive()
-        from kento import suspend as suspend_mod
+        try:
+            self._check_alive()
+            from kento import suspend as suspend_mod
 
-        suspend_mod.resume(self.name)
-        self._status = Status.RUNNING
+            suspend_mod.resume(self.name)
+            self._status = Status.RUNNING
+            return Ok(value=None)
+        except KentoError as exc:
+            return _error_from(exc)
 
 
 # --------------------------------------------------------------------------- #
