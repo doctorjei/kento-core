@@ -91,14 +91,14 @@ def _patch_holds(holds, ids):
 def test_list_empty_store():
     h_p, i_p = _patch_holds([], {})
     with h_p, i_p:
-        assert Hold.list() == []
+        assert Hold.list().unwrap() == []
 
 
 def test_list_modern_id_label_is_digest():
     """A non-empty io.kento.hold-image-id label → ``pinned`` is a ``Digest``."""
     h_p, i_p = _patch_holds([("box", "docker.io/library/debian:12")], {"box": SHA})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds == [Hold(instance="box",
                           pinned=Digest(algorithm="sha256", encoded=SHA))]
 
@@ -108,7 +108,7 @@ def test_list_modern_prefixed_id_label_parsed_faithfully():
     sha256 assumption."""
     h_p, i_p = _patch_holds([("box", "img")], {"box": f"sha256:{SHA}"})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds[0].pinned == Digest(algorithm="sha256", encoded=SHA)
 
 
@@ -116,7 +116,7 @@ def test_list_legacy_tag_image_is_ocireference():
     """No id label, a tag-ref ``.Image`` → ``pinned`` is an ``OciReference``."""
     h_p, i_p = _patch_holds([("box", "docker.io/library/debian:12")], {})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds == [Hold(instance="box",
                           pinned=OciReference.parse("docker.io/library/debian:12").unwrap())]
 
@@ -126,7 +126,7 @@ def test_list_legacy_bare_hex_image_is_digest():
     NOT a malformed OciReference."""
     h_p, i_p = _patch_holds([("box", SHA2)], {})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds == [Hold(instance="box",
                           pinned=Digest(algorithm="sha256", encoded=SHA2))]
 
@@ -135,7 +135,7 @@ def test_list_skips_unpinnable_hold_with_log(caplog):
     """A hold with no id label AND no .Image has no faithful pin → skipped."""
     h_p, i_p = _patch_holds([("box", "")], {})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds == []
 
 
@@ -143,7 +143,7 @@ def test_list_one_bad_hold_does_not_hide_healthy(caplog):
     """Totality: the un-pinnable hold is skipped, the healthy one survives."""
     h_p, i_p = _patch_holds([("bad", ""), ("good", "img")], {"good": SHA})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds == [Hold(instance="good",
                           pinned=Digest(algorithm="sha256", encoded=SHA))]
 
@@ -155,7 +155,7 @@ def test_list_sorted_by_instance():
         {"zebra": SHA, "alpha": SHA2, "mango": SHA3},
     )
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert [h.instance for h in holds] == ["alpha", "mango", "zebra"]
 
 
@@ -166,7 +166,7 @@ def test_list_mixed_modern_and_legacy():
         {"modern": SHA},
     )
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert holds == [
         Hold(instance="legacy",
              pinned=OciReference.parse("docker.io/library/debian:12").unwrap()),
@@ -183,9 +183,35 @@ def test_list_modern_branch_mutation(caplog):
     # parsed as an OciReference and this equality would fail.
     h_p, i_p = _patch_holds([("box", "docker.io/library/debian:12")], {"box": SHA})
     with h_p, i_p:
-        holds = Hold.list()
+        holds = Hold.list().unwrap()
     assert isinstance(holds[0].pinned, Digest)
     assert not isinstance(holds[0].pinned, OciReference)
+
+
+# --------------------------------------------------------------------------- #
+# S2 (Result sweep) — Hold.list() public boundary returns a Result; the raising
+# _list is the body used by ImageRecord._list (kind fidelity).
+# --------------------------------------------------------------------------- #
+
+
+def test_list_returns_ok_result():
+    h_p, i_p = _patch_holds([("box", "img")], {"box": SHA})
+    with h_p, i_p:
+        result = Hold.list()
+    assert isinstance(result, kento.Ok)
+    assert result.unwrap() == [
+        Hold(instance="box", pinned=Digest(algorithm="sha256", encoded=SHA))]
+
+
+def test__list_is_raising_form_used_internally():
+    # _list returns a bare list (no Result wrap) — it is the form ImageRecord._list
+    # consumes so an internal raise keeps its real kind at that boundary. (Hold's
+    # own list path skips-and-logs rather than raising, so we assert the shape.)
+    h_p, i_p = _patch_holds([("box", "img")], {"box": SHA})
+    with h_p, i_p:
+        holds = Hold._list()
+    assert holds == [
+        Hold(instance="box", pinned=Digest(algorithm="sha256", encoded=SHA))]
 
 
 # --------------------------------------------------------------------------- #

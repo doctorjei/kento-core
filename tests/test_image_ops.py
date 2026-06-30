@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+import kento
 from kento import (
     ImageNotFoundError,
     OciImage,
@@ -52,29 +53,31 @@ def _resolved_img(ref):
 
 
 def test_pull_runs_podman_pull_then_resolves():
+    # S2 (Result sweep): pull() returns Ok(OciImage); internal resolve is the
+    # RAISING _resolve (kind fidelity), so patch _resolve.
     ref = _ref("ubuntu:latest")
     sentinel = _resolved_img(ref)
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=lambda *a, **k: _ok(a[0])) as m_run, \
-         patch.object(OciImage, "resolve", return_value=sentinel) as m_res:
-        img = OciImage.pull(ref)
+         patch.object(OciImage, "_resolve", return_value=sentinel) as m_res:
+        result = OciImage.pull(ref)
 
-    # Delegation: podman pull <rendered ref>, then resolve(ref).
+    # Delegation: podman pull <rendered ref>, then _resolve(ref).
     pull_cmds = [c.args[0] for c in m_run.call_args_list]
     assert ["podman", "pull", ref.render()] in pull_cmds
     m_res.assert_called_once_with(ref)
-    assert img is sentinel
+    assert result.unwrap() is sentinel
 
 
 def test_pull_accepts_str_and_parses_before_shelling_out():
     # A str ref is parsed/validated through OciReference.parse BEFORE podman.
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=lambda *a, **k: _ok(a[0])) as m_run, \
-         patch.object(OciImage, "resolve",
+         patch.object(OciImage, "_resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        img = OciImage.pull("ubuntu:latest")
+        img = OciImage.pull("ubuntu:latest").unwrap()
 
-    # resolve() received a parsed OciReference, not the raw string.
+    # _resolve() received a parsed OciReference, not the raw string.
     (called_ref,), _ = m_res.call_args
     assert isinstance(called_ref, OciReference)
     assert isinstance(img, OciImage)
@@ -82,15 +85,18 @@ def test_pull_accepts_str_and_parses_before_shelling_out():
         [c.args[0] for c in m_run.call_args_list]
 
 
-def test_pull_malformed_str_raises_before_any_podman_call():
-    # Block P1: parse returns a Result; pull's `_coerce_ref` .unwrap()s it, so a
-    # malformed ref now raises ResultError (a KentoError) instead of
-    # MalformedReference directly. Behavior-preserving: still a KentoError, still
-    # before any podman call. Assert the base type (robust to the type change).
+def test_pull_malformed_str_returns_error_before_any_podman_call():
+    # S2: a malformed ref is caught at pull's boundary -> Error (the parse
+    # boundary maps it to MALFORMED_REFERENCE, which is a KentoError -> the
+    # fallback INTERNAL kind in _error_from, but the point here is it is a
+    # PREDICTABLE Error returned BEFORE any podman call, not a raise).
     with patch("kento.subprocess_util.subprocess.run") as m_run:
-        with pytest.raises(KentoError):
-            OciImage.pull("UPPER/case@bad")  # invalid ref grammar
+        result = OciImage.pull("UPPER/case@bad")  # invalid ref grammar
+    assert isinstance(result, kento.Error)
     m_run.assert_not_called()  # never reached the shell
+    # .unwrap() still raises a KentoError (behavior-preserving for the CLI).
+    with pytest.raises(KentoError):
+        result.unwrap()
 
 
 def test_pull_no_force_param():
@@ -100,7 +106,8 @@ def test_pull_no_force_param():
     assert "force" not in sig.parameters  # M19: force DROPPED
 
 
-def test_pull_raises_typed_on_podman_failure():
+def test_pull_returns_error_subprocess_on_podman_failure():
+    # S2: a pull failure -> Error(SUBPROCESS_FAILED), returncode in context.
     ref = _ref("ghost:latest")
 
     def _fail(*a, **k):
@@ -108,8 +115,11 @@ def test_pull_raises_typed_on_podman_failure():
                                            stderr="manifest unknown")
 
     with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
-        with pytest.raises(SubprocessError):
-            OciImage.pull(ref)
+        result = OciImage.pull(ref)
+    assert isinstance(result, kento.Error)
+    cond = result.conditions[0]
+    assert cond.kind is kento.ConditionKind.SUBPROCESS_FAILED
+    assert cond.context["returncode"] == 125
 
 
 # --------------------------------------------------------------------------- #
@@ -118,75 +128,92 @@ def test_pull_raises_typed_on_podman_failure():
 
 
 def test_get_delegates_to_resolve_no_pull():
+    # S2: get() returns Ok(OciImage); internal resolve is the RAISING _resolve.
     ref = _ref("ubuntu:latest")
     sentinel = _resolved_img(ref)
     with patch("kento.subprocess_util.subprocess.run") as m_run, \
-         patch.object(OciImage, "resolve", return_value=sentinel) as m_res:
-        img = OciImage.get(ref)
+         patch.object(OciImage, "_resolve", return_value=sentinel) as m_res:
+        result = OciImage.get(ref)
 
     m_res.assert_called_once_with(ref)
-    assert img is sentinel
+    assert result.unwrap() is sentinel
     # get is read-only — it must NOT shell out to `podman pull` itself.
     for call in m_run.call_args_list:
         assert "pull" not in call.args[0]
 
 
 def test_get_accepts_str():
-    with patch.object(OciImage, "resolve",
+    with patch.object(OciImage, "_resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        OciImage.get("ubuntu:latest")
+        OciImage.get("ubuntu:latest").unwrap()
     (called_ref,), _ = m_res.call_args
     assert isinstance(called_ref, OciReference)
 
 
-def test_get_absent_raises_not_fabricated():
-    # resolve() raises ImageNotFoundError when the image isn't local — get
-    # propagates it; it does NOT fabricate a handle.
+def test_get_absent_returns_error_not_fabricated():
+    # S2: _resolve raises ImageNotFoundError when the image isn't local — get
+    # catches it at its boundary -> Error(IMAGE_NOT_FOUND); never a handle.
     ref = _ref("ghost:latest")
-    with patch.object(OciImage, "resolve",
+    with patch.object(OciImage, "_resolve",
                       side_effect=ImageNotFoundError("absent")):
-        with pytest.raises(ImageNotFoundError):
-            OciImage.get(ref)
+        result = OciImage.get(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
 
 
-def test_get_absent_raises_through_the_REAL_resolve_path():
-    # m1 coverage gap: anchor get()'s absent-raise on the REAL resolve chain,
-    # not a mocked resolve. layers.resolve_layers raises ImageNotFoundError for
-    # an absent image; resolve() composes it; get() must propagate. (If resolve
-    # silently fabricated a handle instead, THIS test reddens.)
+def test_get_absent_error_through_the_REAL_resolve_path():
+    # Anchor get()'s absent path on the REAL resolve chain, not a mocked one.
+    # layers.resolve_layers raises ImageNotFoundError; _resolve composes it;
+    # get() catches it at its boundary and returns Error(IMAGE_NOT_FOUND). The
+    # kind survives the deep raise -> public boundary (KIND-FIDELITY).
+    ref = _ref("ghost:latest")
+    with patch("kento.layers.resolve_layers",
+               side_effect=ImageNotFoundError("not in local store")):
+        result = OciImage.get(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
+
+
+def test__get_RAISES_kind_fidelity():
+    # KIND-FIDELITY mutation guard: the raising _get STAYS RAISING so a deep
+    # ImageNotFoundError reaches a still-raising caller (ImageRecord.resolve's
+    # body) with its REAL type. If _get .unwrap()'d a Result-returning resolve
+    # instead, the type would become ResultError and this reddens.
     ref = _ref("ghost:latest")
     with patch("kento.layers.resolve_layers",
                side_effect=ImageNotFoundError("not in local store")):
         with pytest.raises(ImageNotFoundError):
-            OciImage.get(ref)
+            OciImage._get(ref)
 
 
-def test_get_absent_raises_when_resolve_id_returns_empty_REAL_path():
-    # The OTHER real raise path: resolve_layers succeeds but resolve_image_id
-    # returns "" (error-as-data) — resolve_id must RAISE ImageNotFoundError
-    # rather than fabricate a Digest. Mutating resolve_id to fabricate would
-    # make this go from RED (raise) to a silent pass, catching the m1 gap.
+def test_get_absent_error_when_resolve_id_returns_empty_REAL_path():
+    # The OTHER real path: resolve_layers succeeds but resolve_image_id returns
+    # "" (error-as-data) — resolve_id must RAISE ImageNotFoundError; get() maps
+    # it to Error(IMAGE_NOT_FOUND). Mutating resolve_id to fabricate would make
+    # this go from Error to a silent Ok, catching the gap.
     ref = _ref("ubuntu:latest")
     abs_layers = "/store/overlay/ID1/diff"
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir",
                return_value=("/store/overlay", "ID1/diff")), \
          patch("kento.layers.resolve_image_id", return_value=""):
-        with pytest.raises(ImageNotFoundError):
-            OciImage.get(ref)
+        result = OciImage.get(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
 
 
-def test_pull_absent_after_pull_raises_through_REAL_resolve_path():
-    # After a (mocked-successful) podman pull, the post-pull resolve runs for
-    # real; if the image still isn't resolvable, pull propagates the raise
-    # instead of returning a fabricated handle.
+def test_pull_absent_after_pull_returns_error_through_REAL_resolve_path():
+    # After a (mocked-successful) podman pull, the post-pull _resolve runs for
+    # real; if the image still isn't resolvable, pull catches it at its boundary
+    # -> Error(IMAGE_NOT_FOUND), never a fabricated handle.
     ref = _ref("ghost:latest")
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=lambda *a, **k: _ok(a[0])), \
          patch("kento.layers.resolve_layers",
                side_effect=ImageNotFoundError("still absent")):
-        with pytest.raises(ImageNotFoundError):
-            OciImage.pull(ref)
+        result = OciImage.pull(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
 
 
 # --------------------------------------------------------------------------- #
@@ -202,12 +229,13 @@ def _images_query_run(stdout):
 
 
 def test_list_enumerates_and_resolves_each():
+    # S2: list() returns Ok(list[OciImage]); internal resolve is RAISING _resolve.
     out = "docker.io/library/ubuntu:latest\nquay.io/fedora:39\n"
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)) as m_run, \
-         patch.object(OciImage, "resolve",
+         patch.object(OciImage, "_resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        imgs = OciImage.list()
+        imgs = OciImage.list().unwrap()
 
     # Delegation: a `podman images` query (NOT images.list_images()).
     query = m_run.call_args_list[0].args[0]
@@ -221,9 +249,9 @@ def test_list_skips_dangling_none_entries():
     out = "<none>:<none>\ndocker.io/library/ubuntu:latest\n"
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)), \
-         patch.object(OciImage, "resolve",
+         patch.object(OciImage, "_resolve",
                       side_effect=lambda oci: _resolved_img(oci)) as m_res:
-        imgs = OciImage.list()
+        imgs = OciImage.list().unwrap()
     assert len(imgs) == 1  # the <none>:<none> dangling entry is skipped
     assert m_res.call_count == 1
 
@@ -231,6 +259,8 @@ def test_list_skips_dangling_none_entries():
 def test_list_total_over_store_skips_unresolvable_entry():
     # Disclosed policy: one entry that fails to resolve mid-list is SKIPPED
     # WITH A LOG, never fatal — list() stays total over the store (§2 / §7.2).
+    # The per-entry _resolve raise is caught INSIDE the list loop (skip), NOT at
+    # the outer boundary, so the overall result is still Ok.
     out = "good/image:latest\nraced/image:latest\n"
 
     def _resolve(oci):
@@ -240,30 +270,36 @@ def test_list_total_over_store_skips_unresolvable_entry():
 
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)), \
-         patch.object(OciImage, "resolve", side_effect=_resolve):
-        imgs = OciImage.list()
+         patch.object(OciImage, "_resolve", side_effect=_resolve):
+        result = OciImage.list()
+    assert isinstance(result, kento.Ok)
+    imgs = result.unwrap()
     # The good image survives; the unresolvable one is dropped, not raised.
     assert len(imgs) == 1
     assert imgs[0].source.name == "image"
     assert imgs[0].source.path == "good"
 
 
-def test_list_raises_when_enumeration_query_itself_fails():
+def test_list_returns_error_when_enumeration_query_itself_fails():
     # A failure of the `podman images` query is the WHOLE listing failing —
-    # that DOES raise (distinct from one unresolvable entry).
+    # that becomes Error(SUBPROCESS_FAILED) (distinct from one skipped entry,
+    # which stays an Ok with the entry dropped).
     def _fail(*a, **k):
         return subprocess.CompletedProcess(a[0], 1, stdout="",
                                            stderr="podman down")
 
     with patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
-        with pytest.raises(SubprocessError):
-            OciImage.list()
+        result = OciImage.list()
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.SUBPROCESS_FAILED
 
 
-def test_list_empty_store_returns_empty_list():
+def test_list_empty_store_returns_ok_empty_list():
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run("")):
-        assert OciImage.list() == []
+        result = OciImage.list()
+    assert isinstance(result, kento.Ok)
+    assert result.unwrap() == []
 
 
 # --------------------------------------------------------------------------- #
@@ -475,9 +511,9 @@ def test_ops_query_podman_images_directly():
     out = "docker.io/library/ubuntu:latest\n"
     with patch("kento.subprocess_util.subprocess.run",
                side_effect=_images_query_run(out)) as m_run, \
-         patch.object(OciImage, "resolve",
+         patch.object(OciImage, "_resolve",
                       side_effect=lambda oci: _resolved_img(oci)):
-        OciImage.list()
+        OciImage.list().unwrap()
     assert not hasattr(__import__("kento.images", fromlist=["x"]), "list_images")
     assert m_run.call_args_list[0].args[0][:2] == ["podman", "images"]
 
@@ -542,7 +578,7 @@ def test_prune_removes_dangling_and_reports_dry_run_false():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
-        report = OciImage.prune()
+        report = OciImage.prune().unwrap()
 
     assert isinstance(report, ReclaimReport)
     # prune EXECUTES — never a dry run (locked sig has no dry_run param).
@@ -565,7 +601,7 @@ def test_prune_empty_store_returns_empty_report():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[])) as m_run:
-        report = OciImage.prune()
+        report = OciImage.prune().unwrap()
 
     assert report == ReclaimReport(dry_run=False, reclaimed=(), failed=())
     # No rmi attempted on an empty dangling set.
@@ -582,7 +618,7 @@ def test_prune_NEVER_touches_a_held_image_even_if_listed_via_label():
          patch("kento.images._holds", return_value=[("guest-a", ID_A)]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
-        report = OciImage.prune()
+        report = OciImage.prune().unwrap()
 
     # ID_A is held → NEVER removed; only the genuinely-unreferenced ID_B is.
     assert set(report.reclaimed) == {ID_B}
@@ -598,7 +634,7 @@ def test_prune_held_skip_via_holds_image_field_no_label():
          patch("kento.images._holds", return_value=[("guest-a", ID_A)]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B])) as m_run:
-        report = OciImage.prune()
+        report = OciImage.prune().unwrap()
 
     assert set(report.reclaimed) == {ID_B}
     rmi_cmds = [c.args[0] for c in m_run.call_args_list if "rmi" in c.args[0]]
@@ -612,7 +648,7 @@ def test_prune_reuses_existing_hold_knowledge_no_forked_logic():
          patch("kento.images._holds", return_value=[]) as m_holds, \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A])):
-        OciImage.prune()
+        OciImage.prune().unwrap()
     assert m_ids.called
     assert m_holds.called
 
@@ -626,7 +662,7 @@ def test_prune_surfaces_rmi_refusal_in_failed_not_swallowed():
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_B],
                                          rmi_fail=[ID_A])):
-        report = OciImage.prune()
+        report = OciImage.prune().unwrap()
 
     assert report.reclaimed == (ID_B,)            # batch continued past ID_A
     assert len(report.failed) == 1
@@ -636,10 +672,10 @@ def test_prune_surfaces_rmi_refusal_in_failed_not_swallowed():
     assert report.ok is False                      # derived from failed
 
 
-def test_prune_raises_typed_when_enumeration_query_fails():
-    # A failure of the dangling-images enumeration is the WHOLE prune failing —
-    # that DOES raise a typed SubprocessError (distinct from a per-image refusal,
-    # which is surfaced in `failed`).
+def test_prune_returns_error_when_enumeration_query_fails():
+    # S2: a failure of the dangling-images enumeration is the WHOLE prune failing
+    # -> Error(SUBPROCESS_FAILED) (distinct from a per-image refusal, which stays
+    # in the Ok report's `failed`).
     def _fail(*a, **k):
         return subprocess.CompletedProcess(a[0], 1, stdout="",
                                            stderr="podman down")
@@ -647,8 +683,9 @@ def test_prune_raises_typed_when_enumeration_query_fails():
     with patch("kento.images._hold_image_ids", return_value={}), \
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run", side_effect=_fail):
-        with pytest.raises(SubprocessError):
-            OciImage.prune()
+        result = OciImage.prune()
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.SUBPROCESS_FAILED
 
 
 def test_prune_dedupes_repeated_dangling_ids():
@@ -657,7 +694,7 @@ def test_prune_dedupes_repeated_dangling_ids():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A, ID_A])) as m_run:
-        report = OciImage.prune()
+        report = OciImage.prune().unwrap()
 
     assert report.reclaimed == (ID_A,)
     rmi_calls = [c for c in m_run.call_args_list
@@ -665,13 +702,11 @@ def test_prune_dedupes_repeated_dangling_ids():
     assert len(rmi_calls) == 1
 
 
-def test_prune_rejects_unsupported_scope_typed_raise():
-    # DANGLING is the only 1.0 value. A future/other scope value cannot occur
-    # today, but must fail loudly (typed ValidationError) rather than silently
+def test_prune_rejects_unsupported_scope_returns_error():
+    # S2: DANGLING is the only 1.0 value. A future/other scope value cannot occur
+    # today, but must fail loudly -> Error(VALIDATION) rather than silently
     # pruning DANGLING anyway (gate C). Simulate one with a stand-in member.
     from enum import Enum
-
-    from kento.errors import ValidationError
 
     class _FakeScope(str, Enum):
         OTHER = "other"
@@ -680,8 +715,9 @@ def test_prune_rejects_unsupported_scope_typed_raise():
          patch("kento.images._holds", return_value=[]), \
          patch("kento.subprocess_util.subprocess.run",
                side_effect=_dispatch_run(dangling=[ID_A])) as m_run:
-        with pytest.raises(ValidationError):
-            OciImage.prune(scope=_FakeScope.OTHER)
+        result = OciImage.prune(scope=_FakeScope.OTHER)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.VALIDATION
     # Rejected BEFORE any podman call.
     m_run.assert_not_called()
 

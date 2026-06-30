@@ -162,7 +162,9 @@ def _patch_list(guest_refs, holds, id_map):
 
     return (
         patch("kento.images._guest_image_refs", return_value=guest_refs),
-        patch.object(Hold, "list", classmethod(lambda cls: list(holds))),
+        # ImageRecord._list calls the RAISING Hold._list (kind fidelity), so the
+        # internal seam to patch is _list, not the public Result-returning list.
+        patch.object(Hold, "_list", classmethod(lambda cls: list(holds))),
         patch("kento._images.OciImage.resolve_id", staticmethod(_resolve_id)),
     )
 
@@ -170,7 +172,7 @@ def _patch_list(guest_refs, holds, id_map):
 def test_list_empty():
     g, h, i = _patch_list({}, [], {})
     with g, h, i:
-        assert ImageRecord.list() == []
+        assert ImageRecord.list().unwrap() == []
 
 
 def test_list_in_use_with_hold():
@@ -181,7 +183,7 @@ def test_list_in_use_with_hold():
         {"imagea:latest": SHA_A},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     rec = recs[0]
     assert rec.id == _digest(SHA_A)
@@ -199,7 +201,7 @@ def test_list_orphaned_hold_dangling():
         {},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     rec = recs[0]
     assert rec.id == _digest(SHA_B)
@@ -217,7 +219,7 @@ def test_list_groups_guest_and_hold_by_id():
         {"imagea:latest": SHA_A},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1  # not two
     assert recs[0].guests == ("box",)
     assert len(recs[0].holds) == 1
@@ -231,7 +233,7 @@ def test_list_multi_tagged_same_id():
         {"imagea:latest": SHA_A, "imagea:1.0": SHA_A},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     rendered = {r.render() for r in recs[0].refs}
     assert rendered == {"imagea:latest", "imagea:1.0"}
@@ -246,7 +248,7 @@ def test_list_multi_guest_same_tag():
         {"imagea:latest": SHA_A},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert recs[0].guests == ("alpha", "zebra")
 
 
@@ -258,7 +260,7 @@ def test_list_skips_unresolvable_guest_ref(caplog):
         {"imagea:latest": SHA_A},  # gone:tag absent => ImageNotFoundError
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     assert recs[0].id == _digest(SHA_A)
     assert recs[0].guests == ("live",)
@@ -272,7 +274,7 @@ def test_list_skips_unresolvable_legacy_tag_hold(caplog):
         {},  # gone:tag unresolvable
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert recs == []
 
 
@@ -284,7 +286,7 @@ def test_list_legacy_tag_hold_resolves_when_present():
         {"imagea:latest": SHA_A},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     assert recs[0].id == _digest(SHA_A)
     assert recs[0].held is True
@@ -299,7 +301,7 @@ def test_list_bare_hex_guest_ref_is_id_not_tag():
         {},  # no resolve_id call expected (bare hex IS the id)
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     assert recs[0].id == _digest(SHA_A)
     assert recs[0].refs == ()  # a bare id is not a "seen tag"
@@ -314,7 +316,7 @@ def test_list_sorted_by_id():
         {"z:1": SHA_C, "a:1": SHA_A, "m:1": SHA_B},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert [r.id.encoded for r in recs] == [SHA_A, SHA_B, SHA_C]
 
 
@@ -334,7 +336,7 @@ def test_mutation_grouping_collapses_distinct_ids():
         {"imagea:latest": SHA_A},
     )
     with g, h, i:
-        recs = ImageRecord.list()
+        recs = ImageRecord.list().unwrap()
     assert len(recs) == 1
     assert recs[0].in_use and recs[0].held
 
@@ -364,7 +366,7 @@ def _managed_one():
 def test_get_by_digest():
     g, h, i = _managed_one()
     with g, h, i:
-        rec = ImageRecord.get(_digest(SHA_A))
+        rec = ImageRecord.get(_digest(SHA_A)).unwrap()
     assert rec.id == _digest(SHA_A)
     assert rec.guests == ("box",)
 
@@ -372,37 +374,38 @@ def test_get_by_digest():
 def test_get_by_rendered_digest_str():
     g, h, i = _managed_one()
     with g, h, i:
-        rec = ImageRecord.get(f"sha256:{SHA_A}")
+        rec = ImageRecord.get(f"sha256:{SHA_A}").unwrap()
     assert rec.id == _digest(SHA_A)
 
 
 def test_get_by_bare_hex_str():
     g, h, i = _managed_one()
     with g, h, i:
-        rec = ImageRecord.get(SHA_A)
+        rec = ImageRecord.get(SHA_A).unwrap()
     assert rec.id == _digest(SHA_A)
 
 
 def test_get_by_tag_str():
     g, h, i = _managed_one()
     with g, h, i:
-        rec = ImageRecord.get("imagea:latest")
+        rec = ImageRecord.get("imagea:latest").unwrap()
     assert rec.id == _digest(SHA_A)
 
 
 def test_get_by_ocireference():
     g, h, i = _managed_one()
     with g, h, i:
-        rec = ImageRecord.get(_ref("imagea:latest"))
+        rec = ImageRecord.get(_ref("imagea:latest")).unwrap()
     assert rec.id == _digest(SHA_A)
 
 
-def test_get_not_managed_raises():
-    """An id that is neither guest-referenced nor held => ImageNotFoundError."""
+def test_get_not_managed_returns_error():
+    """S2: an id neither guest-referenced nor held => Error(IMAGE_NOT_FOUND)."""
     g, h, i = _managed_one()
     with g, h, i:
-        with pytest.raises(ImageNotFoundError):
-            ImageRecord.get(_digest(SHA_B))
+        result = ImageRecord.get(_digest(SHA_B))
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
 
 
 # --------------------------------------------------------------------------- #
@@ -447,7 +450,11 @@ def test_image_record_total_when_unmanaged():
 
 
 def test_record_resolve_round_trip():
-    """record().resolve() returns to the artifact (resolved by content id)."""
+    """record().resolve() returns Ok of the artifact (resolved by content id).
+
+    S2: ImageRecord.resolve calls the RAISING OciImage._get (kind fidelity), so
+    we patch _get; resolve() wraps the result in Ok, .unwrap() recovers it.
+    """
     img = _oci(SHA_A)
     seen = []
 
@@ -457,23 +464,31 @@ def test_record_resolve_round_trip():
 
     g, h, i = _managed_one()
     with g, h, i, patch(
-        "kento._images.OciImage.get", classmethod(_capture),
+        "kento._images.OciImage._get", classmethod(_capture),
     ):
         rec = img.record()
-        back = rec.resolve()
+        back = rec.resolve().unwrap()
     assert back is img
     # resolve() resolves by the rendered content id (not a tag).
     assert seen == [f"sha256:{SHA_A}"]
 
 
-def test_resolve_raises_when_content_gone():
-    """A dangling record's resolve() surfaces the absence as a typed raise."""
+def test_resolve_returns_error_when_content_gone():
+    """S2: a dangling record's resolve() surfaces the absence as Error.
+
+    The deep ImageNotFoundError raised by the RAISING _get reaches resolve()'s
+    boundary with its real kind -> Error(IMAGE_NOT_FOUND), not INTERNAL
+    (KIND-FIDELITY). Patching _get (the raising form) is the seam resolve uses.
+    """
     rec = ImageRecord(id=_digest(SHA_B))
+
     def _gone(cls, ref):
         raise ImageNotFoundError(f"gone: {ref}")
-    with patch("kento._images.OciImage.get", classmethod(_gone)):
-        with pytest.raises(ImageNotFoundError):
-            rec.resolve()
+
+    with patch("kento._images.OciImage._get", classmethod(_gone)):
+        result = rec.resolve()
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
 
 
 def test_base_image_record_id_raises():

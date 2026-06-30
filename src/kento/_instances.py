@@ -411,7 +411,12 @@ class Instance(ABC):
                 f"{self._name}: boot source {rootfs_source!r} is not an "
                 f"OCI reference (only oci:// is resolvable in 1.0)."
             )
-        img = OciImage.resolve(rootfs_source)
+        # Use the RAISING ``_resolve`` (not the public Result-returning
+        # ``resolve``): ``Instance.image()`` is still a raising method (converted
+        # in S3), so an ``ImageNotFoundError`` must propagate UP to ``image()``'s
+        # own future boundary with its real kind, not collapse to ``INTERNAL`` via
+        # an intermediate ``.unwrap()`` (the KIND-FIDELITY rule, Result sweep S2).
+        img = OciImage._resolve(rootfs_source)
 
         kernel_meta = _read_meta(self._dir, "kento-kernel")
         initramfs_meta = _read_meta(self._dir, "kento-initramfs")

@@ -59,6 +59,7 @@ from pathlib import Path
 
 from kento._diagnosis import Diagnosis, PruneScope, ReclaimReport
 from kento._references import Digest, OciReference, SourceReference
+from kento._result import Ok, Result, _error_from
 from kento.errors import ImageNotFoundError, KentoError, StateError
 
 _images_logger = logging.getLogger("kento")
@@ -208,8 +209,18 @@ class Hold:
     pinned: Digest | OciReference
 
     @classmethod
-    def list(cls) -> list[Hold]:
+    def list(cls) -> Result[list[Hold]]:
         """Return every kento hold, typed and sorted by instance name (§12.3).
+
+        Public Result boundary (Result-propagation sweep, Block S2): the body is
+        the raising :meth:`_list`; any internal ``KentoError`` is caught here and
+        converted to a one-condition ``Error`` via ``_error_from`` (§2 principle
+        5). A non-``KentoError`` is a panic and propagates.
+
+        SPLIT from ``_list`` (the P1 ``parse``/``_parse`` precedent) because the
+        still-raising ``ImageRecord._list`` calls the raising form so an internal
+        ``ImageNotFoundError`` keeps its real kind at THAT public boundary rather
+        than collapsing to ``INTERNAL`` (the KIND-FIDELITY rule).
 
         Wraps the existing procedural queries AS-IS: ``images._holds()`` (the
         ``(held_for, .Image)`` pairs) joined with ``images._hold_image_ids()``
@@ -227,6 +238,20 @@ class Hold:
         WITH A LOG — there is no faithful ``pinned`` to build, and one
         unparseable hold must not hide every healthy one (the same totality
         stance ``Instance.list`` takes over the store).
+        """
+        try:
+            return Ok(value=cls._list())
+        except KentoError as exc:
+            return _error_from(exc)
+
+    @classmethod
+    def _list(cls) -> list[Hold]:
+        """The raising body of :meth:`list` (§12.3).
+
+        Internal: the public :meth:`list` boundary catches its ``KentoError`` and
+        converts to an ``Error``. Other still-raising internal callers
+        (``ImageRecord._list``) use THIS form so a raised kind reaches their own
+        public boundary intact (the KIND-FIDELITY rule).
         """
         from kento.images import _hold_image_ids, _holds
 
@@ -359,33 +384,73 @@ class ImageRecord:
         """
         return ManagedStatus.IN_USE if self.guests else ManagedStatus.ORPHANED
 
-    # ----- ledger navigation — lazy, may raise -----
-    def resolve(self) -> "Image":
+    # ----- ledger navigation — lazy, returns a Result -----
+    def resolve(self) -> Result["Image"]:
         """Resolve THIS record's content to the live ``Image`` artifact (§12.4).
 
-        The inverse of ``image.record()``. Resolves by content **id** — the
-        record's key — via ``OciImage.get`` against the local store (no network).
-        Performs I/O (an explicit named method, §2 principle 2). **MAY RAISE**
-        ``ImageNotFoundError`` when the content is gone (a dangling record whose
-        layers podman has since reaped, §12.4): the record exists as a ledger
-        marker even when the artifact does not, so resolution is the moment the
-        absence surfaces, as a typed raise (principle 5) — never a sentinel.
+        Public Result boundary (Result-propagation sweep, Block S2): the inverse
+        of ``image.record()``. Resolves by content **id** — the record's key —
+        via the raising ``OciImage._get`` against the local store (no network).
+        Performs I/O (an explicit named method, §2 principle 2). The
+        ``ImageNotFoundError`` raised when the content is gone (a dangling record
+        whose layers podman has since reaped, §12.4) is caught HERE and converted
+        to ``Error(IMAGE_NOT_FOUND)`` — a predictable outcome (principle 5), never
+        a sentinel. The record exists as a ledger marker even when the artifact
+        does not, so resolution is the moment the absence surfaces.
+
+        Calls the raising ``OciImage._get`` (not the Result-returning public
+        ``get``) so the deep ``ImageNotFoundError`` reaches THIS boundary with its
+        real kind rather than collapsing to ``INTERNAL`` (the KIND-FIDELITY rule).
 
         Resolving by the rendered ``id`` (``algorithm:encoded``) lets podman
         match the content regardless of which (if any) tag still points at it, so
         a dangling-but-held record still resolves while its layers survive.
         """
-        return OciImage.get(self.id.render())
+        try:
+            return Ok(value=OciImage._get(self.id.render()))
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ----- entry points — reconstruct from kento markers -----
     @classmethod
-    def list(cls) -> "list[ImageRecord]":
+    def list(cls) -> Result["list[ImageRecord]"]:
         """Every kento-MANAGED image as a typed record, grouped by id (§12.4).
+
+        Public Result boundary (Result-propagation sweep, Block S2): the body is
+        the raising :meth:`_list`; an internal ``KentoError`` is caught here and
+        converted to an ``Error`` via ``_error_from``. A non-``KentoError`` is a
+        panic and propagates.
+
+        SPLIT from ``_list`` (the P1 ``parse``/``_parse`` precedent) because the
+        still-raising internal ``_for_id`` (used by ``Image.record()``, an S3
+        method) calls the raising form — so a marker scan can be reused inside a
+        raising context, and a future raise keeps its real kind at THAT public
+        boundary rather than collapsing to ``INTERNAL`` (the KIND-FIDELITY rule).
+        The public ``get`` likewise calls ``_list`` inside its own boundary.
+
+        (Disclosed deviation from the director's WRAP-only classification:
+        ``_for_id``/``Image.record()`` is a still-raising internal caller of
+        ``list``, so a SPLIT is required, not a bare wrap.)
 
         Reconstructs the ledger from kento's markers (like ``Instance.list``
         builds its snapshot from many ``kento-*`` files): the dataset is every
         image **referenced by a guest OR pinned by a hold** (today's
         ``managed = refs | held`` boundary), one record per content **id**.
+        Ordering is stable — sorted by the rendered id.
+        """
+        try:
+            return Ok(value=cls._list())
+        except KentoError as exc:
+            return _error_from(exc)
+
+    @classmethod
+    def _list(cls) -> "list[ImageRecord]":
+        """The raising body of :meth:`list` (§12.4).
+
+        Internal: the public :meth:`list` boundary catches its ``KentoError`` and
+        converts to an ``Error``. Still-raising internal callers (``get`` inside
+        its own boundary, ``_for_id`` via ``Image.record()``) use THIS form so a
+        raised kind reaches their own public boundary intact (KIND-FIDELITY rule).
 
         Grouping (the id-centric core):
 
@@ -394,7 +459,7 @@ class ImageRecord:
           ``{{.Id}}`` podman boundary the holds use, so the ids compare
           apples-to-apples). The parsed reference is recorded under that id as a
           *seen tag* (``refs``); the referencing guests are recorded under it.
-        * Each ``Hold`` (``Hold.list`` from SD2) contributes its content id: a
+        * Each ``Hold`` (``Hold._list`` from SD2) contributes its content id: a
           MODERN id-pin already carries a ``Digest``; a LEGACY tag-pin
           (``OciReference``) is resolved to its id via ``OciImage.resolve_id``.
 
@@ -454,7 +519,7 @@ class ImageRecord:
             guests[key].update(guest_names)
 
         # --- holds: each pins a content id ---
-        for hold in Hold.list():
+        for hold in Hold._list():
             if isinstance(hold.pinned, Digest):
                 digest = hold.pinned
             else:
@@ -486,48 +551,60 @@ class ImageRecord:
         return sorted(records, key=lambda r: r.id.render())
 
     @classmethod
-    def get(cls, ref: "str | Digest | OciReference") -> "ImageRecord":
+    def get(cls, ref: "str | Digest | OciReference") -> Result["ImageRecord"]:
         """The ledger entry for ONE managed image (§12.4).
 
-        Accepts all three input forms (LOCKED run 36): a ``str`` (a tag, a
-        rendered digest, or a bare content-id hex), a ``Digest``, or an
-        ``OciReference``. Resolves the input to a content id, then returns the
-        matching record from :meth:`list` (so ``get`` reports the SAME composed
-        guest/hold/ref view ``list`` does, never a partial one).
+        Public Result boundary (Result-propagation sweep, Block S2): accepts all
+        three input forms (LOCKED run 36): a ``str`` (a tag, a rendered digest, or
+        a bare content-id hex), a ``Digest``, or an ``OciReference``. Resolves the
+        input to a content id, then returns the matching record from :meth:`_list`
+        (so ``get`` reports the SAME composed guest/hold/ref view ``list`` does,
+        never a partial one).
 
-        Raises ``ImageNotFoundError`` when the input does not name a kento
-        -MANAGED image (no record in :meth:`list` is keyed on that id) — a typed
-        raise (principle 5), never a fabricated empty record. Note this is
-        distinct from ``image.record()``, which is TOTAL (an unmanaged image
-        still has an empty record): ``get`` reports only the *managed* set, so a
-        miss is a not-found, matching ``Instance.get`` / ``OciImage.get``.
+        A miss — the input does not name a kento-MANAGED image (no record in
+        :meth:`_list` is keyed on that id) — is a predictable ``Error``
+        (``IMAGE_NOT_FOUND``), never a fabricated empty record. ``_coerce_to_id``
+        may also raise ``ImageNotFoundError`` (input ref not in the local store);
+        both are caught at this boundary. Note this is distinct from
+        ``image.record()``, which is TOTAL (an unmanaged image still has an empty
+        record): ``get`` reports only the *managed* set, so a miss is a not-found,
+        matching ``Instance.get`` / ``OciImage.get``.
+
+        Calls the raising ``_coerce_to_id`` and ``_list`` (not the public
+        Result-returning ``list``) so a deep ``ImageNotFoundError`` reaches THIS
+        boundary with its real kind, not ``INTERNAL`` (the KIND-FIDELITY rule).
         """
-        target = cls._coerce_to_id(ref)
-        rendered = target.render()
-        for record in cls.list():
-            if record.id.render() == rendered:
-                return record
-        raise ImageNotFoundError(
-            f"no kento-managed image record for: {ref}"
-            " — it is neither referenced by a guest nor pinned by a hold."
-            "  Run 'kento images' to see managed images."
-        )
+        try:
+            target = cls._coerce_to_id(ref)
+            rendered = target.render()
+            for record in cls._list():
+                if record.id.render() == rendered:
+                    return Ok(value=record)
+            raise ImageNotFoundError(
+                f"no kento-managed image record for: {ref}"
+                " — it is neither referenced by a guest nor pinned by a hold."
+                "  Run 'kento images' to see managed images."
+            )
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
     def _for_id(cls, digest: Digest) -> "ImageRecord":
         """Build the TOTAL record for a content ``id`` (``image.record()`` core).
 
-        Scans the managed dataset (:meth:`list`) for the record keyed on
-        ``digest`` and returns it; if the image is NOT managed (no guest ref, no
-        hold) returns an EMPTY record (``refs``/``guests``/``holds`` empty) rather
-        than ``None`` — ``image.record()`` is TOTAL (§12.4). The image's own
-        resolved id is the key; ``refs`` is derived from the managed markers only
-        (an unmanaged image has seen no kento tag), so an empty record has
-        ``refs=()`` and is therefore ``dangling`` from kento's ledger POV — which
-        is correct: kento holds no marker for it.
+        Internal helper — STAYS RAISING (it backs the still-raising
+        ``Image.record()``, an S3 method). Scans the managed dataset
+        (:meth:`_list`, the raising form, NOT the public Result ``list``) for the
+        record keyed on ``digest`` and returns it; if the image is NOT managed (no
+        guest ref, no hold) returns an EMPTY record (``refs``/``guests``/``holds``
+        empty) rather than ``None`` — ``image.record()`` is TOTAL (§12.4). The
+        image's own resolved id is the key; ``refs`` is derived from the managed
+        markers only (an unmanaged image has seen no kento tag), so an empty
+        record has ``refs=()`` and is therefore ``dangling`` from kento's ledger
+        POV — which is correct: kento holds no marker for it.
         """
         rendered = digest.render()
-        for record in cls.list():
+        for record in cls._list():
             if record.id.render() == rendered:
                 return record
         return cls(id=digest)
@@ -839,8 +916,37 @@ class OciImage(LayeredImage):
     # OciImage. This is the boundary where a string ref becomes a value.
     # ------------------------------------------------------------------- #
     @classmethod
-    def resolve(cls, source: OciReference) -> "OciImage":
+    def resolve(cls, source: OciReference) -> Result["OciImage"]:
         """Resolve an ``OciReference`` to a populated ``OciImage`` (§4.3).
+
+        Public Result boundary (Result-propagation sweep, Block S2): the body is
+        the raising :meth:`_resolve`; an internal ``KentoError`` (most often
+        ``ImageNotFoundError`` from ``resolve_layers``/``resolve_id``, or a
+        ``StateError`` for an unexpected store layout) is caught here and
+        converted to an ``Error`` via ``_error_from``. A non-``KentoError`` is a
+        panic and propagates.
+
+        SPLIT from ``_resolve`` (the P1 ``parse``/``_parse`` precedent) because
+        the public ``pull``/``get``/``list`` AND the still-raising cross-module
+        ``Instance.image()`` (an S3 method) all call the resolver internally — the
+        raising form lets a deep ``ImageNotFoundError`` reach THEIR public
+        boundary with its real kind rather than collapsing to ``INTERNAL`` (the
+        KIND-FIDELITY rule).
+        """
+        try:
+            return Ok(value=cls._resolve(source))
+        except KentoError as exc:
+            return _error_from(exc)
+
+    @classmethod
+    def _resolve(cls, source: OciReference) -> "OciImage":
+        """The raising body of :meth:`resolve` (§4.3).
+
+        Internal: the public :meth:`resolve` boundary catches its ``KentoError``
+        and converts to an ``Error``. Still-raising internal callers (``pull`` /
+        ``get`` / ``list`` inside their own boundaries; the cross-module
+        ``Instance.image()``) use THIS form so a raised kind reaches their own
+        public boundary intact (the KIND-FIDELITY rule).
 
         Delegates to ``layers.resolve_layers`` (podman query — raises
         ``ImageNotFoundError`` when the image is not in the local store) and
@@ -924,49 +1030,84 @@ class OciImage(LayeredImage):
     # VolumeImage fetch lands) is purely additive / non-breaking.
     # ------------------------------------------------------------------- #
     @classmethod
-    def pull(cls, ref: "str | OciReference") -> "OciImage":
+    def pull(cls, ref: "str | OciReference") -> Result["OciImage"]:
         """Acquire an OCI image from a registry into the local store (M19).
 
-        ``podman pull <ref>``, then resolve the now-local image to a populated
-        handle via :meth:`resolve`. Accepts a ``str`` or an ``OciReference``:
-        a ``str`` is parsed through ``OciReference.parse`` (§2 principle 3 — we
-        never hand an unvalidated string to the shell; a malformed ref raises
-        ``MalformedReference`` BEFORE any podman call). No ``force`` (§11.5 M19:
-        podman re-pulls moved tags / no-ops identical digests). Raises a typed
-        ``SubprocessError`` on pull failure (principle 5), never a sentinel.
+        Public Result boundary (Result-propagation sweep, Block S2): ``podman
+        pull <ref>``, then resolve the now-local image to a populated handle via
+        the raising ``_resolve``. Accepts a ``str`` or an ``OciReference``: a
+        ``str`` is parsed through ``OciReference.parse`` (§2 principle 3 — we
+        never hand an unvalidated string to the shell). The predictable failures
+        — a malformed ref (``MalformedReference`` BEFORE any podman call, via
+        ``_coerce_ref``), a pull failure (``SubprocessError``), or the image still
+        absent after the pull (``ImageNotFoundError`` from ``_resolve``) — are all
+        caught at THIS boundary and converted to an ``Error`` with the right kind.
+        No ``force`` (§11.5 M19: podman re-pulls moved tags / no-ops identical
+        digests). A non-``KentoError`` is a panic and propagates.
+
+        Calls the raising ``_coerce_ref`` and ``_resolve`` (not the public
+        Result-returning ``resolve``) so a deep ``ImageNotFoundError`` /
+        ``SubprocessError`` reaches THIS boundary with its real kind, not
+        ``INTERNAL`` (the KIND-FIDELITY rule).
         """
         from kento import layers as _layers
         from kento.subprocess_util import run_or_die
 
-        oci = cls._coerce_ref(ref)
-        rendered = oci.render()
-        run_or_die(
-            [*_layers._podman_cmd(), "pull", rendered],
-            "pull image",
-            name=rendered,
-        )
-        return cls.resolve(oci)
+        try:
+            oci = cls._coerce_ref(ref)
+            rendered = oci.render()
+            run_or_die(
+                [*_layers._podman_cmd(), "pull", rendered],
+                "pull image",
+                name=rendered,
+            )
+            return Ok(value=cls._resolve(oci))
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
-    def get(cls, ref: "str | OciReference") -> "OciImage":
+    def get(cls, ref: "str | OciReference") -> Result["OciImage"]:
         """Resolve an ALREADY-LOCAL image to a handle; no network (M20).
 
-        Read-only: :meth:`resolve` queries the local podman store only (no
+        Public Result boundary (Result-propagation sweep, Block S2): read-only —
+        the raising ``_resolve`` queries the local podman store only (no
         ``pull``). When the image is absent ``layers.resolve_layers`` raises
-        ``ImageNotFoundError`` — :meth:`get` lets that propagate (mirrors
-        ``Instance.get``); it does NOT fabricate a handle for a missing image
-        (gate C). A ``str`` ref is parsed/validated as in :meth:`pull`.
+        ``ImageNotFoundError``; ``get`` catches it at this boundary and returns
+        ``Error(IMAGE_NOT_FOUND)`` (mirrors ``Instance.get``); it does NOT
+        fabricate a handle for a missing image (gate C). A ``str`` ref is
+        parsed/validated as in :meth:`pull` (a ``MalformedReference`` is likewise
+        caught here).
+
+        SPLIT from ``_get`` (the P1 precedent) because the still-raising
+        ``ImageRecord.resolve`` body calls the raising form so a deep
+        ``ImageNotFoundError`` reaches ITS boundary with the real kind rather than
+        collapsing to ``INTERNAL`` (the KIND-FIDELITY rule).
         """
-        return cls.resolve(cls._coerce_ref(ref))
+        try:
+            return Ok(value=cls._get(ref))
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
-    def list(cls) -> "list[OciImage]":
+    def _get(cls, ref: "str | OciReference") -> "OciImage":
+        """The raising body of :meth:`get` (M20).
+
+        Internal: the public :meth:`get` boundary catches its ``KentoError`` and
+        converts to an ``Error``. Still-raising internal callers
+        (``ImageRecord.resolve`` inside its own boundary) use THIS form so a
+        raised kind reaches their public boundary intact (KIND-FIDELITY rule).
+        """
+        return cls._resolve(cls._coerce_ref(ref))
+
+    @classmethod
+    def list(cls) -> Result["list[OciImage]"]:
         """Enumerate local OCI images as resolved handles (M21).
 
-        Queries ``podman images`` for repository references directly (the
-        whole-store podman view — distinct from ``ImageRecord.list``, which is
-        kento's MANAGED ledger, the guest/hold subset), then resolves each to an
-        ``OciImage``.
+        Public Result boundary (Result-propagation sweep, Block S2): queries
+        ``podman images`` for repository references directly (the whole-store
+        podman view — distinct from ``ImageRecord.list``, which is kento's MANAGED
+        ledger, the guest/hold subset), then resolves each to an ``OciImage`` via
+        the raising ``_resolve``.
 
         TOTAL OVER THE STORE (disclosed policy, grounded in §2 + §7.2's
         ``Status.UNKNOWN`` totality rationale): a single image that fails to
@@ -974,46 +1115,52 @@ class OciImage(LayeredImage):
         unexpected store layout for one entry — is SKIPPED WITH A LOG, not
         raised, so one bad image cannot blow up enumeration of every other. A
         hard failure of the enumerating query itself (``podman images``) is a
-        different thing and DOES raise a typed ``SubprocessError`` — that is the
+        different thing and becomes an ``Error(SUBPROCESS_FAILED)`` — that is the
         whole listing failing, not one entry. NO provenance flag in 1.0 (§11.5
         M21 — that lands with the lifecycle EPIC).
         """
         from kento import layers as _layers
         from kento.subprocess_util import run_or_die
 
-        result = run_or_die(
-            [*_layers._podman_cmd(), "images",
-             "--format", "{{.Repository}}:{{.Tag}}"],
-            "list images",
-        )
-        images: list[OciImage] = []
-        for line in result.stdout.splitlines():
-            entry = line.strip()
-            # podman renders a dangling (untagged) image as "<none>:<none>";
-            # such an entry has no resolvable repository ref, so skip it (it is
-            # surfaced by the lifecycle-EPIC provenance work, not 1.0 list).
-            if not entry or "<none>" in entry:
-                continue
-            try:
-                # .unwrap() preserves the skip-on-malformed behavior: an Error
-                # → ResultError (a KentoError), caught below (Block P1).
-                oci = OciReference.parse(entry).unwrap()
-                images.append(cls.resolve(oci))
-            except KentoError as exc:
-                # Total over the store: one unresolvable entry is logged and
-                # skipped, never fatal to the whole enumeration.
-                _images_logger.warning(
-                    "skipping unresolvable image %r: %s", entry, exc)
-        return images
+        try:
+            result = run_or_die(
+                [*_layers._podman_cmd(), "images",
+                 "--format", "{{.Repository}}:{{.Tag}}"],
+                "list images",
+            )
+            images: list[OciImage] = []
+            for line in result.stdout.splitlines():
+                entry = line.strip()
+                # podman renders a dangling (untagged) image as "<none>:<none>";
+                # such an entry has no resolvable repository ref, so skip it (it
+                # is surfaced by the lifecycle-EPIC provenance work, not 1.0).
+                if not entry or "<none>" in entry:
+                    continue
+                try:
+                    # .unwrap() preserves the skip-on-malformed behavior: an
+                    # Error → ResultError (a KentoError), caught below (Block P1).
+                    oci = OciReference.parse(entry).unwrap()
+                    images.append(cls._resolve(oci))
+                except KentoError as exc:
+                    # Total over the store: one unresolvable entry is logged and
+                    # skipped, never fatal to the whole enumeration. (The
+                    # whole-listing failure — the `podman images` query itself —
+                    # is the OUTER boundary's SubprocessError, not this skip.)
+                    _images_logger.warning(
+                        "skipping unresolvable image %r: %s", entry, exc)
+            return Ok(value=images)
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
     def prune(
         cls, *, scope: PruneScope = PruneScope.DANGLING,
-    ) -> ReclaimReport:
+    ) -> Result[ReclaimReport]:
         """Reclaim DANGLING images; **never touches a held image** (M22).
 
-        Removes unused/dangling images — untagged ``<none>`` layers podman no
-        longer references — and returns a :class:`ReclaimReport` of what was
+        Public Result boundary (Result-propagation sweep, Block S2): removes
+        unused/dangling images — untagged ``<none>`` layers podman no longer
+        references — and returns ``Ok`` of a :class:`ReclaimReport` of what was
         removed (``reclaimed``) and what podman refused (``failed`` = ``(id,
         reason)`` pairs, surfaced not swallowed — the 1.6.2 contract). This is
         a store-level GC, so it is a ``classmethod`` mirroring ``pull``/``get``/
@@ -1024,14 +1171,20 @@ class OciImage(LayeredImage):
         The locked M22 signature carries ONE param, ``scope: PruneScope =
         PruneScope.DANGLING`` (§11.5). ``DANGLING`` is the only 1.0 value (the
         further provenance scopes land with the lifecycle EPIC, §11.9). Any
-        other ``scope`` value cannot occur in 1.0, but is rejected with a typed
-        :class:`ValidationError` (principle 5 — a typed raise, never a silent
-        no-op or a fabricated result) so a future caller passing an
-        unimplemented scope fails loudly instead of silently pruning DANGLING
-        anyway (gate C).
+        other ``scope`` value cannot occur in 1.0, but yields an
+        ``Error(VALIDATION)`` (principle 5 — never a silent no-op or a fabricated
+        result) so a future caller passing an unimplemented scope fails loudly
+        instead of silently pruning DANGLING anyway (gate C).
 
         There is **NO** ``dry_run`` param: the locked signature has only
         ``scope``, so ``prune`` EXECUTES and the report is ``dry_run=False``.
+
+        **Two distinct failure channels (preserved).** A per-image ``rmi``
+        refusal is surfaced INSIDE the report's ``failed`` (the 1.6.2 contract) —
+        it does NOT make the whole op an ``Error``; the batch continues and the
+        ``Ok`` report carries the refusals. By contrast a failure of the dangling
+        ENUMERATION query itself is the whole prune failing → caught at this
+        boundary as ``Error(SUBPROCESS_FAILED)``.
 
         **The held-image invariant is guaranteed, not assumed.** A held image is
         pinned by a stopped ``kento-hold.<guest>`` container, so podman's
@@ -1043,79 +1196,80 @@ class OciImage(LayeredImage):
         the existing hold knowledge (no forked hold logic) — the same content-id
         keying :meth:`_is_held` uses, since a dangling image is untagged and so
         is identified by its **id**, not a ``repo:tag``.
-
-        Raises a typed :class:`SubprocessError` (principle 5) if the dangling
-        enumeration query itself fails (the whole prune failing, distinct from a
-        per-image ``rmi`` refusal which is surfaced in ``failed``).
         """
         from kento import images as _images_mod
         from kento import layers as _layers
         from kento.errors import SubprocessError
         from kento.subprocess_util import run_or_die
 
-        if scope is not PruneScope.DANGLING:
-            from kento.errors import ValidationError
+        try:
+            if scope is not PruneScope.DANGLING:
+                from kento.errors import ValidationError
 
-            raise ValidationError(
-                f"unsupported prune scope: {scope!r}"
-                " — only PruneScope.DANGLING is supported in this release"
-                " (further provenance scopes land with the image-lifecycle"
-                " EPIC)."
+                raise ValidationError(
+                    f"unsupported prune scope: {scope!r}"
+                    " — only PruneScope.DANGLING is supported in this release"
+                    " (further provenance scopes land with the image-lifecycle"
+                    " EPIC)."
+                )
+
+            # Enumerate dangling images by content id ({{.Id}} = the BARE 64-hex
+            # sha256 real podman emits — the same form layers.resolve_image_id
+            # yields and create_image_hold stores in its label, so this compares
+            # apples-to-apples (bare-hex vs bare-hex) against a hold's pinned
+            # content id below). A dangling image is untagged ("<none>"), so its
+            # id IS its identifier in the report.
+            result = run_or_die(
+                [*_layers._podman_cmd(), "images",
+                 "--filter", "dangling=true", "--format", "{{.Id}}"],
+                "list dangling images",
             )
 
-        # Enumerate dangling images by content id ({{.Id}} = the BARE 64-hex
-        # sha256 real podman emits — the same form layers.resolve_image_id
-        # yields and create_image_hold stores in its label, so this compares
-        # apples-to-apples (bare-hex vs bare-hex) against a hold's pinned content
-        # id below). A dangling image is untagged ("<none>"), so its id IS its
-        # identifier in the report.
-        result = run_or_die(
-            [*_layers._podman_cmd(), "images",
-             "--filter", "dangling=true", "--format", "{{.Id}}"],
-            "list dangling images",
-        )
+            # Held content ids — guarantee the "never touches a held image"
+            # invariant ourselves rather than trusting podman's filter. Compose
+            # the existing hold knowledge (no forked hold logic): the
+            # authoritative io.kento.hold-image-id label values, plus _holds()'s
+            # {{.Image}} field (the pinned content id for a modern hold; a
+            # repo:tag for a legacy hold, which can never equal a dangling
+            # image's id and so is inert).
+            held_ids: set[str] = set(_images_mod._hold_image_ids().values())
+            for _name, img in _images_mod._holds():
+                if img:
+                    held_ids.add(img)
 
-        # Held content ids — guarantee the "never touches a held image"
-        # invariant ourselves rather than trusting podman's filter. Compose the
-        # existing hold knowledge (no forked hold logic): the authoritative
-        # io.kento.hold-image-id label values, plus _holds()'s {{.Image}} field
-        # (the pinned content id for a modern hold; a repo:tag for a legacy
-        # hold, which can never equal a dangling image's id and so is inert).
-        held_ids: set[str] = set(_images_mod._hold_image_ids().values())
-        for _name, img in _images_mod._holds():
-            if img:
-                held_ids.add(img)
+            reclaimed: list[str] = []
+            failed: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for line in result.stdout.splitlines():
+                image_id = line.strip()
+                if not image_id or image_id in seen:
+                    continue
+                seen.add(image_id)
+                if image_id in held_ids:
+                    # Belt-and-suspenders: a held image must never be removed
+                    # even if it somehow surfaced as dangling (spec invariant).
+                    _images_logger.debug(
+                        "prune: skipping held dangling image %s", image_id)
+                    continue
+                try:
+                    run_or_die(
+                        [*_layers._podman_cmd(), "rmi", image_id],
+                        "remove dangling image", name=image_id,
+                    )
+                    reclaimed.append(image_id)
+                except SubprocessError as exc:
+                    # Surface the refusal (1.6.2 contract) — do NOT swallow it,
+                    # and do NOT abort the batch on one refusal. This stays a
+                    # per-image entry in the Ok report's `failed`, NOT an Error.
+                    failed.append((image_id, str(exc)))
 
-        reclaimed: list[str] = []
-        failed: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for line in result.stdout.splitlines():
-            image_id = line.strip()
-            if not image_id or image_id in seen:
-                continue
-            seen.add(image_id)
-            if image_id in held_ids:
-                # Belt-and-suspenders: a held image must never be removed even
-                # if it somehow surfaced as dangling (spec invariant).
-                _images_logger.debug(
-                    "prune: skipping held dangling image %s", image_id)
-                continue
-            try:
-                run_or_die(
-                    [*_layers._podman_cmd(), "rmi", image_id],
-                    "remove dangling image", name=image_id,
-                )
-                reclaimed.append(image_id)
-            except SubprocessError as exc:
-                # Surface the refusal (1.6.2 contract) — do NOT swallow it, and
-                # do NOT abort the batch on one refusal.
-                failed.append((image_id, str(exc)))
-
-        return ReclaimReport(
-            dry_run=False,
-            reclaimed=tuple(reclaimed),
-            failed=tuple(failed),
-        )
+            return Ok(value=ReclaimReport(
+                dry_run=False,
+                reclaimed=tuple(reclaimed),
+                failed=tuple(failed),
+            ))
+        except KentoError as exc:
+            return _error_from(exc)
 
     def remove(self, *, force: bool = False) -> None:
         """Remove THIS image from the local store (M23). ``-> None``.
