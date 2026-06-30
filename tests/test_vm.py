@@ -1394,3 +1394,161 @@ class TestStartVmCleanupOnFailure:
         mock_umount.assert_called_once()
         assert not (lxc_dir / "kento-virtiofsd-pid").exists()
         assert not (lxc_dir / "kento-qemu-pid").exists()
+
+
+class TestResolveBootSources:
+    """§8 Phase A — resolve_boot_sources: override else in-image, per side."""
+
+    def test_no_override_uses_in_image(self, tmp_path):
+        from kento.vm import resolve_boot_sources
+        rootfs = tmp_path / "rootfs"
+        k, i = resolve_boot_sources(tmp_path, rootfs)
+        assert k == rootfs / "boot" / "vmlinuz"
+        assert i == rootfs / "boot" / "initramfs.img"
+
+    def test_kernel_override_only(self, tmp_path):
+        from kento.vm import resolve_boot_sources
+        rootfs = tmp_path / "rootfs"
+        kcopy = tmp_path / "kernel"
+        kcopy.write_text("K")
+        (tmp_path / "kento-kernel").write_text(str(kcopy) + "\n")
+        k, i = resolve_boot_sources(tmp_path, rootfs)
+        assert k == kcopy
+        # initramfs side untouched -> in-image fallback.
+        assert i == rootfs / "boot" / "initramfs.img"
+
+    def test_initramfs_override_only(self, tmp_path):
+        from kento.vm import resolve_boot_sources
+        rootfs = tmp_path / "rootfs"
+        icopy = tmp_path / "initramfs.img"
+        icopy.write_text("I")
+        (tmp_path / "kento-initramfs").write_text(str(icopy) + "\n")
+        k, i = resolve_boot_sources(tmp_path, rootfs)
+        assert k == rootfs / "boot" / "vmlinuz"
+        assert i == icopy
+
+    def test_both_overrides(self, tmp_path):
+        from kento.vm import resolve_boot_sources
+        rootfs = tmp_path / "rootfs"
+        kcopy = tmp_path / "kernel"; kcopy.write_text("K")
+        icopy = tmp_path / "initramfs.img"; icopy.write_text("I")
+        (tmp_path / "kento-kernel").write_text(str(kcopy) + "\n")
+        (tmp_path / "kento-initramfs").write_text(str(icopy) + "\n")
+        k, i = resolve_boot_sources(tmp_path, rootfs)
+        assert k == kcopy
+        assert i == icopy
+
+
+class TestStartVmBootOverride:
+    """§8 Phase A — start_vm boot + validation honor the override."""
+
+    def _common(self, lxc_dir):
+        (lxc_dir / "kento-layers").write_text("/a:/b\n")
+        (lxc_dir / "kento-state").write_text(str(lxc_dir) + "\n")
+        (lxc_dir / "kento-inject.sh").write_text("#!/bin/sh\n")
+        (lxc_dir / "virtiofsd.sock").write_text("")
+
+    @patch("kento.vm.VM_KVM", False)
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_qemu_uses_override_copies(self, mock_mount, mock_popen, mock_running,
+                                       mock_find, mock_run, tmp_path):
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        (rootfs / "boot").mkdir(parents=True)
+        # NO in-image kernel/initramfs at all — the override must supersede.
+        kcopy = lxc_dir / "kernel"; kcopy.write_text("OVERRIDE-K")
+        icopy = lxc_dir / "initramfs.img"; icopy.write_text("OVERRIDE-I")
+        (lxc_dir / "kento-kernel").write_text(str(kcopy) + "\n")
+        (lxc_dir / "kento-initramfs").write_text(str(icopy) + "\n")
+        self._common(lxc_dir)
+
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        assert qemu_args[qemu_args.index("-kernel") + 1] == str(kcopy)
+        assert qemu_args[qemu_args.index("-initrd") + 1] == str(icopy)
+
+    @patch("kento.vm.VM_KVM", False)
+    @patch("kento.subprocess_util.subprocess.run",
+           return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+    @patch("kento.vm._find_virtiofsd", return_value="/usr/libexec/virtiofsd")
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.subprocess.Popen")
+    @patch("kento.vm.mount_rootfs")
+    def test_kernel_only_override_keeps_in_image_initramfs(
+            self, mock_mount, mock_popen, mock_running, mock_find, mock_run, tmp_path):
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        (rootfs / "boot").mkdir(parents=True)
+        (rootfs / "boot" / "initramfs.img").write_text("in-image-i")
+        # kernel override only; NO in-image vmlinuz.
+        kcopy = lxc_dir / "kernel"; kcopy.write_text("OVERRIDE-K")
+        (lxc_dir / "kento-kernel").write_text(str(kcopy) + "\n")
+        self._common(lxc_dir)
+
+        mock_vfs = MagicMock(); mock_vfs.pid = 1; mock_vfs.poll.return_value = None
+        mock_qemu = MagicMock(); mock_qemu.pid = 2
+        mock_popen.side_effect = [mock_vfs, mock_qemu]
+
+        start_vm(lxc_dir, "testvm")
+
+        qemu_args = mock_popen.call_args_list[1][0][0]
+        assert qemu_args[qemu_args.index("-kernel") + 1] == str(kcopy)
+        assert qemu_args[qemu_args.index("-initrd") + 1] == str(
+            rootfs / "boot" / "initramfs.img")
+
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.unmount_rootfs")
+    @patch("kento.vm.mount_rootfs")
+    def test_guard_passes_with_override_when_in_image_absent(
+            self, mock_mount, mock_unmount, mock_running, tmp_path):
+        """The missing-kernel guard must NOT fire when the override supersedes
+        an absent in-image vmlinuz (it must check the override copy)."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        (rootfs / "boot").mkdir(parents=True)
+        (rootfs / "boot" / "initramfs.img").write_text("in-image-i")
+        kcopy = lxc_dir / "kernel"; kcopy.write_text("K")
+        (lxc_dir / "kento-kernel").write_text(str(kcopy) + "\n")
+        self._common(lxc_dir)
+        # No QEMU/virtiofsd stub: the guard must be passed (so it proceeds to
+        # inject); we patch inject to a no-op subprocess via run stub below.
+        with patch("kento.vm._find_virtiofsd", return_value="/v"), \
+             patch("kento.subprocess_util.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0, "", "")), \
+             patch("kento.vm.subprocess.Popen") as mock_popen:
+            mvfs = MagicMock(); mvfs.pid = 1; mvfs.poll.return_value = None
+            mq = MagicMock(); mq.pid = 2
+            mock_popen.side_effect = [mvfs, mq]
+            start_vm(lxc_dir, "testvm")
+        mock_unmount.assert_not_called()
+
+    @patch("kento.vm.is_vm_running", return_value=False)
+    @patch("kento.vm.unmount_rootfs")
+    @patch("kento.vm.mount_rootfs")
+    def test_guard_fails_when_override_path_missing(
+            self, mock_mount, mock_unmount, mock_running, tmp_path):
+        """A kento-kernel pointing at a nonexistent file still trips the guard
+        (the override is validated like the in-image path)."""
+        lxc_dir = tmp_path / "testvm"
+        lxc_dir.mkdir()
+        rootfs = lxc_dir / "rootfs"
+        (rootfs / "boot").mkdir(parents=True)
+        (rootfs / "boot" / "initramfs.img").write_text("i")
+        (lxc_dir / "kento-kernel").write_text(str(lxc_dir / "gone") + "\n")
+        self._common(lxc_dir)
+        with pytest.raises(StateError, match="kernel not found"):
+            start_vm(lxc_dir, "testvm")
+        mock_unmount.assert_called_once()

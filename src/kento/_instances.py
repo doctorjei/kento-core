@@ -378,6 +378,51 @@ class Instance(ABC):
                                       upper, result.stdout)
             return 0
 
+    def image(self) -> Image:
+        """Resolve this instance's boot rootfs to a concrete ``Image`` (§4.5).
+
+        An explicit I/O HANDLE METHOD — NOT a property — because resolution
+        queries the backing store (§2 principle 2, §4.5: "resolution + prepare
+        are explicit handle actions, not properties"). Resolves the FIRST
+        (rootfs) boot source — 1.0 is a single ``oci://`` source (§3.8/§4) — via
+        ``OciImage.resolve`` against the local store (no network); propagates
+        ``ImageNotFoundError`` if the content is gone (no fabricated handle).
+
+        Boot-source override echo (§8 Phase A): when this instance carries a
+        persisted ``kento-kernel`` / ``kento-initramfs`` (a VM with ``--kernel`` /
+        ``--initrd``), the resolved image's ``kernel`` / ``initramfs`` are
+        populated from those state files via ``dataclasses.replace`` — so ``info``
+        and a projection can report the override source. Each side is independent;
+        an absent marker leaves that side ``None`` (in-image fallback). An image
+        with NO override resolves with both ``None`` (unchanged §4.1 default).
+        """
+        from dataclasses import replace
+        from kento._images import OciImage
+
+        if not self._sources:
+            raise InstanceNotFoundError(
+                f"{self._name}: no boot source recorded (kento-image missing)"
+            )
+        rootfs_source = self._sources[0]
+        if not isinstance(rootfs_source, OciReference):
+            # 1.0 resolves only oci:// sources; a reserved scheme (file/http)
+            # has no resolver yet. Surface honestly rather than guess (§2 p5).
+            raise InstanceNotFoundError(
+                f"{self._name}: boot source {rootfs_source!r} is not an "
+                f"OCI reference (only oci:// is resolvable in 1.0)."
+            )
+        img = OciImage.resolve(rootfs_source)
+
+        kernel_meta = _read_meta(self._dir, "kento-kernel")
+        initramfs_meta = _read_meta(self._dir, "kento-initramfs")
+        if kernel_meta is None and initramfs_meta is None:
+            return img
+        return replace(
+            img,
+            kernel=Path(kernel_meta) if kernel_meta else None,
+            initramfs=Path(initramfs_meta) if initramfs_meta else None,
+        )
+
     @property
     def forwards(self) -> "dict[HostBinding, GuestTarget]":
         """Port-forward map (§5.7) — the ONE LIVE-capable network settable (M9).
@@ -1927,6 +1972,8 @@ class VirtualMachine(Instance):
         storage: StorageMode = StorageMode.OVERLAY,
         nesting: bool = False,
         qemu_args: "Sequence[str]" = (),
+        kernel: "str | Path | None" = None,
+        initramfs: "str | Path | None" = None,
         extra_args: "Sequence[str]" = (),
         searchdomain: str | None = None,
         timezone: str | None = None,
@@ -1944,9 +1991,14 @@ class VirtualMachine(Instance):
         (``create.py`` promotes to ``"pve-vm"`` for PVE); there is NO
         ``unprivileged``/``lxc_args`` (VMs have their own isolation), and the
         backend pass-through is ``qemu_args`` (``--qemu-arg``) instead.
-        ``kernel``/``initramfs``/``machine`` are NOT params — they are the image
-        contract / a hardcoded constant (M16, §11.0). ``storage`` other than
-        ``OVERLAY`` raises (JC4). The create-time long tail
+        ``kernel``/``initramfs`` are the OPT-IN boot-source override (§8 Phase A):
+        LOCAL filesystem paths to a kernel / initramfs that supersede the
+        in-image ``/boot`` for VM direct-kernel-boot, each side independent
+        (``None`` → in-image fallback). They are COPIED into the instance state
+        dir at create (reaped on destroy) and echoed on the resolved
+        :attr:`image`. ``machine`` STAYS a non-param image-contract constant
+        (M16, §11.0). ``storage`` other than ``OVERLAY`` raises (JC4). The
+        create-time long tail
         (``forwards``/``searchdomain``/``timezone``/``ssh_*``/``config_mode``/
         ``force``) is the SAME as :meth:`SystemContainer.create`.
         """
@@ -1977,6 +2029,8 @@ class VirtualMachine(Instance):
             force=force,
         )
         kwargs["qemu_args"] = list(qemu_args) if qemu_args else None
+        kwargs["kernel"] = str(kernel) if kernel is not None else None
+        kwargs["initramfs"] = str(initramfs) if initramfs is not None else None
         create_mod.create(**kwargs)
         return cls.get(name)
 
@@ -1998,6 +2052,8 @@ class VirtualMachine(Instance):
         storage: StorageMode = StorageMode.OVERLAY,
         nesting: bool = False,
         qemu_args: "Sequence[str]" = (),
+        kernel: "str | Path | None" = None,
+        initramfs: "str | Path | None" = None,
         extra_args: "Sequence[str]" = (),
         searchdomain: str | None = None,
         timezone: str | None = None,
@@ -2010,8 +2066,9 @@ class VirtualMachine(Instance):
     ) -> "Iterator[VirtualMachine]":
         """Context-manager create for a throwaway VM (M27, §11.4).
 
-        Same parameters as :meth:`create` (including the create-time long tail);
-        the handle is ``with``-scoped and **guaranteed torn down on exit** via
+        Same parameters as :meth:`create` (including the create-time long tail
+        and the §8 Phase A ``kernel``/``initramfs`` boot-source override); the
+        handle is ``with``-scoped and **guaranteed torn down on exit** via
         ``destroy(force=True)`` (normal OR exceptional). The ONLY context-manager
         entry — a plain ``create``/``get`` handle raises ``TypeError`` under
         ``with`` (JC6, §11.4).
@@ -2021,7 +2078,8 @@ class VirtualMachine(Instance):
             hostname=hostname, platform=platform, mid=mid, network=network,
             forwards=forwards, resources=resources, environment=environment,
             start=start, storage=storage, nesting=nesting,
-            qemu_args=qemu_args, extra_args=extra_args,
+            qemu_args=qemu_args, kernel=kernel, initramfs=initramfs,
+            extra_args=extra_args,
             searchdomain=searchdomain, timezone=timezone, ssh_keys=ssh_keys,
             ssh_key_user=ssh_key_user, ssh_host_keys=ssh_host_keys,
             ssh_host_key_dir=ssh_host_key_dir, config_mode=config_mode,

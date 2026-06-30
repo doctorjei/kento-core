@@ -685,6 +685,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
            ssh_host_keys: bool = False,
            ssh_host_key_dir: str | None = None,
            mac: str | None = None,
+           kernel: str | None = None,
+           initramfs: str | None = None,
            config_mode: str = "auto",
            qemu_args: list[str] | None = None,
            pve_args: list[str] | None = None,
@@ -782,6 +784,29 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             raise ModeError(
                 "--lxc-arg is not applicable to VM modes (no native "
                 "LXC config)."
+            )
+
+    # Boot-source override (§8 Phase A, run 38): --kernel/--initrd are VM-only,
+    # LOCAL-FILE-only. Validate + reject for LXC here — after PVE promotion so
+    # `mode` is resolved — BEFORE any filesystem mutation. Containers share the
+    # host kernel; there is no per-instance kernel to override, so any override
+    # on an LXC mode is a hard ModeError (mirrors --lxc-arg/--unprivileged).
+    if kernel is not None or initramfs is not None:
+        if mode not in ("vm", "pve-vm"):
+            raise ModeError(
+                "--kernel/--initrd apply to VM modes only — a system "
+                "container shares the host kernel (no per-instance kernel "
+                "to override)."
+            )
+        # LOCAL FILE ONLY (no URL/fetch in Phase A): each given path must EXIST
+        # and be a regular FILE. Name the path + flag so the error is actionable.
+        if kernel is not None and not Path(kernel).is_file():
+            raise ValidationError(
+                f"--kernel file not found (or not a regular file): {kernel}"
+            )
+        if initramfs is not None and not Path(initramfs).is_file():
+            raise ValidationError(
+                f"--initrd file not found (or not a regular file): {initramfs}"
             )
 
     # --unprivileged: validate mode + run the fail-closed per-layer idmap probe
@@ -1189,6 +1214,25 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             (container_dir / "kento-cores").write_text(str(effective_cores) + "\n")
             (container_dir / "kento-nesting").write_text(
                 "1\n" if nesting else "0\n")
+
+            # Boot-source override (§8 Phase A): COPY each supplied kernel/
+            # initramfs into the instance dir and record the IN-DIR path as
+            # kento-kernel/kento-initramfs (mirroring kento-mac). Self-contained
+            # — survives the caller deleting their source file — and reaped with
+            # the instance on destroy (shutil.rmtree(container_dir)). Each side
+            # is independent; an unspecified side leaves no marker, so vm.py's
+            # resolver falls back to the in-image path for it. Already validated
+            # (exists + is-file, VM-only) above, before any state mutation.
+            if kernel is not None:
+                kernel_dst = container_dir / "kernel"
+                shutil.copyfile(kernel, kernel_dst)
+                (container_dir / "kento-kernel").write_text(
+                    str(kernel_dst) + "\n")
+            if initramfs is not None:
+                initramfs_dst = container_dir / "initramfs.img"
+                shutil.copyfile(initramfs, initramfs_dst)
+                (container_dir / "kento-initramfs").write_text(
+                    str(initramfs_dst) + "\n")
 
             # Write port mapping (usermode networking only).
             # Hold kento_lock around allocate_port so two concurrent creates

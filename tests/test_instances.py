@@ -2790,3 +2790,71 @@ def test_suspend_dead_handle_raises(tmp_path):
         with pytest.raises(InstanceNotFoundError):
             inst.suspend()
     mock_suspend.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# §8 Phase A — Instance.image() resolves the boot rootfs + echoes the override.
+# --------------------------------------------------------------------------- #
+
+
+def _fake_oci_image():
+    from kento._images import OciImage, Layer
+    from kento._references import Digest
+    return OciImage(
+        source=OciReference.parse("droste-hair:latest"),
+        id=Digest(algorithm="sha256", encoded="a" * 64),
+        layers=(Layer(id="x", short_link=""),),
+        overlay_root=Path("/store"),
+    )
+
+
+def test_image_no_override_both_none(tmp_path):
+    d = _make_vm(tmp_path)
+    base = _fake_oci_image()
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    with patch("kento._images.OciImage.resolve", return_value=base) as mres:
+        img = inst.image()
+    mres.assert_called_once_with(OciReference.parse("droste-hair:latest"))
+    assert img.kernel is None
+    assert img.initramfs is None
+    # No override -> the resolved image is returned unmodified (same object).
+    assert img is base
+
+
+def test_image_echoes_kernel_override(tmp_path):
+    kcopy = tmp_path / "vm" / "myvm" / "kernel"
+    d = _make_vm(tmp_path, **{"kento-kernel": str(kcopy)})
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    with patch("kento._images.OciImage.resolve", return_value=_fake_oci_image()):
+        img = inst.image()
+    assert img.kernel == kcopy
+    assert img.initramfs is None  # no initramfs override -> in-image fallback
+
+
+def test_image_echoes_both_overrides(tmp_path):
+    base_dir = tmp_path / "vm" / "myvm"
+    kcopy = base_dir / "kernel"
+    icopy = base_dir / "initramfs.img"
+    d = _make_vm(tmp_path, **{"kento-kernel": str(kcopy),
+                              "kento-initramfs": str(icopy)})
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    with patch("kento._images.OciImage.resolve", return_value=_fake_oci_image()):
+        img = inst.image()
+    assert img.kernel == kcopy
+    assert img.initramfs == icopy
+    # The base resolved fields are untouched (replace only sets the override).
+    assert img.source == OciReference.parse("droste-hair:latest")
+
+
+def test_image_initramfs_only_override(tmp_path):
+    icopy = tmp_path / "vm" / "myvm" / "initramfs.img"
+    d = _make_vm(tmp_path, **{"kento-initramfs": str(icopy)})
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    with patch("kento._images.OciImage.resolve", return_value=_fake_oci_image()):
+        img = inst.image()
+    assert img.kernel is None
+    assert img.initramfs == icopy

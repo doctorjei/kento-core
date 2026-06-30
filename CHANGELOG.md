@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **VM kernel/initramfs boot-source override (§8 Phase A — URL-VM phase A).**
+  Boot a caller-supplied kernel/initramfs against an existing trusted rootfs
+  image via QEMU direct-kernel-boot. Opt-in, **VM-only**, **local-file** in this
+  phase (no URL/fetch — that is Phase B):
+  - `VirtualMachine.create()` / `transient()` take new params `kernel: str |
+    Path | None = None` and `initramfs: str | Path | None = None`. `machine`
+    stays a non-param image-contract constant. `SystemContainer.create()` /
+    `transient()` have **no** kernel/initramfs param (mirroring the `qemu_args`
+    vs `lxc_args` asymmetry), so an override is rejected at the typed surface as
+    a `TypeError` (unexpected keyword argument) — the strongest rejection. The
+    underlying `create.create(mode="lxc"/"pve", ...)` string-mode path
+    additionally raises `ModeError` if a kernel/initramfs is passed, so the
+    rejection holds on both the typed and the procedural path (containers share
+    the host kernel — there is no per-instance kernel to override).
+  - Each override path is validated at create (must EXIST and be a regular
+    FILE) and **copied into the instance directory** as `kento-kernel` /
+    `kento-initramfs` (mirroring `kento-mac`) — self-contained (survives the
+    caller deleting their source) and reaped with the instance on destroy.
+  - VM boot and the create-time missing-kernel guard honor the override, else
+    fall back to the in-image `/boot/vmlinuz` / `/boot/initramfs.img`,
+    **independently per side** (a kernel-only override keeps the in-image
+    initramfs and vice versa). `-append` is unchanged (virtiofs root) — the
+    override kernel must support virtiofs root (gemet contract); the matching
+    initramfs / `/lib/modules` concern is the caller's, not enforced by kento.
+  - New explicit I/O method `instance.image() -> Image` resolves the boot
+    rootfs source to a concrete `Image` (§4.5) and populates `Image.kernel` /
+    `Image.initramfs` from the persisted override so `info` can report the
+    override source; an image with no override resolves with both `None`.
+
 ## [1.6.3.dev0] - 2026-06-30
 
 > **Synced dev line.** kento-core and kento (CLI) now share a single version,
