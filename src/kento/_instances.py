@@ -1077,11 +1077,11 @@ class Instance(ABC):
     # M1 — get: resolve one name to the right concrete handle (§11.1).
     # ------------------------------------------------------------------- #
     @classmethod
-    def get(cls, name: str) -> "Instance":
+    def get(cls, name: str) -> Result["Instance"]:
         """Resolve one instance name to its typed handle (M1, §11.1).
 
         Scans both namespaces (LXC + VM) via the existing runtime resolver.
-        Returns the CONCRETE kind for ``name`` (``SystemContainer`` /
+        Returns ``Ok`` of the CONCRETE kind for ``name`` (``SystemContainer`` /
         ``VirtualMachine``), loaded as a coherent snapshot.
 
         Polymorphic (§10.1): called on the **base** it returns whichever kind
@@ -1089,10 +1089,36 @@ class Instance(ABC):
         kind's namespace, so a name that exists in BOTH namespaces (a
         ``create --force`` duplicate) resolves to the subclass's own kind rather
         than raising ``resolve_any``'s cross-namespace "ambiguous" error.
-        Resolving a name that is ONLY a DIFFERENT kind still raises a
-        kind-mismatch ``InstanceNotFoundError`` whose message names the actual
-        kind (NOT a ``None`` return, §2 principle 5). Raises
-        ``InstanceNotFoundError`` when no such instance exists in any namespace.
+
+        Public Result boundary (Result-propagation sweep, Block S4): wraps the
+        raising :meth:`_get_impl` at this boundary — a miss (or a name that is
+        ONLY a DIFFERENT kind) raises ``InstanceNotFoundError`` inside ``_get_impl``
+        and is caught here, returning ``Error(INSTANCE_NOT_FOUND)`` whose message
+        names the actual kind (NOT a ``None`` value, §2 principle 5; gate C — it
+        never fabricates a handle for a missing instance). A non-``KentoError`` is
+        a panic and propagates.
+
+        SPLIT from ``_get_impl`` (the P1/S2 precedent): still-raising internal
+        callers (``adopt`` and the ``create`` mutators, which ``return
+        cls._get_impl(name)``) use the raising form so a deep
+        ``InstanceNotFoundError`` reaches THEIR public boundary with its real kind
+        rather than collapsing to ``INTERNAL`` (the KIND-FIDELITY rule).
+        """
+        try:
+            return Ok(value=cls._get_impl(name))
+        except KentoError as exc:
+            return _error_from(exc)
+
+    @classmethod
+    def _get_impl(cls, name: str) -> "Instance":
+        """The raising body of :meth:`get` (M1, §11.1).
+
+        Internal: the public :meth:`get` boundary catches its ``KentoError`` and
+        converts to an ``Error``. Still-raising internal callers (``adopt``,
+        ``SystemContainer.create``, ``VirtualMachine.create``) use THIS form so a
+        raised kind reaches their own public boundary intact (KIND-FIDELITY rule).
+        Raises ``InstanceNotFoundError`` when no such instance exists in any
+        namespace, or when ``name`` resolves to a different kind than ``cls``.
         """
         from kento import InstanceNotFoundError, resolve_any
 
@@ -1160,7 +1186,7 @@ class Instance(ABC):
     # M2 — list: enumerate cls's kind, narrowed by namespace (§11.1).
     # ------------------------------------------------------------------- #
     @classmethod
-    def list(cls) -> "list[Instance]":
+    def list(cls) -> Result["list[Instance]"]:
         """Enumerate instances of ``cls``'s kind (M2, §10.1 narrowing).
 
         Globs ``*/kento-image`` in the relevant namespace base(s) (the same
@@ -1178,37 +1204,51 @@ class Instance(ABC):
         ``except OSError: continue`` and the ``Status.UNKNOWN`` totality
         rationale, §7.2). The status probe itself is already total (a failed
         probe yields ``Status.UNKNOWN``, not an exception).
+
+        Public Result boundary (Result-propagation sweep, Block S4): the normal
+        outcome is ``Ok(list)`` — ``list`` has no predictable raise today (the
+        per-entry ``except (OSError, KentoError)`` skip means a single bad entry is
+        SKIPPED, never propagated). NO SPLIT: ``list`` has no internal callers, so
+        the body wraps directly. The boundary-catch is retained for consistency
+        with the sweep and to convert any *future* enumeration-level ``KentoError``
+        (one raised OUTSIDE the per-entry skip) to ``Error`` rather than leaking a
+        raise; a non-``KentoError`` is a panic and propagates.
         """
-        from kento import LXC_BASE, VM_BASE
+        try:
+            from kento import LXC_BASE, VM_BASE
 
-        namespace = cls._namespace()
-        if namespace == "lxc":
-            bases = (LXC_BASE,)
-        elif namespace == "vm":
-            bases = (VM_BASE,)
-        else:  # base Instance — scan both (byte-identical to before).
-            bases = (LXC_BASE, VM_BASE)
+            namespace = cls._namespace()
+            if namespace == "lxc":
+                bases = (LXC_BASE,)
+            elif namespace == "vm":
+                bases = (VM_BASE,)
+            else:  # base Instance — scan both (byte-identical to before).
+                bases = (LXC_BASE, VM_BASE)
 
-        instances: list[Instance] = []
-        for base in bases:
-            if not base.is_dir():
-                continue
-            for image_file in sorted(
-                base.glob("*/kento-image"), key=lambda f: f.parent.name
-            ):
-                container_dir = image_file.parent
-                try:
-                    inst = _load_snapshot(container_dir, _read_raw_mode(container_dir))
-                except (OSError, KentoError) as exc:
-                    # Total over the store: skip+log a corrupt/raced entry.
-                    _instances_logger.warning(
-                        "skipping unreadable instance %s: %s",
-                        container_dir.name, exc,
-                    )
+            instances: list[Instance] = []
+            for base in bases:
+                if not base.is_dir():
                     continue
-                if isinstance(inst, cls):
-                    instances.append(inst)
-        return instances
+                for image_file in sorted(
+                    base.glob("*/kento-image"), key=lambda f: f.parent.name
+                ):
+                    container_dir = image_file.parent
+                    try:
+                        inst = _load_snapshot(
+                            container_dir, _read_raw_mode(container_dir)
+                        )
+                    except (OSError, KentoError) as exc:
+                        # Total over the store: skip+log a corrupt/raced entry.
+                        _instances_logger.warning(
+                            "skipping unreadable instance %s: %s",
+                            container_dir.name, exc,
+                        )
+                        continue
+                    if isinstance(inst, cls):
+                        instances.append(inst)
+            return Ok(value=instances)
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M10 — refresh: re-read this handle's full snapshot from source (§11.2).
@@ -1454,17 +1494,23 @@ class Instance(ABC):
         not an orphan / the vmid is occupied / network metadata is unrecoverable
         (§2 principle 5 — a typed raise, never a silent no-op).
 
-        On success returns a FRESH, kind-checked handle via :meth:`get` (a live
-        snapshot of the healed instance — not a stale construction). Because
-        ``get`` is polymorphic, calling ``SystemContainer.adopt(...)`` on a name
-        that healed to a VM (or vice versa) raises ``get``'s kind-mismatch
-        ``InstanceNotFoundError`` rather than returning the wrong-typed handle.
+        On success returns a FRESH, kind-checked handle via :meth:`_get_impl` (the
+        raising form of :meth:`get` — a live snapshot of the healed instance, not a
+        stale construction). Because ``_get_impl`` is polymorphic, calling
+        ``SystemContainer.adopt(...)`` on a name that healed to a VM (or vice
+        versa) raises the kind-mismatch ``InstanceNotFoundError`` (reaching
+        ``adopt``'s own boundary with its real kind) rather than returning the
+        wrong-typed handle.
         """
         from kento import reconcile
 
         reconcile.adopt(name)
         # Hand back a live, kind-checked handle (get narrows on a subclass).
-        return cls.get(name)
+        # Use the RAISING _get_impl (not the Result-returning public get): this
+        # is a still-raising internal caller, so a kind-mismatch
+        # InstanceNotFoundError reaches adopt's own boundary with its real kind
+        # (KIND-FIDELITY rule, Block S4).
+        return cls._get_impl(name)
 
     # ------------------------------------------------------------------- #
     # M4 — prune_orphans: batch-reconcile orphaned state; classmethod (§11.1).
@@ -1771,7 +1817,9 @@ class SystemContainer(Instance):
         kwargs["unprivileged"] = unprivileged
         kwargs["lxc_args"] = list(lxc_args) if lxc_args else None
         create_mod.create(**kwargs)
-        return cls.get(name)
+        # Raising _get_impl (not the Result-returning get): still-raising internal
+        # caller; keeps create's own raise contract intact (Block S4).
+        return cls._get_impl(name)
 
     @classmethod
     @contextmanager
@@ -2108,7 +2156,9 @@ class VirtualMachine(Instance):
         kwargs["kernel"] = str(kernel) if kernel is not None else None
         kwargs["initramfs"] = str(initramfs) if initramfs is not None else None
         create_mod.create(**kwargs)
-        return cls.get(name)
+        # Raising _get_impl (not the Result-returning get): still-raising internal
+        # caller; keeps create's own raise contract intact (Block S4).
+        return cls._get_impl(name)
 
     @classmethod
     @contextmanager
@@ -2451,7 +2501,8 @@ def _resources_to_set_cmd_params(resources: "dict[str, int]") -> "dict[str, obje
 #
 # The concrete ``create`` is an ADDITIVE wrapper (§2): decompose the typed
 # parameter objects into the flat ``create.py:create`` keyword args, call it
-# (it returns None), then re-snapshot via ``cls.get(name)``. These helpers do
+# (it returns None), then re-snapshot via ``cls._get_impl(name)`` (the raising
+# form of ``get``; create stays raising until S5). These helpers do
 # the typed->flat mapping; getting it right is the crux (JC2/JC3/JC5) — a wrong
 # mapping silently mis-creates. ``create.py`` then validates + builds.
 # --------------------------------------------------------------------------- #
