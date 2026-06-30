@@ -44,6 +44,10 @@ from kento._images import (  # noqa: F401  (public re-export)
 from kento._instances import (  # noqa: F401  (public re-export)
     Instance, SystemContainer, VirtualMachine,
 )
+from kento._result import (  # noqa: F401  (public re-export)
+    Result, Ok, Warning, Error, Condition, Severity, ConditionKind,
+    ResultError,
+)
 
 # Curated public surface. The source-reference value types are re-exported
 # flat (canonical paths kento.OciReference etc.); the `_references` module is
@@ -77,6 +81,9 @@ __all__ = [
     "ManagedStatus", "ImageRecord",
     # instance family handles (Block 08 — kento._instances)
     "Instance", "SystemContainer", "VirtualMachine",
+    # Result value family (Block R1 — kento._result)
+    "Result", "Ok", "Warning", "Error", "Condition", "Severity",
+    "ConditionKind", "ResultError",
     # module-level helpers (defined in this module)
     "validate_name", "detect_bridge", "resolve_network", "read_mode",
     "require_root", "detect_mode", "upper_base", "sanitize_image_name",
