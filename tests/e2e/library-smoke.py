@@ -89,7 +89,8 @@ _local = subprocess.run(
     capture_output=True, text=True).stdout
 
 def _list_nonempty():
-    imgs = kento.OciImage.list()
+    # S2 (Result sweep): list() returns Ok(list[OciImage]); .unwrap() the value.
+    imgs = kento.OciImage.list().unwrap()
     assert isinstance(imgs, list)
     # bifrost has tagged images present; an empty list here means every entry
     # silently failed to resolve (the totality guard masking a resolve bug).
@@ -103,7 +104,7 @@ check("OciImage.list() resolves real images", _list_nonempty)
 
 
 def _get_rootfs():
-    img = kento.OciImage.get(ROOTFS_IMAGE)
+    img = kento.OciImage.get(ROOTFS_IMAGE).unwrap()
     assert isinstance(img, kento.OciImage)
     assert isinstance(img.id, kento.Digest), "id is not a Digest"
     assert img.layers, "no layers resolved"
@@ -114,18 +115,24 @@ def _get_rootfs():
 check(f"OciImage.get({ROOTFS_IMAGE!r})", _get_rootfs)
 check("OciImage.resolve_id -> Digest", lambda: (
     kento.OciImage.resolve_id(ROOTFS_IMAGE).render()[:19] + "…"))
-check("get(absent) raises ImageNotFoundError", lambda: (
-    "raised" if _raises(
-        lambda: kento.OciImage.get("localhost/does-not-exist:nope"),
-        kento.ImageNotFoundError)
-    else (_ for _ in ()).throw(AssertionError("did not raise"))))
+
+
+def _get_absent_is_error():
+    # S2: an absent image is a PREDICTABLE Error(IMAGE_NOT_FOUND), not a raise.
+    result = kento.OciImage.get("localhost/does-not-exist:nope")
+    assert isinstance(result, kento.Error), "absent get did not return Error"
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
+    return "Error(IMAGE_NOT_FOUND)"
+
+
+check("get(absent) returns Error(IMAGE_NOT_FOUND)", _get_absent_is_error)
 
 # --------------------------------------------------------------------------- #
 section("D. pull + remove round-trip (self-contained)")
 
 
 def _pull_remove():
-    img = kento.OciImage.pull(PULL_IMAGE)
+    img = kento.OciImage.pull(PULL_IMAGE).unwrap()
     assert isinstance(img, kento.OciImage)
     rid = img.id.render()
     # remove the handle we just pulled (not held -> should succeed)
@@ -142,7 +149,7 @@ section("E. runtime lifecycle on a REAL overlay (root): prepare/mount/unmount/re
 
 
 def _lifecycle():
-    img = kento.OciImage.get(ROOTFS_IMAGE)
+    img = kento.OciImage.get(ROOTFS_IMAGE).unwrap()
     state = Path(tempfile.mkdtemp(prefix="kento-smoke-state-"))
     host = Path(tempfile.mkdtemp(prefix="kento-smoke-host-"))
     mounted = False

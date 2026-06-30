@@ -2813,7 +2813,7 @@ def test_image_no_override_both_none(tmp_path):
     base = _fake_oci_image()
     with patch("kento.is_running", return_value=False):
         inst = _instances._load_snapshot(d, "vm")
-    with patch("kento._images.OciImage.resolve", return_value=base) as mres:
+    with patch("kento._images.OciImage._resolve", return_value=base) as mres:
         img = inst.image()
     mres.assert_called_once_with(OciReference.parse("droste-hair:latest").unwrap())
     assert img.kernel is None
@@ -2827,7 +2827,7 @@ def test_image_echoes_kernel_override(tmp_path):
     d = _make_vm(tmp_path, **{"kento-kernel": str(kcopy)})
     with patch("kento.is_running", return_value=False):
         inst = _instances._load_snapshot(d, "vm")
-    with patch("kento._images.OciImage.resolve", return_value=_fake_oci_image()):
+    with patch("kento._images.OciImage._resolve", return_value=_fake_oci_image()):
         img = inst.image()
     assert img.kernel == kcopy
     assert img.initramfs is None  # no initramfs override -> in-image fallback
@@ -2841,7 +2841,7 @@ def test_image_echoes_both_overrides(tmp_path):
                               "kento-initramfs": str(icopy)})
     with patch("kento.is_running", return_value=False):
         inst = _instances._load_snapshot(d, "vm")
-    with patch("kento._images.OciImage.resolve", return_value=_fake_oci_image()):
+    with patch("kento._images.OciImage._resolve", return_value=_fake_oci_image()):
         img = inst.image()
     assert img.kernel == kcopy
     assert img.initramfs == icopy
@@ -2854,7 +2854,7 @@ def test_image_initramfs_only_override(tmp_path):
     d = _make_vm(tmp_path, **{"kento-initramfs": str(icopy)})
     with patch("kento.is_running", return_value=False):
         inst = _instances._load_snapshot(d, "vm")
-    with patch("kento._images.OciImage.resolve", return_value=_fake_oci_image()):
+    with patch("kento._images.OciImage._resolve", return_value=_fake_oci_image()):
         img = inst.image()
     assert img.kernel is None
     assert img.initramfs == icopy

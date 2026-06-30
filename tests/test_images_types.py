@@ -305,13 +305,17 @@ def test_resolve_id_garbage_bare_id_still_raises_typed():
 
 
 def test_resolve_delegates_and_populates():
+    # S2 (Result sweep): resolve() returns Ok(OciImage); .unwrap() to the value.
     ref = _ref("ubuntu:latest")
     with patch("kento.layers.resolve_layers",
                return_value="/store/overlay/ID1/diff:/store/overlay/ID2/diff") as m_layers, \
          patch("kento.layers.to_overlay_lowerdir",
                return_value=("/store/overlay", "ID1/diff:ID2/diff")) as m_ovl, \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR) as m_id:
-        img = OciImage.resolve(ref)
+        result = OciImage.resolve(ref)
+
+    assert isinstance(result, kento.Ok)
+    img = result.unwrap()
 
     # Delegation: each wrapped function was called with the rendered ref.
     m_layers.assert_called_once_with(ref.render())
@@ -334,12 +338,28 @@ def test_resolve_delegates_and_populates():
         "/store/overlay/ID1/diff:/store/overlay/ID2/diff"
 
 
-def test_resolve_propagates_image_not_found():
+def test_resolve_returns_error_image_not_found():
+    # S2: an absent image is a PREDICTABLE Error(IMAGE_NOT_FOUND), not a raise.
+    ref = _ref("ghost:latest")
+    with patch("kento.layers.resolve_layers",
+               side_effect=ImageNotFoundError("nope")):
+        result = OciImage.resolve(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.IMAGE_NOT_FOUND
+    assert result.conditions[0].message == "nope"
+
+
+def test__resolve_RAISES_image_not_found_kind_fidelity():
+    # KIND-FIDELITY mutation guard: the raising _resolve STAYS RAISING, so a deep
+    # ImageNotFoundError reaches a still-raising caller (e.g. Instance.image()) /
+    # the public boundary with its REAL type, not a generic ResultError. If
+    # _resolve were made to .unwrap() a Result-returning resolve instead, the type
+    # would become ResultError and this reddens.
     ref = _ref("ghost:latest")
     with patch("kento.layers.resolve_layers",
                side_effect=ImageNotFoundError("nope")):
         with pytest.raises(ImageNotFoundError):
-            OciImage.resolve(ref)
+            OciImage._resolve(ref)
 
 
 def test_resolve_derives_root_when_to_overlay_yields_none(tmp_path):
@@ -352,7 +372,7 @@ def test_resolve_derives_root_when_to_overlay_yields_none(tmp_path):
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir", return_value=("", abs_layers)), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        img = OciImage.resolve(ref)
+        img = OciImage.resolve(ref).unwrap()
     assert img.overlay_root == Path("/store/overlay")
     assert img.layers == (
         Layer(id="ID1", short_link=""),
@@ -361,29 +381,31 @@ def test_resolve_derives_root_when_to_overlay_yields_none(tmp_path):
     assert img._render_lowerdir_abs() == abs_layers
 
 
-def test_resolve_raises_on_no_shared_root():
-    # A genuinely unexpected layout (entries don't share a <root>/<id>/diff
-    # root) is a typed StateError — NOT a fabricated rootless degenerate value
-    # (gate C, principle 5).
-    from kento.errors import StateError
+def test_resolve_returns_error_on_no_shared_root():
+    # A genuinely unexpected layout (entries don't share a <root>/<id>/diff root)
+    # is a StateError internally -> Error(INVALID_STATE) at the resolve boundary
+    # (gate C, principle 5) — NOT a fabricated rootless degenerate value.
     abs_layers = "/a/x/diff:/b/y/diff"  # roots /a and /b disagree
     ref = _ref("ubuntu:latest")
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir", return_value=("", abs_layers)), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        with pytest.raises(StateError, match="common store root"):
-            OciImage.resolve(ref)
+        result = OciImage.resolve(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.INVALID_STATE
+    assert "common store root" in result.conditions[0].message
 
 
-def test_resolve_raises_on_non_diff_entry():
-    from kento.errors import StateError
+def test_resolve_returns_error_on_non_diff_entry():
     abs_layers = "/store/overlay/ID1/notdiff"
     ref = _ref("ubuntu:latest")
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir", return_value=("", abs_layers)), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        with pytest.raises(StateError, match="<root>/<id>/diff"):
-            OciImage.resolve(ref)
+        result = OciImage.resolve(ref)
+    assert isinstance(result, kento.Error)
+    assert result.conditions[0].kind is kento.ConditionKind.INVALID_STATE
+    assert "<root>/<id>/diff" in result.conditions[0].message
 
 
 def test_resolve_reads_short_link_from_link_file(tmp_path):
@@ -399,7 +421,7 @@ def test_resolve_reads_short_link_from_link_file(tmp_path):
     with patch("kento.layers.resolve_layers", return_value=abs_layers), \
          patch("kento.layers.to_overlay_lowerdir", return_value=(str(root), "")), \
          patch("kento.layers.resolve_image_id", return_value=DIGEST_STR):
-        img = OciImage.resolve(ref)
+        img = OciImage.resolve(ref).unwrap()
     assert img.layers == (
         Layer(id="ABCID", short_link="SHORTLINK"),
         Layer(id="DEFID", short_link=""),
