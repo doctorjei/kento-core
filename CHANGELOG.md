@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.3.dev0] - 2026-06-30
+
+> **Synced dev line.** kento-core and kento (CLI) now share a single version,
+> `1.6.3.dev0`, and will stay on a synced `.devN` pre-release line until a
+> coordinated stable cut. This release folds in the previously-untagged
+> `1.6.0.dev4` work (typed API Phases 1–2 + the VM `--cores` clamp — see that
+> section below) together with the storage-depth pass and the items below.
+
 ### Added
 
 - **Instance overlay-storage surface (storage-depth pass, block SD4a).** The
@@ -113,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$STATE_DIR` on an overlay-incapable filesystem reports identically across
   LXC and VM modes.
 
-## [1.6.0.dev4] - 2026-06-28
+## [1.6.0.dev4] — unreleased (tag deleted; folded into 1.6.3.dev0), 2026-06-28
 
 > **Library-API milestone (kento-core only; CLI unchanged at `kento 1.6.2`).**
 > This dev cut lands the first two phases of the typed public API surface plus
