@@ -36,7 +36,17 @@ from enum import Enum, IntEnum
 from types import MappingProxyType
 from typing import Generic, TypeVar
 
-from kento.errors import KentoError
+from kento.errors import (
+    ImageNotFoundError,
+    InstanceExistsError,
+    InstanceNotFoundError,
+    KentoError,
+    ModeError,
+    StateError,
+    StopTimeout,
+    SubprocessError,
+    ValidationError,
+)
 
 __all__ = [
     "Severity",
@@ -114,6 +124,21 @@ class ConditionKind(str, Enum):
     NON_HTTPS = "non_https"
     FETCH_FAILED = "fetch_failed"
     HTTP_ERROR = "http_error"
+
+    # --- Result-propagation-sweep kinds (Block S1). One kind per KentoError
+    # subclass — same granularity a caller gets from the exception type today.
+    # Consumed by ``_error_from`` (the boundary helper below); seadog/CLI branch
+    # on the string value. ``INTERNAL`` is the total fallback for a bare/unmapped
+    # ``KentoError`` so the type→kind map is exhaustive for the whole hierarchy.
+    VALIDATION = "validation"
+    INSTANCE_NOT_FOUND = "instance_not_found"
+    INSTANCE_EXISTS = "instance_exists"
+    IMAGE_NOT_FOUND = "image_not_found"
+    MODE_ERROR = "mode_error"
+    INVALID_STATE = "invalid_state"
+    STOP_TIMEOUT = "stop_timeout"
+    SUBPROCESS_FAILED = "subprocess_failed"
+    INTERNAL = "internal"
 
 
 # --------------------------------------------------------------------------- #
@@ -374,3 +399,94 @@ class Error(Result[T]):
     def map(self, fn: Callable[[T], U]) -> "Result[U]":
         # No value to map; an Error is carried through unchanged.
         return self
+
+
+# --------------------------------------------------------------------------- #
+# Boundary helper — the inverse of ``Error.unwrap()`` (Result-propagation sweep,
+# Block S1). A PUBLIC verb (S2+) wraps its body at its boundary as
+# ``try: ... return Ok(value) except KentoError as e: return _error_from(e)`` —
+# the ~195 internal raises stay as control flow, caught at the nearest public
+# boundary and converted here to a one-condition ``Error``. A NON-``KentoError``
+# (a broken invariant, an unexpected ``RuntimeError``) is a PANIC and never
+# reaches this helper — it propagates.
+#
+# Mirrors ``_references._malformed_error`` (the P1 parse-boundary precedent):
+# message preserved verbatim (so ``unwrap()`` re-raises the same text),
+# structured attrs → ``context``.
+# --------------------------------------------------------------------------- #
+
+
+# Type → kind map. ORDER IS IRRELEVANT to correctness — ``_error_from`` walks the
+# exception's ``__mro__`` and takes the FIRST member found in this dict, so a
+# subclass (``StopTimeout``) resolves to its own kind before its parent
+# (``StateError``) regardless of insertion order. ``KentoError`` is present as the
+# total fallback, making the walk exhaustive for any ``KentoError`` subclass —
+# including a future one nobody mapped (it lands on ``INTERNAL``).
+#
+# ``MalformedReference`` is deliberately ABSENT: ``_references`` imports from this
+# module, so importing it back here would be a cycle. It does not need an entry —
+# ``*Reference.parse`` already converts it at the parse boundary (its own
+# ``MALFORMED_REFERENCE`` Error via ``_malformed_error``), so a raised
+# ``MalformedReference`` is normally pre-converted and never reaches
+# ``_error_from``. If a verb DID surface one here, it is a ``KentoError`` and maps
+# to ``INTERNAL`` via the fallback — acceptable (documented in the block brief).
+_ERROR_KIND_MAP: dict[type[KentoError], ConditionKind] = {
+    ValidationError: ConditionKind.VALIDATION,
+    InstanceNotFoundError: ConditionKind.INSTANCE_NOT_FOUND,
+    InstanceExistsError: ConditionKind.INSTANCE_EXISTS,
+    ImageNotFoundError: ConditionKind.IMAGE_NOT_FOUND,
+    ModeError: ConditionKind.MODE_ERROR,
+    StopTimeout: ConditionKind.STOP_TIMEOUT,
+    StateError: ConditionKind.INVALID_STATE,
+    SubprocessError: ConditionKind.SUBPROCESS_FAILED,
+    KentoError: ConditionKind.INTERNAL,
+}
+
+
+def _error_from(exc: KentoError) -> Error:
+    """Convert a caught ``KentoError`` to a boundary ``Error`` (the §2 pr.5 inverse).
+
+    The single boundary crossing from the panic channel back to the ``Result``
+    channel for the verb sweep (S2+): a PUBLIC verb catches its internal
+    ``KentoError`` and calls this to produce a one-condition ``Error``.
+
+    Resolution is **most-specific-first**: the walk over ``type(exc).__mro__``
+    takes the first type present in ``_ERROR_KIND_MAP``, so a ``StopTimeout``
+    (which subclasses ``StateError``) maps to ``STOP_TIMEOUT``, not
+    ``INVALID_STATE`` (cf. HTTPError-before-URLError in the B2 fetch boundary).
+    ``KentoError`` itself is in the map (``INTERNAL``), so the walk is total for
+    any ``KentoError`` subclass — the loop always finds a kind.
+
+    The message is preserved verbatim (``str(exc)``) so an ``unwrap()`` of the
+    returned ``Error`` re-raises the same text. For a ``SubprocessError`` the
+    structured ``returncode`` + ``cmd`` ride in ``context`` (the CLI reads
+    ``returncode`` in S7 to pick exit code 1-vs-2); both are included verbatim,
+    ``None`` and all, so the key set is stable for the consumer. All other
+    subclasses carry empty context (their message holds the detail).
+
+    All produced conditions are ``Severity.ERROR`` — ``_error_from`` only ever
+    converts failures. (Success-with-caveat ``Warning`` conditions come from the
+    succeed-with-caveat paths, never from here.)
+    """
+    kind = next(
+        _ERROR_KIND_MAP[t]
+        for t in type(exc).__mro__
+        if t in _ERROR_KIND_MAP
+    )
+    if isinstance(exc, SubprocessError):
+        context: Mapping[str, object] = {
+            "returncode": exc.returncode,
+            "cmd": exc.cmd,
+        }
+    else:
+        context = {}
+    return Error(
+        conditions=(
+            Condition(
+                severity=Severity.ERROR,
+                kind=kind,
+                message=str(exc),
+                context=context,
+            ),
+        ),
+    )
