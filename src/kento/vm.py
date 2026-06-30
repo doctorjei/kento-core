@@ -20,6 +20,37 @@ logger = logging.getLogger("kento")
 # Locally-administered MAC prefix (QEMU's standard block).
 MAC_PREFIX = "52:54:00"
 
+
+def resolve_boot_sources(container_dir: Path, rootfs: Path) -> tuple[Path, Path]:
+    """Resolve the (kernel, initramfs) to direct-kernel-boot (§8 Phase A).
+
+    Boot-source override, VM-only, local-file (run 38). Each side independently
+    honors a persisted override else falls back to the in-image path:
+
+    * ``kento-kernel`` present  -> that path; else ``rootfs/boot/vmlinuz``.
+    * ``kento-initramfs`` present -> that path; else ``rootfs/boot/initramfs.img``.
+
+    The override files are COPIED into the instance dir at create time
+    (``create.py``), so the persisted value is a real on-disk path under the
+    instance dir (reaped on destroy). A kernel-only override keeps the in-image
+    initramfs and vice versa — the two sides are resolved independently. Pure:
+    reads the two ``kento-*`` markers and returns paths; does NO validation here
+    (the callers — the start-time guard and ``_launch_qemu`` — own that).
+    """
+    kernel_meta = container_dir / "kento-kernel"
+    initramfs_meta = container_dir / "kento-initramfs"
+    kernel = (
+        Path(kernel_meta.read_text().strip())
+        if kernel_meta.is_file()
+        else rootfs / "boot" / "vmlinuz"
+    )
+    initramfs = (
+        Path(initramfs_meta.read_text().strip())
+        if initramfs_meta.is_file()
+        else rootfs / "boot" / "initramfs.img"
+    )
+    return kernel, initramfs
+
 _MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
 
 
@@ -273,9 +304,11 @@ def start_vm(container_dir: Path, name: str) -> None:
 
     rootfs = container_dir / "rootfs"
 
-    # Validate kernel and initramfs exist
-    kernel = rootfs / "boot" / "vmlinuz"
-    initramfs = rootfs / "boot" / "initramfs.img"
+    # Validate kernel and initramfs exist. An override (kento-kernel /
+    # kento-initramfs, §8 Phase A) supersedes the in-image requirement for its
+    # side: when set, the guard checks the override copy — so a kernel-only
+    # override does NOT fail on an absent in-image vmlinuz, and vice versa.
+    kernel, initramfs = resolve_boot_sources(container_dir, rootfs)
     if not kernel.is_file():
         unmount_rootfs(container_dir)
         raise StateError(f"kernel not found at {kernel}")
@@ -389,8 +422,10 @@ def _cleanup_failed_start(container_dir: Path, virtiofsd) -> None:
 def _launch_qemu(container_dir: Path, name: str, rootfs: Path,
                  socket_path: Path):
     """Build the QEMU argv and launch it detached. Returns the Popen object."""
-    kernel = rootfs / "boot" / "vmlinuz"
-    initramfs = rootfs / "boot" / "initramfs.img"
+    # Honor the kernel/initramfs override (§8 Phase A), else in-image fallback —
+    # independently per side. The same resolver backs the start-time guard so
+    # the validated paths and the emitted -kernel/-initrd always agree.
+    kernel, initramfs = resolve_boot_sources(container_dir, rootfs)
 
     # Read port mappings (usermode networking) — N forwards (§5.7A), one slirp
     # hostfwd per spec, protocol-aware (tcp/udp). _read_hostfwds returns the

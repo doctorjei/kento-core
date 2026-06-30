@@ -3127,3 +3127,109 @@ class TestUnprivileged:
         cfg = generate_config("test", tmp_path, mode="lxc")
         assert "lxc.idmap" not in cfg
         assert "idmap=container" not in cfg
+
+
+class TestBootSourceOverride:
+    """§8 Phase A — kernel/initramfs override (VM-only, local-file) wiring."""
+
+    def _vm_create(self, tmp_path, **kw):
+        """Run a VM-mode create with the store/IO stubbed (early validation +
+        VM-branch persistence are what these tests exercise)."""
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir(exist_ok=True)
+        vm_base.mkdir(exist_ok=True)
+        with patch("kento.create.require_root"), \
+             patch("kento.create.resolve_layers", return_value="/a:/b"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n):
+            create("myimage:latest", name="vmk", mode="vm", **kw)
+        return vm_base / "vmk"
+
+    # --- create persistence (copy into the instance dir + state files) ---
+
+    def test_kernel_override_copies_and_persists(self, tmp_path):
+        kfile = tmp_path / "mykernel"
+        kfile.write_text("KERNEL-BYTES")
+        vm_dir = self._vm_create(tmp_path, kernel=str(kfile))
+        # Copy landed in the instance dir, content preserved.
+        copy = vm_dir / "kernel"
+        assert copy.is_file()
+        assert copy.read_text() == "KERNEL-BYTES"
+        # State file records the IN-DIR path (self-contained, reaped on destroy).
+        assert (vm_dir / "kento-kernel").read_text().strip() == str(copy)
+        # No initramfs override -> no marker (in-image fallback for that side).
+        assert not (vm_dir / "kento-initramfs").exists()
+
+    def test_initramfs_override_copies_and_persists(self, tmp_path):
+        ifile = tmp_path / "myinitrd"
+        ifile.write_text("INITRD-BYTES")
+        vm_dir = self._vm_create(tmp_path, initramfs=str(ifile))
+        copy = vm_dir / "initramfs.img"
+        assert copy.is_file()
+        assert copy.read_text() == "INITRD-BYTES"
+        assert (vm_dir / "kento-initramfs").read_text().strip() == str(copy)
+        assert not (vm_dir / "kento-kernel").exists()
+
+    def test_both_overrides_independent(self, tmp_path):
+        kfile = tmp_path / "k"; kfile.write_text("K")
+        ifile = tmp_path / "i"; ifile.write_text("I")
+        vm_dir = self._vm_create(tmp_path, kernel=str(kfile),
+                                 initramfs=str(ifile))
+        assert (vm_dir / "kernel").read_text() == "K"
+        assert (vm_dir / "initramfs.img").read_text() == "I"
+        assert (vm_dir / "kento-kernel").is_file()
+        assert (vm_dir / "kento-initramfs").is_file()
+
+    def test_no_override_writes_no_markers(self, tmp_path):
+        vm_dir = self._vm_create(tmp_path)
+        assert not (vm_dir / "kento-kernel").exists()
+        assert not (vm_dir / "kento-initramfs").exists()
+
+    def test_copy_survives_source_deletion(self, tmp_path):
+        kfile = tmp_path / "ephemeral-kernel"
+        kfile.write_text("BYTES")
+        vm_dir = self._vm_create(tmp_path, kernel=str(kfile))
+        kfile.unlink()  # caller deletes their source
+        # The in-dir copy is independent and still present.
+        assert (vm_dir / "kernel").read_text() == "BYTES"
+
+    # --- create-time validation: local file must exist + be a file ---
+
+    def test_missing_kernel_file_rejected(self, tmp_path):
+        with patch("kento.create.require_root"):
+            with pytest.raises(ValidationError, match="--kernel file not found"):
+                create("img:latest", name="vmk", mode="vm",
+                       kernel=str(tmp_path / "nope"))
+
+    def test_missing_initramfs_file_rejected(self, tmp_path):
+        with patch("kento.create.require_root"):
+            with pytest.raises(ValidationError, match="--initrd file not found"):
+                create("img:latest", name="vmk", mode="vm",
+                       initramfs=str(tmp_path / "nope"))
+
+    def test_directory_not_a_file_rejected(self, tmp_path):
+        d = tmp_path / "adir"; d.mkdir()
+        with patch("kento.create.require_root"):
+            with pytest.raises(ValidationError, match="--kernel file not found"):
+                create("img:latest", name="vmk", mode="vm", kernel=str(d))
+
+    # --- LXC rejection (mutation-proof: this guard MUST exist) ---
+
+    def test_lxc_rejects_kernel_override(self, tmp_path):
+        kfile = tmp_path / "k"; kfile.write_text("K")
+        with patch("kento.create.require_root"), \
+             patch("kento.pve.is_pve", return_value=False):
+            with pytest.raises(ModeError, match="VM modes only"):
+                create("img:latest", name="c", mode="lxc", kernel=str(kfile))
+
+    def test_lxc_rejects_initramfs_override(self, tmp_path):
+        ifile = tmp_path / "i"; ifile.write_text("I")
+        with patch("kento.create.require_root"), \
+             patch("kento.pve.is_pve", return_value=False):
+            with pytest.raises(ModeError, match="VM modes only"):
+                create("img:latest", name="c", mode="lxc",
+                       initramfs=str(ifile))
