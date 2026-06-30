@@ -767,12 +767,24 @@ class UrlReference(SourceReference):
     not in the 1.0 surface. ``version`` follows the ``name+version`` convention
     (split the leaf on the LAST ``+``).
 
+    ``query``/``fragment`` are the RFC-3986 ``?…``/``#…`` components, carried
+    **faithfully** (empty string ``""`` = absent — matching
+    ``urllib.parse.urlsplit``, which returns ``""`` for both a truly-absent and a
+    bare ``?``/``#``; the two are NOT distinguished). The query is load-bearing
+    (presigned-URL auth tokens live there); the fragment is accepted for
+    browser/curl/wget parity (RFC-3986 §3.5 separates ``#…`` before dereference).
+    They are pure data here — the **fetch-edge policy** (SEND the query to the
+    server, DROP the fragment with a warning) belongs to the dereference point
+    (Block B2), NOT to this value type.
+
     PURE value type: ``parse``/``normalize`` are RFC-3986 transforms over
     ``urllib.parse`` — no I/O, no network, ever (the fetcher is a separate
     block; §2 principle 2).
     """
 
     secure: bool
+    query: str = ""
+    fragment: str = ""
 
     def __post_init__(self) -> None:
         # Construction is closed under the grammar (gate C): a direct
@@ -802,13 +814,16 @@ class UrlReference(SourceReference):
         Receives the FULL string INCLUDING the scheme (the dispatch hands over
         ``s``, not a scheme-less remainder). Applies NO defaults — records
         exactly what was written; canonicalization is :meth:`normalize`.
-        Malformed input (incl. a query/fragment — NOT modelled in v1) is a
+        A query/fragment is CARRIED faithfully (not rejected): the ``?…``/``#…``
+        components ride in ``query``/``fragment``. Malformed input is a
         PREDICTABLE failure → ``Error(MALFORMED_REFERENCE)`` (§2 principle 5);
         valid input → ``Ok(ref)``. The internal validators keep raising; this
         method is the parse boundary that catches and converts.
         """
         try:
-            endpoint, path, name, version, secure = UrlReference._parse(s)
+            endpoint, path, name, version, secure, query, fragment = (
+                UrlReference._parse(s)
+            )
         except MalformedReference as exc:
             return _malformed_error(exc)
         # Construction is OUTSIDE the boundary: a final-value __post_init__
@@ -818,20 +833,20 @@ class UrlReference(SourceReference):
         # caught above (it stays inside the boundary).
         return Ok(value=UrlReference(
             endpoint=endpoint, path=path, name=name, version=version,
-            secure=secure,
+            secure=secure, query=query, fragment=fragment,
         ))
 
     @staticmethod
     def _parse(
         s: str,
-    ) -> tuple[Endpoint, str, str, str | None, bool]:
+    ) -> tuple[Endpoint, str, str, str | None, bool, str, str]:
         """The raising parse/validation body — returns the validated COMPONENTS.
 
         Internal: the public :meth:`parse` boundary catches its
         ``MalformedReference`` and converts to an ``Error``, then constructs the
         ``UrlReference`` OUTSIDE that boundary (so a ``__post_init__`` breach
         panics rather than converting). Returns
-        ``(endpoint, path, name, version, secure)``.
+        ``(endpoint, path, name, version, secure, query, fragment)``.
         """
         if not isinstance(s, str) or not s:
             raise MalformedReference(
@@ -847,17 +862,15 @@ class UrlReference(SourceReference):
                 production="scheme",
             )
 
-        # Query/fragment are NOT modelled (§3.8 skeleton has no such field):
-        # fail closed rather than silently drop them (§2 principle 5). v1
-        # targets plain release URLs; signed/presigned URLs are OUT for v1.
-        if split.query:
-            raise MalformedReference(
-                "query strings are not supported", value=s, production="query",
-            )
-        if split.fragment:
-            raise MalformedReference(
-                "fragments are not supported", value=s, production="fragment",
-            )
+        # Query/fragment are CAPTURED verbatim (Block B1b), NOT rejected. The
+        # query is load-bearing (presigned-URL auth tokens); the fragment is
+        # accepted for browser/curl/wget parity (RFC-3986 §3.5 splits `#…` off
+        # before dereference). urlsplit returns "" for both an absent and a
+        # bare `?`/`#` — not distinguished (documented). No grammar validation
+        # on the bytes (faithful capture, like the permissive IPv6 host). The
+        # fetch-edge policy (SEND query / DROP+WARN fragment) is Block B2.
+        query = split.query
+        fragment = split.fragment
 
         endpoint = UrlReference._parse_authority(split, original=s)
 
@@ -875,7 +888,7 @@ class UrlReference(SourceReference):
             path = "/".join(segments[:-1])
 
         name, version = _split_name_version(name, original=s)
-        return endpoint, path, name, version, (scheme == "https")
+        return endpoint, path, name, version, (scheme == "https"), query, fragment
 
     @staticmethod
     def _parse_authority(
@@ -922,14 +935,22 @@ class UrlReference(SourceReference):
     def render(self) -> str:
         """Render the canonical URL string (password masked, §3.5).
 
-        Form ``{scheme}://{authority}/{pathname}`` plus ``+{version}`` when a
-        version label is present. ``endpoint.render()`` masks the password by
-        default (reused). A rendered ref does not round-trip the secret — the
-        documented masked-password exception (same contract as OciReference).
+        Form ``{scheme}://{authority}/{pathname}`` plus ``+{version}`` (when a
+        version label is present), then ``?{query}`` (when query is non-empty)
+        and ``#{fragment}`` (when fragment is non-empty) — RFC-3986 component
+        order. An empty ``query``/``fragment`` omits its delimiter entirely (no
+        stray ``?``/``#``). ``endpoint.render()`` masks the password by default
+        (reused). A rendered ref does not round-trip the secret — the documented
+        masked-password exception (same contract as OciReference); query and
+        fragment DO round-trip.
         """
         out = f"{self.scheme}://{self.endpoint.render()}/{self.pathname}"
         if self.version is not None:
             out += f"+{self.version}"
+        if self.query:
+            out += f"?{self.query}"
+        if self.fragment:
+            out += f"#{self.fragment}"
         return out
 
     def __str__(self) -> str:
@@ -943,9 +964,13 @@ class UrlReference(SourceReference):
 
         Lowercases scheme + host (userinfo is NOT touched); drops the default
         port (80 for http, 443 for https); upper-cases percent-encoding hex
-        (``%2f`` => ``%2F`` — the unambiguous §6.2.2.1 case, NO decoding); and
-        collapses ``//`` and resolves the lexical ``.``/``..`` segments in the
-        path (LEXICAL only). Idempotent: ``normalize(normalize(x)) ==
+        (``%2f`` => ``%2F`` — the unambiguous §6.2.2.1 case, NO decoding) in the
+        path AND in ``query``/``fragment``; and collapses ``//`` and resolves
+        the lexical ``.``/``..`` segments in the path (LEXICAL only). Query and
+        fragment are otherwise preserved verbatim — parameter ORDER is NOT
+        reordered (order can be significant) and the fragment is NOT dropped
+        (dropping is the FETCH edge's job, Block B2, not normalize's; normalize
+        stays pure + faithful). Idempotent: ``normalize(normalize(x)) ==
         normalize(x)``.
         """
         endpoint = self.endpoint
@@ -969,9 +994,15 @@ class UrlReference(SourceReference):
             name = segments[-1]
             path = "/".join(segments[:-1])
 
+        # Query/fragment: same UNAMBIGUOUS pct-encoding canonicalization as the
+        # path (uppercase `%xx` hex, NO decode); otherwise verbatim. NO param
+        # reordering, NO fragment drop. "" stays "" (idempotent).
+        query = _normalize_pct_encoding(self.query)
+        fragment = _normalize_pct_encoding(self.fragment)
+
         return UrlReference(
             endpoint=endpoint, path=path, name=name, version=self.version,
-            secure=self.secure,
+            secure=self.secure, query=query, fragment=fragment,
         )
 
 

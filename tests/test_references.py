@@ -148,7 +148,9 @@ def test_oci_parse_error_unwrap_raises_resulterror_preserving_message():
 
 
 def test_url_parse_error_unwrap_raises_resulterror():
-    result = UrlReference.parse("https://host/x?y=1")
+    # A genuinely-malformed URL (no host) stays an Error whose unwrap() raises.
+    # (A query/fragment is no longer malformed — Block B1b carries it.)
+    result = UrlReference.parse("https:///x")
     assert isinstance(result, Error)
     with pytest.raises(ResultError) as caught:
         result.unwrap()
@@ -1014,15 +1016,125 @@ def test_dispatch_unknown_scheme_still_malformed():
 
 
 # --------------------------------------------------------------------------- #
-# query/fragment — fail-closed (NOT modelled; §3.8 disclosed scope limit).
+# query/fragment — CARRIED faithfully (Block B1b). The P1 reject-tests are
+# inverted to carry-tests; the fetch-edge policy (B2) is NOT here.
 # --------------------------------------------------------------------------- #
 
-def test_url_rejects_query_string():
-    assert_malformed(UrlReference.parse("https://host/x?y=1"))
+def test_url_carries_query_string():
+    # Inverted from the P1 reject-test: a query is now Ok and carried verbatim.
+    ref = UrlReference.parse("https://host/x?y=1").unwrap()
+    assert ref.query == "y=1"
+    assert ref.fragment == ""
 
 
-def test_url_rejects_fragment():
-    assert_malformed(UrlReference.parse("https://host/x#frag"))
+def test_url_carries_fragment():
+    # Inverted from the P1 reject-test: a fragment is now Ok and carried.
+    ref = UrlReference.parse("https://host/x#frag").unwrap()
+    assert ref.fragment == "frag"
+    assert ref.query == ""
+
+
+def test_url_carries_query_and_fragment_together():
+    # Both present; name/version/path unaffected (split off before the leaf).
+    ref = UrlReference.parse("https://h/a/b.txz?token=abc&x=1#frag").unwrap()
+    assert ref.query == "token=abc&x=1"
+    assert ref.fragment == "frag"
+    assert ref.path == "a"
+    assert ref.name == "b.txz"
+    assert ref.version is None
+
+
+def test_url_query_fragment_absent_are_empty_strings():
+    ref = UrlReference.parse("https://host/x").unwrap()
+    assert ref.query == ""
+    assert ref.fragment == ""
+
+
+def test_url_version_and_query_coexist():
+    # The leaf's name+version split happens on the PATH; query is split off by
+    # urlsplit first, so a `+` in the path still yields the version.
+    ref = UrlReference.parse("https://h/img.txz+1.7.3?t=1").unwrap()
+    assert ref.name == "img.txz"
+    assert ref.version == "1.7.3"
+    assert ref.query == "t=1"
+
+
+def test_url_render_includes_query_and_fragment_in_rfc_order():
+    ref = UrlReference.parse("https://host/a/rootfs.txz?t=1#f").unwrap()
+    assert ref.render() == "https://host/a/rootfs.txz?t=1#f"
+
+
+def test_url_render_query_only_no_stray_hash():
+    ref = UrlReference.parse("https://host/x?t=1").unwrap()
+    assert ref.render() == "https://host/x?t=1"
+    assert "#" not in ref.render()
+
+
+def test_url_render_fragment_only_no_stray_question():
+    ref = UrlReference.parse("https://host/x#f").unwrap()
+    assert ref.render() == "https://host/x#f"
+    assert "?" not in ref.render()
+
+
+def test_url_render_no_query_fragment_emits_no_delimiters():
+    # mutation guard: emitting `?`/`#` unconditionally would redden this.
+    ref = UrlReference.parse("https://host/x").unwrap()
+    assert "?" not in ref.render()
+    assert "#" not in ref.render()
+
+
+def test_url_render_query_fragment_round_trip():
+    # mutation guard: dropping `?{query}` (or `#{fragment}`) in render makes the
+    # re-parsed ref unequal on that field, reddening this round-trip.
+    x = UrlReference.parse("https://host/a/b/rootfs+1.0?token=abc&x=1#frag") \
+        .unwrap()
+    y = UrlReference.parse(x.render()).unwrap()
+    assert y.query == x.query
+    assert y.fragment == x.fragment
+    assert y.version == x.version
+    assert y.name == x.name
+    assert y.path == x.path
+    assert y == x
+
+
+def test_url_normalize_uppercases_pct_encoding_in_query_and_fragment():
+    # mutation guard: not pct-normalizing query/fragment leaves `%2f` and
+    # reddens this.
+    ref = UrlReference.parse("https://host/x?a=%2fb#f%5fg").unwrap().normalize()
+    assert ref.query == "a=%2Fb"
+    assert ref.fragment == "f%5Fg"
+
+
+def test_url_normalize_preserves_query_param_order():
+    # mutation guard: sorting query params would reorder b before a, reddening.
+    ref = UrlReference.parse("https://host/x?b=2&a=1").unwrap().normalize()
+    assert ref.query == "b=2&a=1"
+
+
+def test_url_normalize_does_not_drop_fragment():
+    # mutation guard: dropping the fragment in normalize (B2's job, not here)
+    # reddens this — normalize stays pure + faithful.
+    ref = UrlReference.parse("https://host/x#frag").unwrap().normalize()
+    assert ref.fragment == "frag"
+
+
+def test_url_normalize_idempotent_with_query_and_fragment():
+    ref = UrlReference.parse("https://Host:443/a/./b/../r+1.0?a=%2fb#f%5fg") \
+        .unwrap()
+    once = ref.normalize()
+    assert once.normalize() == once
+    assert once.query == "a=%2Fb"
+    assert once.fragment == "f%5Fg"
+
+
+def test_url_back_compat_construction_without_query_fragment():
+    # Defaults keep construction back-compatible: no query/fragment supplied.
+    ref = UrlReference(
+        endpoint=Endpoint(host="host", port=None), path="a", name="rootfs",
+        version=None, secure=True,
+    )
+    assert ref.query == ""
+    assert ref.fragment == ""
 
 
 def test_url_parse_rejects_empty_string():
