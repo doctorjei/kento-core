@@ -21,6 +21,7 @@ from kento.errors import (  # noqa: F401  (public re-export)
 )
 from kento._references import (  # noqa: F401  (public re-export)
     MalformedReference, Endpoint, Digest, SourceReference, OciReference,
+    UrlReference,
 )
 from kento._network import (  # noqa: F401  (public re-export)
     NetworkMode, ForwardProtocol, NetworkConnection,
@@ -55,7 +56,7 @@ __all__ = [
     "StopTimeout", "SubprocessError",
     # source-reference value types (Block 01 — kento._references)
     "MalformedReference", "Endpoint", "Digest", "SourceReference",
-    "OciReference",
+    "OciReference", "UrlReference",
     # network value types (Block 02 — kento._network)
     "NetworkMode", "ForwardProtocol", "NetworkConnection",
     "HostBinding", "GuestTarget", "ForwardAddressNotImplemented",
