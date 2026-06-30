@@ -572,7 +572,7 @@ def check_name_conflict(name: str, target_namespace: str) -> bool:
 from kento import diagnose as _diagnose_submodule  # noqa: E402,F401  (cache it FIRST)
 
 
-def diagnose(name: str | None = None) -> "Diagnosis":  # noqa: F821  (Diagnosis re-exported above)
+def diagnose(name: str | None = None) -> Result["Diagnosis"]:  # noqa: F821  (Diagnosis re-exported above)
     """Run the host-wide (or named) diagnostic scan (§11.8 D3 b).
 
     Runs the existing ``kento.diagnose.run_diagnostics(name)`` and projects ALL
@@ -584,14 +584,13 @@ def diagnose(name: str | None = None) -> "Diagnosis":  # noqa: F821  (Diagnosis 
       INSTANCE / IMAGE / HOST), read-only / silent (it REPORTS, never reaps).
       This is what ``kento diagnose`` (no instance argument) maps to.
     * ``name=<str>`` — the same scan narrowed by ``run_diagnostics`` to the HOST
-      checks plus the ONE resolved instance's checks (raising
-      :class:`InstanceNotFoundError` on a miss, propagated unchanged). The
-      findings are projected UNFILTERED, preserving today's named-``diagnose``
-      wire (host findings + that instance's findings). This is DELIBERATELY
-      different from ``instance.diagnose()`` (M11), which filters to the
-      INSTANCE domain + itself and drops the host findings; the module-level
-      function is the legacy named-wire preserver, the handle method is the
-      narrowed per-instance view.
+      checks plus the ONE resolved instance's checks. The findings are projected
+      UNFILTERED, preserving today's named-``diagnose`` wire (host findings +
+      that instance's findings). This is DELIBERATELY different from
+      ``instance.diagnose()`` (M11), which filters to the INSTANCE domain +
+      itself and drops the host findings; the module-level function is the
+      legacy named-wire preserver, the handle method is the narrowed
+      per-instance view.
 
     The module-level companion to ``instance.diagnose()`` (one instance's
     INSTANCE findings) and ``image.diagnose()`` (the IMAGE domain); it mirrors
@@ -599,11 +598,24 @@ def diagnose(name: str | None = None) -> "Diagnosis":  # noqa: F821  (Diagnosis 
 
     Performs I/O (the scan) via an explicit module-level call (§2 principle 2);
     the returned ``Diagnosis`` is an inert value type.
+
+    Public Result boundary (Result-propagation sweep, Block S6): the normal scan
+    returns ``Ok(Diagnosis)``. The DEGRADED findings are part of a SUCCESSFUL
+    scan — a no-root / unreadable check degrades to an ``info``/``error`` FINDING
+    *inside* the report, never an ``Error`` of the Result (the scan still
+    succeeded in producing a report). The ONE predictable failure is a named
+    scoped miss: ``run_diagnostics(name)`` raises ``InstanceNotFoundError`` for
+    an unknown ``name``, caught here -> ``Error(INSTANCE_NOT_FOUND)``. A
+    non-``KentoError`` is a panic and propagates.
     """
     from kento._diagnosis import diagnosis_from_report
+    from kento._result import _error_from
 
-    report = _diagnose_submodule.run_diagnostics(name)
-    return diagnosis_from_report(report)
+    try:
+        report = _diagnose_submodule.run_diagnostics(name)
+        return Ok(value=diagnosis_from_report(report))
+    except KentoError as exc:
+        return _error_from(exc)
 
 
 def version() -> str:

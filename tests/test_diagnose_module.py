@@ -25,7 +25,8 @@ from unittest.mock import patch
 import pytest
 
 import kento
-from kento import CheckLevel, Diagnosis, DiagnosisDomain
+from kento import (CheckLevel, ConditionKind, Diagnosis, DiagnosisDomain,
+                   Error, Ok)
 
 
 # --------------------------------------------------------------------------- #
@@ -122,9 +123,12 @@ def test_module_diagnose_runs_global_scan_and_keeps_all_domains():
     )
     with patch("kento.diagnose.run_diagnostics",
                return_value=report) as mock_run:
-        result = kento.diagnose()
+        outcome = kento.diagnose()
     # Global: run_diagnostics(None); ALL findings projected (no filter).
     mock_run.assert_called_once_with(None)
+    # S6 (Result sweep): a successful scan -> Ok(Diagnosis).
+    assert isinstance(outcome, Ok)
+    result = outcome.unwrap()
     assert isinstance(result, Diagnosis)
     assert {f.check for f in result.findings} == {
         "apparmor", "hold", "status", "orphan"}
@@ -143,14 +147,16 @@ def test_module_diagnose_runs_global_scan_and_keeps_all_domains():
 
 def test_module_diagnose_empty_is_ok():
     with patch("kento.diagnose.run_diagnostics", return_value=_report()):
-        result = kento.diagnose()
+        outcome = kento.diagnose()
+    assert isinstance(outcome, Ok)
+    result = outcome.unwrap()
     assert result.findings == ()
     assert result.ok is True
 
 
 def test_module_diagnose_returns_typed_value_not_dict():
     with patch("kento.diagnose.run_diagnostics", return_value=_report()):
-        result = kento.diagnose()
+        result = kento.diagnose().unwrap()
     assert isinstance(result, Diagnosis)
     assert not isinstance(result, dict)
 
@@ -175,9 +181,11 @@ def test_module_diagnose_named_passes_name_and_keeps_all_findings():
     )
     with patch("kento.diagnose.run_diagnostics",
                return_value=report) as mock_run:
-        result = kento.diagnose("mybox")
+        outcome = kento.diagnose("mybox")
     # Narrowed via run_diagnostics(name), NOT run_diagnostics(None).
     mock_run.assert_called_once_with("mybox")
+    assert isinstance(outcome, Ok)
+    result = outcome.unwrap()
     assert isinstance(result, Diagnosis)
     # UNFILTERED: the HOST apparmor finding is retained alongside the instance's.
     assert {f.check for f in result.findings} == {
@@ -189,22 +197,46 @@ def test_module_diagnose_named_passes_name_and_keeps_all_findings():
     assert result.ok is False
 
 
-def test_module_diagnose_unknown_name_propagates():
+def test_module_diagnose_unknown_name_becomes_error():
+    # S6 (Result sweep): a scoped miss (run_diagnostics raises
+    # InstanceNotFoundError) is the ONE predictable failure -> caught at the
+    # boundary -> Error(INSTANCE_NOT_FOUND), message preserved.
     from kento import InstanceNotFoundError
 
     def boom(name=None):
         raise InstanceNotFoundError("no instance named 'ghost'.")
 
     with patch("kento.diagnose.run_diagnostics", boom):
-        with pytest.raises(InstanceNotFoundError):
-            kento.diagnose("ghost")
+        outcome = kento.diagnose("ghost")
+    assert isinstance(outcome, Error)
+    assert outcome.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
+    assert "no instance named 'ghost'" in outcome.conditions[0].message
+
+
+def test_module_diagnose_degraded_findings_stay_inside_ok():
+    # S6 (KEY S6 DISTINCTION): the scan DEGRADES (no-root/unreadable checks emit
+    # info/error FINDINGS) but still SUCCEEDS — those findings ride INSIDE the
+    # Ok(Diagnosis), they are NOT a Result Error. Only the hard scoped-miss raise
+    # becomes an Error (above).
+    report = _report(
+        _df("apparmor", "info", "host", message="needs root?"),  # degraded
+        _df("portfwd", "error", "mybox", message="setup error"),  # error-level
+    )
+    with patch("kento.diagnose.run_diagnostics", return_value=report):
+        outcome = kento.diagnose()
+    assert isinstance(outcome, Ok)            # scan succeeded -> Ok, not Error
+    result = outcome.unwrap()
+    assert isinstance(result, Diagnosis)
+    # The error-level finding is a PROBLEM in the report, not a Result Error.
+    assert {f.check for f in result.findings} == {"apparmor", "portfwd"}
+    assert "portfwd" in {f.check for f in result.problems}
 
 
 def test_module_diagnose_name_none_explicit_equals_default():
     # An explicit name=None calls run_diagnostics(None) exactly like the default.
     with patch("kento.diagnose.run_diagnostics",
                return_value=_report()) as mock_run:
-        result = kento.diagnose(name=None)
+        result = kento.diagnose(name=None).unwrap()
     mock_run.assert_called_once_with(None)
     assert isinstance(result, Diagnosis)
     assert result.findings == ()

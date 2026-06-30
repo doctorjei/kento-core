@@ -1489,7 +1489,7 @@ class Instance(ABC):
     # M3 — adopt: heal an orphaned PVE instance; classmethod (§11.1, §11.9).
     # ------------------------------------------------------------------- #
     @classmethod
-    def adopt(cls, name: str) -> "Instance":
+    def adopt(cls, name: str) -> Result["Instance"]:
         """Heal an orphaned PVE instance, returning its handle (M3, §11.1).
 
         An orphan is a kento-managed pve-lxc / pve-vm instance whose state dir
@@ -1500,34 +1500,41 @@ class Instance(ABC):
         ``start()`` afterward (§11.1).
 
         Wraps ``reconcile.adopt`` (which holds ``kento_lock``, requires root,
-        and is PVE-only / fails closed). Its typed raises propagate unchanged:
-        ``ModeError`` on a non-PVE instance, ``StateError`` when the instance is
-        not an orphan / the vmid is occupied / network metadata is unrecoverable
-        (§2 principle 5 — a typed raise, never a silent no-op).
+        and is PVE-only / fails closed). Its typed raises convert to ``Error``
+        at this boundary with their real kind: ``ModeError`` -> ``MODE_ERROR``
+        on a non-PVE instance; ``StateError`` -> ``INVALID_STATE`` when the
+        instance is not an orphan / the vmid is occupied / network metadata is
+        unrecoverable; ``ValidationError`` -> ``VALIDATION``; a ``SubprocessError``
+        from the config emit -> ``SUBPROCESS_FAILED`` (§2 principle 5 — a typed
+        outcome, never a silent no-op). A non-``KentoError`` is a panic and
+        propagates. ``require_root()`` raises inside ``reconcile.adopt``
+        (``KentoError``) and so also converts here.
 
-        On success returns a FRESH, kind-checked handle via :meth:`_get_impl` (the
-        raising form of :meth:`get` — a live snapshot of the healed instance, not a
-        stale construction). Because ``_get_impl`` is polymorphic, calling
-        ``SystemContainer.adopt(...)`` on a name that healed to a VM (or vice
-        versa) raises the kind-mismatch ``InstanceNotFoundError`` (reaching
-        ``adopt``'s own boundary with its real kind) rather than returning the
-        wrong-typed handle.
+        On success returns ``Ok`` of a FRESH, kind-checked handle via
+        :meth:`_get_impl` (the RAISING form of :meth:`get` — a live snapshot of
+        the healed instance, not a stale construction). Using the raising
+        ``_get_impl`` (not the Result-returning public ``get``) keeps this a
+        single-boundary verb: a kind-mismatch ``InstanceNotFoundError`` (e.g.
+        ``SystemContainer.adopt(...)`` on a name that healed to a VM) reaches
+        THIS boundary with its real kind (``INSTANCE_NOT_FOUND``) rather than a
+        nested ``Result`` whose ``.unwrap()`` would collapse to ``INTERNAL``
+        (the KIND-FIDELITY rule, Block S4).
         """
         from kento import reconcile
+        from kento._result import _error_from
 
-        reconcile.adopt(name)
-        # Hand back a live, kind-checked handle (get narrows on a subclass).
-        # Use the RAISING _get_impl (not the Result-returning public get): this
-        # is a still-raising internal caller, so a kind-mismatch
-        # InstanceNotFoundError reaches adopt's own boundary with its real kind
-        # (KIND-FIDELITY rule, Block S4).
-        return cls._get_impl(name)
+        try:
+            reconcile.adopt(name)
+            # Hand back a live, kind-checked handle (get narrows on a subclass).
+            return Ok(value=cls._get_impl(name))
+        except KentoError as exc:
+            return _error_from(exc)
 
     # ------------------------------------------------------------------- #
     # M4 — prune_orphans: batch-reconcile orphaned state; classmethod (§11.1).
     # ------------------------------------------------------------------- #
     @classmethod
-    def prune_orphans(cls, *, reap: bool = False) -> ReclaimReport:
+    def prune_orphans(cls, *, reap: bool = False) -> Result[ReclaimReport]:
         """Batch-reconcile orphaned PVE state (M4, §11.1) — dry-run by default.
 
         Enumerates kento PVE instances whose ``.conf`` is definitively gone and,
@@ -1549,29 +1556,42 @@ class Instance(ABC):
         Wraps ``reconcile.reap_orphans`` (which isolates each per-orphan failure
         and never raises for a single failure), then projects its per-orphan
         result entries into the typed report.
+
+        Public Result boundary (Result-propagation sweep, Block S6): the normal
+        outcome is ``Ok(ReclaimReport)``. PER-ORPHAN reap failures are NOT an
+        ``Error`` of the Result — they ride in ``report.failed`` ((name, reason)
+        pairs, the 1.6.2 failure-surfacing contract), the run still produced a
+        report. The Result ``Error`` is reserved for a predictable failure of the
+        reconcile pass itself (a ``KentoError`` escaping ``reap_orphans`` /
+        ``find_orphans`` — e.g. a guard raise), caught here and mapped to its
+        kind. A non-``KentoError`` is a panic and propagates.
         """
         from kento import reconcile
+        from kento._result import _error_from
 
-        results = reconcile.reap_orphans(reap, cls._prune_scope())
+        try:
+            results = reconcile.reap_orphans(reap, cls._prune_scope())
 
-        reclaimed: list[str] = []
-        failed: list[tuple[str, str]] = []
-        for entry in results:
-            if reap and entry.get("error"):
-                # A reap that failed -> surface (name, reason) (1.6.2 contract).
-                failed.append((entry["name"], entry["error"]))
-            else:
-                # Dry-run: every entry is "would reap". reap=True success: reaped.
-                # (A dry-run entry never carries an error — reap_orphans sets it
-                # only under reap=True; so the else-branch is exactly would-reap
-                # or successfully-reaped.)
-                reclaimed.append(entry["name"])
+            reclaimed: list[str] = []
+            failed: list[tuple[str, str]] = []
+            for entry in results:
+                if reap and entry.get("error"):
+                    # A reap that failed -> surface (name, reason) (1.6.2).
+                    failed.append((entry["name"], entry["error"]))
+                else:
+                    # Dry-run: every entry is "would reap". reap=True success:
+                    # reaped. (A dry-run entry never carries an error —
+                    # reap_orphans sets it only under reap=True; so the
+                    # else-branch is exactly would-reap or successfully-reaped.)
+                    reclaimed.append(entry["name"])
 
-        return ReclaimReport(
-            dry_run=not reap,
-            reclaimed=tuple(reclaimed),
-            failed=tuple(failed),
-        )
+            return Ok(value=ReclaimReport(
+                dry_run=not reap,
+                reclaimed=tuple(reclaimed),
+                failed=tuple(failed),
+            ))
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
     def _prune_scope(cls) -> str | None:
