@@ -1067,45 +1067,52 @@ from kento import Diagnosis, DiagnosisDomain, ReclaimReport  # noqa: E402
 
 
 def test_adopt_delegates_and_returns_handle(tmp_path):
-    # adopt(name) -> reconcile.adopt(name), then cls.get(name) for a live handle.
+    # adopt(name) -> reconcile.adopt(name), then cls._get_impl(name) for a live
+    # handle. S6 (Result sweep): adopt returns Ok(handle).
     d = _make_lxc(tmp_path, name="200", **{"kento-mode": "pve"})
     with patch("kento.reconcile.adopt") as mock_adopt, \
             patch("kento.resolve_any", return_value=(d, "pve")), \
             patch("kento.is_running", return_value=False), \
             patch("kento.pve_config_exists", return_value=True):
-        handle = Instance.adopt("200")
+        result = Instance.adopt("200")
     mock_adopt.assert_called_once_with("200")
+    assert isinstance(result, Ok)
+    handle = result.unwrap()
     assert isinstance(handle, SystemContainer)
     assert handle.name == "200"
 
 
-def test_adopt_typed_raises_pass_through(tmp_path):
-    # reconcile.adopt's typed raises (ModeError/StateError) propagate unchanged;
-    # adopt does NOT swallow them or re-snapshot on a failure. adopt re-snapshots
-    # via the RAISING _get_impl (Block S4), not the Result-returning get, so a
-    # genuine reconcile failure still RAISES out of adopt (adopt stays raising).
+def test_adopt_typed_raises_become_error(tmp_path):
+    # S6 (Result sweep): reconcile.adopt's typed raises (ModeError/StateError)
+    # are caught at adopt's boundary and become an Error with the REAL kind
+    # (KIND-FIDELITY) — not swallowed, not collapsed to INTERNAL. adopt does NOT
+    # re-snapshot on a failure (no _get_impl call after the raise).
     with patch("kento.reconcile.adopt",
                side_effect=ModeError("not a PVE instance")) as mock_adopt, \
             patch.object(Instance, "_get_impl") as mock_get:
-        with pytest.raises(ModeError):
-            Instance.adopt("plainbox")
+        result = Instance.adopt("plainbox")
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.MODE_ERROR
+    assert "not a PVE instance" in result.conditions[0].message
     mock_adopt.assert_called_once()
     mock_get.assert_not_called()
 
 
 def test_adopt_on_subclass_kind_checks(tmp_path):
-    # Calling SystemContainer.adopt on a name that healed to a VM raises get's
-    # kind-mismatch (get is polymorphic), not a wrong-typed handle.
+    # Calling SystemContainer.adopt on a name that healed to a VM surfaces
+    # _get_impl's kind-mismatch as Error(INSTANCE_NOT_FOUND) at adopt's own
+    # boundary (KIND-FIDELITY — not INTERNAL), not a wrong-typed handle.
     d = _make_vm(tmp_path, name="myvm", **{"kento-mode": "pve-vm",
                                            "kento-vmid": "200"})
     with patch("kento.reconcile.adopt"), \
             patch("kento.resolve_any", return_value=(d, "pve-vm")), \
             patch("kento.is_running", return_value=False), \
             patch("kento.pve_config_exists", return_value=True):
-        with pytest.raises(InstanceNotFoundError):
-            SystemContainer.adopt("myvm")
+        result = SystemContainer.adopt("myvm")
+        assert isinstance(result, Error)
+        assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
         # The base / the right kind succeed.
-        assert isinstance(VirtualMachine.adopt("myvm"), VirtualMachine)
+        assert isinstance(VirtualMachine.adopt("myvm").unwrap(), VirtualMachine)
 
 
 def test_adopt_is_a_classmethod():
@@ -1122,11 +1129,13 @@ def _reap_entry(name, *, reaped=False, error=None, mode="pve"):
 
 def test_prune_orphans_dry_run_default_maps_would_reap():
     # reap=False (default) => dry_run=True, reclaimed = would-reap names, no
-    # reaping happened.
+    # reaping happened. S6: prune_orphans returns Ok(report).
     entries = [_reap_entry("ghost1"), _reap_entry("ghost2")]
     with patch("kento.reconcile.reap_orphans", return_value=entries) as mock_reap:
-        report = Instance.prune_orphans()
+        result = Instance.prune_orphans()
     mock_reap.assert_called_once_with(False, None)  # base => both namespaces
+    assert isinstance(result, Ok)
+    report = result.unwrap()
     assert isinstance(report, ReclaimReport)
     assert report.dry_run is True
     assert report.reclaimed == ("ghost1", "ghost2")
@@ -1136,18 +1145,32 @@ def test_prune_orphans_dry_run_default_maps_would_reap():
 
 def test_prune_orphans_reap_maps_reaped_and_failures():
     # reap=True => dry_run=False; reclaimed = successfully reaped names; failed =
-    # (name, error) pairs surfaced (1.6.2 contract).
+    # (name, error) pairs surfaced (1.6.2 contract). S6: per-orphan failures ride
+    # in report.failed — the Result is STILL Ok (the pass produced a report).
     entries = [
         _reap_entry("ghost1", reaped=True),
         _reap_entry("ghost2", reaped=False, error="pct destroy failed"),
     ]
     with patch("kento.reconcile.reap_orphans", return_value=entries) as mock_reap:
-        report = Instance.prune_orphans(reap=True)
+        result = Instance.prune_orphans(reap=True)
     mock_reap.assert_called_once_with(True, None)
+    assert isinstance(result, Ok)
+    report = result.unwrap()
     assert report.dry_run is False
     assert report.reclaimed == ("ghost1",)
     assert report.failed == (("ghost2", "pct destroy failed"),)
     assert report.ok is False
+
+
+def test_prune_orphans_reconcile_raise_becomes_error():
+    # S6 (Result sweep, KIND-FIDELITY): a predictable KentoError escaping the
+    # reconcile pass itself is caught at the boundary and becomes an Error with
+    # its real kind (not INTERNAL), distinct from a per-orphan reap failure.
+    with patch("kento.reconcile.reap_orphans",
+               side_effect=ModeError("scope is not a PVE namespace")):
+        result = Instance.prune_orphans()
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.MODE_ERROR
 
 
 def test_prune_orphans_scope_mirrors_list_per_cls():
@@ -1161,8 +1184,8 @@ def test_prune_orphans_scope_mirrors_list_per_cls():
 
 def test_prune_orphans_empty_is_clean_dry_run_report():
     with patch("kento.reconcile.reap_orphans", return_value=[]):
-        report = Instance.prune_orphans()
-    assert report == ReclaimReport(dry_run=True, reclaimed=(), failed=())
+        result = Instance.prune_orphans()
+    assert result.unwrap() == ReclaimReport(dry_run=True, reclaimed=(), failed=())
 
 
 def test_prune_orphans_is_a_classmethod():
