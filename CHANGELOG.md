@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`UrlReference` source-reference value type (§3.8 — URL-VM Phase B, Block
+  B1).** The `http(s)://` member of the `SourceReference` family, reserved as
+  FUTURE in run 29 and now built. A pure, frozen, RFC-3986 locator value type
+  (parsed via stdlib `urllib.parse` — **no I/O, no fetch, no network**; the
+  fetcher is a later block). Inherits `endpoint`/`path`/`name`/`version` and
+  adds a `secure: bool` transport flag (`scheme` ∈ `{"http", "https"}`).
+  `endpoint` is **always present** (http(s) requires an authority — enforced at
+  both `parse` and `__post_init__`); carries **no** `digest`/`checksum`.
+  `version` follows the `name+version` convention (split the leaf on the LAST
+  `+`). `normalize()` is RFC-3986 canonicalization (lowercase scheme+host,
+  drop default port 80/443, lexically collapse `//`/`.`/`..` — pure). Userinfo
+  passwords are parsed faithfully but **masked** in `render()`/`__str__`.
+  Query strings and fragments are **rejected** (fail-closed — not modelled in
+  v1; signed/presigned URLs are out for v1, additive to add later).
+  `SourceReference.parse` now dispatches `http(s)://` here (was
+  `NotImplementedError`); `file://` stays FUTURE. Re-exported as
+  `kento.UrlReference`.
 - **VM kernel/initramfs boot-source override (§8 Phase A — URL-VM phase A).**
   Boot a caller-supplied kernel/initramfs against an existing trusted rootfs
   image via QEMU direct-kernel-boot. Opt-in, **VM-only**, **local-file** in this

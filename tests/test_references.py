@@ -469,11 +469,13 @@ def test_dispatch_oci_scheme_routes_to_oci():
     assert ref.name == "debian"
 
 
-def test_dispatch_http_not_yet_implemented():
-    with pytest.raises(NotImplementedError):
-        SourceReference.parse("http://example.com/x")
-    with pytest.raises(NotImplementedError):
-        SourceReference.parse("https://example.com/x")
+def test_dispatch_http_routes_to_urlreference():
+    # Block B1 flipped this branch: http(s) now parses, no longer raises.
+    from kento import UrlReference
+    assert isinstance(SourceReference.parse("http://example.com/x"),
+                      UrlReference)
+    assert isinstance(SourceReference.parse("https://example.com/x"),
+                      UrlReference)
 
 
 def test_dispatch_file_not_yet_implemented():
@@ -604,3 +606,309 @@ def test_construction_closed_under_grammar_via_round_trip():
     ]
     for ref in refs:
         assert OciReference.parse(ref.render()) == ref
+
+
+# =========================================================================== #
+# UrlReference — the http(s):// member (§3.8, Block B1).
+# =========================================================================== #
+
+from kento import UrlReference  # noqa: E402  (grouped with the block's tests)
+
+
+# --------------------------------------------------------------------------- #
+# parse — valid URLs.
+# --------------------------------------------------------------------------- #
+
+def test_url_parse_basic_https_no_version():
+    ref = UrlReference.parse("https://host/path/to/rootfs.txz")
+    assert isinstance(ref, UrlReference)
+    assert ref.scheme == "https"
+    assert ref.secure is True
+    assert ref.endpoint.host == "host"
+    assert ref.endpoint.port is None
+    assert ref.path == "path/to"
+    assert ref.name == "rootfs.txz"
+    assert ref.version is None
+    assert ref.pathname == "path/to/rootfs.txz"
+
+
+def test_url_parse_http_scheme_captured():
+    ref = UrlReference.parse("http://host/x")
+    assert ref.scheme == "http"
+    assert ref.secure is False
+
+
+def test_url_parse_with_version_suffix():
+    ref = UrlReference.parse("https://host/path/rootfs+1.2")
+    assert ref.name == "rootfs"
+    assert ref.version == "1.2"
+
+
+def test_url_parse_userinfo_password_held_but_masked_on_render():
+    ref = UrlReference.parse("https://u:p@host:8443/x")
+    assert ref.endpoint.username == "u"
+    assert ref.endpoint.password == "p"        # held faithfully
+    assert ref.endpoint.port == 8443
+    assert "****" in ref.render()              # masked at render
+    assert "p@" not in ref.render()
+
+
+def test_url_parse_userinfo_username_only():
+    ref = UrlReference.parse("https://user@host/x")
+    assert ref.endpoint.username == "user"
+    assert ref.endpoint.password is None
+    assert ref.render() == "https://user@host/x"
+
+
+def test_url_parse_ipv4_host():
+    ref = UrlReference.parse("https://192.168.0.1:9000/img/rootfs")
+    assert ref.endpoint.host == "192.168.0.1"
+    assert ref.endpoint.port == 9000
+
+
+def test_url_parse_bracketed_ipv6_host():
+    ref = UrlReference.parse("http://[2001:db8::1]:8080/x/kernel")
+    assert ref.endpoint.host == "[2001:db8::1]"
+    assert ref.endpoint.port == 8080
+    # brackets survive a render round-trip
+    assert UrlReference.parse(ref.render()).endpoint.host == "[2001:db8::1]"
+
+
+def test_url_parse_port_present_and_absent():
+    assert UrlReference.parse("https://host:8443/x").endpoint.port == 8443
+    assert UrlReference.parse("https://host/x").endpoint.port is None
+
+
+def test_url_parse_no_path_yields_empty_name_and_path():
+    ref = UrlReference.parse("https://host")
+    assert ref.name == ""
+    assert ref.path == ""
+    assert ref.endpoint.host == "host"
+
+
+# --------------------------------------------------------------------------- #
+# endpoint ALWAYS present — fail-closed (gate C).
+# --------------------------------------------------------------------------- #
+
+def test_url_parse_rejects_missing_host():
+    # mutation guard: removing the no-host check in _parse_authority reddens.
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("https:///path/to/rootfs")
+
+
+def test_url_construct_rejects_none_endpoint():
+    # mutation guard: removing the endpoint-None check in __post_init__ reddens.
+    with pytest.raises(MalformedReference):
+        UrlReference(endpoint=None, path="", name="rootfs", version=None,
+                     secure=True)
+
+
+def test_url_replace_cannot_drop_endpoint():
+    from dataclasses import replace
+    ref = UrlReference.parse("https://host/x")
+    with pytest.raises(MalformedReference):
+        replace(ref, endpoint=None)
+
+
+# --------------------------------------------------------------------------- #
+# version — split on the LAST '+'.
+# --------------------------------------------------------------------------- #
+
+def test_url_version_splits_on_last_plus():
+    ref = UrlReference.parse("https://host/a+b+1.2")
+    assert ref.name == "a+b"
+    assert ref.version == "1.2"
+
+
+def test_url_version_absent_without_plus():
+    ref = UrlReference.parse("https://host/rootfs.txz")
+    assert ref.version is None
+
+
+def test_url_trailing_plus_is_malformed():
+    # mutation guard: dropping the empty-label check in _split_name_version
+    # would record version="" instead of raising.
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("https://host/rootfs+")
+
+
+# --------------------------------------------------------------------------- #
+# normalize — RFC-3986 canonicalization, PURE.
+# --------------------------------------------------------------------------- #
+
+def test_url_normalize_drops_default_https_port():
+    ref = UrlReference.parse("https://host:443/x").normalize()
+    assert ref.endpoint.port is None
+
+
+def test_url_normalize_drops_default_http_port():
+    ref = UrlReference.parse("http://host:80/x").normalize()
+    assert ref.endpoint.port is None
+
+
+def test_url_normalize_keeps_non_default_port():
+    ref = UrlReference.parse("https://host:8443/x").normalize()
+    assert ref.endpoint.port == 8443
+    # an http URL on :443 is NOT the default for http, so it survives
+    ref2 = UrlReference.parse("http://host:443/x").normalize()
+    assert ref2.endpoint.port == 443
+
+
+def test_url_normalize_lowercases_scheme_and_host_not_userinfo():
+    ref = UrlReference.parse("https://User:Pass@HOST/x").normalize()
+    assert ref.endpoint.host == "host"
+    assert ref.scheme == "https"
+    # userinfo is preserved verbatim (NOT lowercased)
+    assert ref.endpoint.username == "User"
+    assert ref.endpoint.password == "Pass"
+
+
+def test_url_normalize_lowercases_constructed_uppercase_host():
+    # mutation guard with BITE: urlsplit already lowercases a *parsed* host, so
+    # the host-lowercase step only fires on a constructed/replace'd uppercase
+    # host. validate_host permits uppercase, so this path is reachable — and
+    # removing the `.lower()` in normalize() must redden THIS test.
+    from dataclasses import replace
+    ref = UrlReference.parse("https://host/a/rootfs")
+    upper = replace(ref, endpoint=Endpoint(host="HOST", port=8443))
+    assert upper.endpoint.host == "HOST"           # construction keeps it
+    assert upper.normalize().endpoint.host == "host"
+
+
+def test_url_normalize_uppercases_percent_encoding_hex():
+    # RFC-3986 §6.2.2.1: percent-encoding hex is case-insensitive; canonical
+    # form is UPPER-case. mutation guard: dropping _normalize_pct_encoding
+    # leaves `%2f` verbatim and reddens this.
+    ref = UrlReference.parse("https://host/a%2fb/root%5ffs").normalize()
+    assert "%2F" in ref.pathname
+    assert "%5F" in ref.pathname
+    assert "%2f" not in ref.pathname
+    # the byte content is NOT decoded (form-only normalization)
+    assert "/a%2Fb/" in "/" + ref.pathname
+
+
+def test_url_normalize_collapses_dot_dotdot_and_double_slash():
+    ref = UrlReference.parse("https://host/a//b/../rootfs.txz").normalize()
+    assert ref.path == "a"
+    assert ref.name == "rootfs.txz"
+    assert ref.pathname == "a/rootfs.txz"
+
+
+def test_url_normalize_is_idempotent():
+    ref = UrlReference.parse("HTTPS://Host:443/a/./b/../rootfs+1.0")
+    once = ref.normalize()
+    assert once.normalize() == once
+
+
+def test_url_normalize_dotdot_cannot_escape_root():
+    # Lexical resolution must not climb above the root.
+    ref = UrlReference.parse("https://host/../../rootfs").normalize()
+    assert ".." not in ref.pathname
+    assert ref.name == "rootfs"
+
+
+# --------------------------------------------------------------------------- #
+# render — round-trips through parse on a normalized ref.
+# --------------------------------------------------------------------------- #
+
+def test_url_render_form():
+    ref = UrlReference.parse("https://host/path/rootfs+2.0")
+    assert ref.render() == "https://host/path/rootfs+2.0"
+    assert str(ref) == ref.render()
+
+
+def test_url_render_round_trips_through_parse_normalized():
+    x = UrlReference.parse("https://u:p@host:8443/a/b/rootfs+1.0").normalize()
+    y = SourceReference.parse(x.render())
+    assert isinstance(y, UrlReference)
+    assert y.scheme == x.scheme
+    assert y.endpoint.host == x.endpoint.host
+    assert y.endpoint.port == x.endpoint.port
+    assert y.endpoint.username == x.endpoint.username
+    assert y.path == x.path
+    assert y.name == x.name
+    assert y.version == x.version
+    # documented exception: the secret does not round-trip (masked at render).
+    assert y.endpoint.password == "****"
+
+
+# --------------------------------------------------------------------------- #
+# dispatch — SourceReference.parse routes by scheme (§3.8, Block B1 flip).
+# --------------------------------------------------------------------------- #
+
+def test_dispatch_https_returns_urlreference():
+    ref = SourceReference.parse("https://host/path/rootfs.txz")
+    assert isinstance(ref, UrlReference)
+    assert ref.scheme == "https"
+
+
+def test_dispatch_http_returns_urlreference():
+    assert isinstance(SourceReference.parse("http://host/x"), UrlReference)
+
+
+def test_dispatch_oci_and_bare_still_oci():
+    assert isinstance(SourceReference.parse("oci://ubuntu"), OciReference)
+    assert isinstance(SourceReference.parse("ubuntu"), OciReference)
+
+
+def test_dispatch_file_still_not_implemented():
+    with pytest.raises(NotImplementedError):
+        SourceReference.parse("file:///x")
+
+
+def test_dispatch_unknown_scheme_still_malformed():
+    with pytest.raises(MalformedReference):
+        SourceReference.parse("ftp://host/x")
+
+
+# --------------------------------------------------------------------------- #
+# query/fragment — fail-closed (NOT modelled; §3.8 disclosed scope limit).
+# --------------------------------------------------------------------------- #
+
+def test_url_rejects_query_string():
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("https://host/x?y=1")
+
+
+def test_url_rejects_fragment():
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("https://host/x#frag")
+
+
+def test_url_parse_rejects_empty_string():
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("")
+
+
+def test_url_parse_rejects_non_http_scheme_defensively():
+    # Calling UrlReference.parse directly with a non-http(s) scheme is rejected
+    # (defence in depth — the dispatch should never route it here).
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("oci://ubuntu")
+
+
+# --------------------------------------------------------------------------- #
+# re-export — kento.UrlReference is the canonical public path.
+# --------------------------------------------------------------------------- #
+
+def test_url_reference_is_public_export():
+    import kento
+    assert "UrlReference" in kento.__all__
+    assert kento.UrlReference is UrlReference
+
+
+def test_url_construction_closed_under_grammar_via_round_trip():
+    # Any UrlReference that constructs must re-parse from its own render()
+    # (password is the documented exception; compare the masked rendering).
+    refs = [
+        UrlReference.parse("https://host/path/to/rootfs.txz"),
+        UrlReference.parse("http://host:8080/x/kernel+1.0"),
+        UrlReference.parse("https://[2001:db8::1]/img/rootfs"),
+    ]
+    for ref in refs:
+        reparsed = UrlReference.parse(ref.render())
+        assert reparsed.endpoint.host == ref.endpoint.host
+        assert reparsed.path == ref.path
+        assert reparsed.name == ref.name
+        assert reparsed.version == ref.version
+        assert reparsed.scheme == ref.scheme

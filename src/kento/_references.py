@@ -4,9 +4,10 @@ These are **pure, inert, frozen value types** (spec §2 principle 2): no I/O,
 ever; their methods are pure transforms (``parse`` / ``render`` / ``normalize``).
 Once constructed, a value is plain data you can pass, copy, and reason about.
 
-The public surface (``SourceReference``, ``OciReference``, ``Endpoint``,
-``Digest``, ``MalformedReference``) is re-exported flat from ``kento`` — refer to
-``kento.OciReference``, not ``kento._references.OciReference``.
+The public surface (``SourceReference``, ``OciReference``, ``UrlReference``,
+``Endpoint``, ``Digest``, ``MalformedReference``) is re-exported flat from
+``kento`` — refer to ``kento.OciReference``, not
+``kento._references.OciReference``.
 
 Spec: ``~/workspace/kento-core-api-design.md`` §3 (OCI reference) + §3.8
 (the ``SourceReference`` family). We model to the canonical grammar
@@ -16,7 +17,9 @@ parts kento itself never exercises (§2 principle 1).
 
 from __future__ import annotations
 
+import posixpath
 import re
+import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
@@ -28,6 +31,7 @@ __all__ = [
     "Digest",
     "SourceReference",
     "OciReference",
+    "UrlReference",
 ]
 
 
@@ -308,18 +312,16 @@ class SourceReference(ABC):
 
         Scheme-less or ``oci://`` routes to :meth:`OciReference.parse`
         (a bare ``droste-hair:latest`` is equivalent to ``oci://…``,
-        back-compat). ``http(s)://`` / ``file://`` are FUTURE blocks — they
-        raise a clear "not yet implemented" error rather than being silently
-        dropped.
+        back-compat). ``http(s)://`` routes to :meth:`UrlReference.parse`
+        (which owns the scheme, so it receives the FULL ``s``). ``file://`` is
+        a FUTURE block — it raises a clear "not yet implemented" error rather
+        than being silently dropped.
         """
         scheme, rest = _split_scheme(s)
         if scheme is None or scheme == "oci":
             return OciReference.parse(rest if scheme else s)
         if scheme in ("http", "https"):
-            raise NotImplementedError(
-                f"{scheme}:// source references (UrlReference) are not yet "
-                f"implemented: {s!r}"
-            )
+            return UrlReference.parse(s)
         if scheme == "file":
             raise NotImplementedError(
                 f"file:// source references (FileReference) are not yet "
@@ -671,3 +673,263 @@ def _validate_name_production(
             "qualify it (e.g. with a registry) to use it as a reference",
             value=original, production="identifier",
         )
+
+
+# --------------------------------------------------------------------------- #
+# UrlReference — the http(s):// member (§3.8). RFC-3986 via stdlib urllib.
+# --------------------------------------------------------------------------- #
+
+# Default ports dropped by normalize() (RFC-3986 §6.2.3) — scheme -> port.
+_URL_DEFAULT_PORT = {"http": 80, "https": 443}
+
+
+@dataclass(frozen=True)
+class UrlReference(SourceReference):
+    """The ``http(s)://`` member of the ``SourceReference`` family (§3.8).
+
+    Inherits ``endpoint``/``path``/``name``/``version`` and adds the concrete
+    transport flag ``secure`` (the ``scheme`` discriminator: ``True`` =>
+    ``https``, ``False`` => ``http``). A separate boolean is used rather than a
+    stored scheme string so it cannot collide with the abstract ``scheme``
+    property name and cannot hold a value outside ``{"http", "https"}``.
+
+    Unlike oci, ``endpoint`` is **always present** — http(s) requires an
+    authority (host). Carries **no** ``digest`` and **no** ``checksum``: digest
+    is OCI-only (§3.8) and url integrity is a deferred, out-of-band ``checksum``
+    not in the 1.0 surface. ``version`` follows the ``name+version`` convention
+    (split the leaf on the LAST ``+``).
+
+    PURE value type: ``parse``/``normalize`` are RFC-3986 transforms over
+    ``urllib.parse`` — no I/O, no network, ever (the fetcher is a separate
+    block; §2 principle 2).
+    """
+
+    secure: bool
+
+    def __post_init__(self) -> None:
+        # Construction is closed under the grammar (gate C): a direct
+        # `UrlReference(...)` or a `replace(...)` (e.g. in normalize) must yield
+        # ONLY values whose render() parse() would accept again. http(s) ALWAYS
+        # requires an authority, so endpoint may never be None.
+        if self.endpoint is None:
+            raise MalformedReference(
+                "http(s) reference requires an authority (host)",
+                value=self.name, production="endpoint",
+            )
+        # endpoint validates host/port in its own __post_init__; path/name
+        # carry the URL path verbatim (RFC-3986 path bytes are permissive), so
+        # no further component grammar applies here.
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.secure else "http"
+
+    # ------------------------------------------------------------------- #
+    # Parse — RFC-3986 via urllib.parse.urlsplit (PURE: no I/O).
+    # ------------------------------------------------------------------- #
+    @staticmethod
+    def parse(s: str) -> "UrlReference":
+        """Parse a full ``http(s)://…`` URL faithfully (RFC-3986). Total.
+
+        Receives the FULL string INCLUDING the scheme (the dispatch hands over
+        ``s``, not a scheme-less remainder). Applies NO defaults — records
+        exactly what was written; canonicalization is :meth:`normalize`. Raises
+        ``MalformedReference`` on every violation — never returns ``None``/``""``
+        (§2 principle 5).
+        """
+        if not isinstance(s, str) or not s:
+            raise MalformedReference(
+                "empty reference", value=str(s), production="reference",
+            )
+
+        split = urllib.parse.urlsplit(s)
+        scheme = split.scheme.lower()
+        if scheme not in ("http", "https"):
+            # Defensive — the dispatch only routes http(s) here.
+            raise MalformedReference(
+                f"not an http(s) URL (scheme {scheme!r})", value=s,
+                production="scheme",
+            )
+
+        # Query/fragment are NOT modelled (§3.8 skeleton has no such field):
+        # fail closed rather than silently drop them (§2 principle 5). v1
+        # targets plain release URLs; signed/presigned URLs are OUT for v1.
+        if split.query:
+            raise MalformedReference(
+                "query strings are not supported", value=s, production="query",
+            )
+        if split.fragment:
+            raise MalformedReference(
+                "fragments are not supported", value=s, production="fragment",
+            )
+
+        endpoint = UrlReference._parse_authority(split, original=s)
+
+        # path: locator path prefix, "/"-joined, leading "/" stripped, "" when
+        # none; name: the leaf (last path segment). version: name+version
+        # convention (split leaf on LAST '+').
+        raw_path = split.path
+        segments = [seg for seg in raw_path.split("/") if seg != ""]
+        if not segments:
+            # No path at all (https://host) or only slashes — no leaf name.
+            name = ""
+            path = ""
+        else:
+            name = segments[-1]
+            path = "/".join(segments[:-1])
+
+        name, version = _split_name_version(name, original=s)
+
+        return UrlReference(
+            endpoint=endpoint, path=path, name=name, version=version,
+            secure=(scheme == "https"),
+        )
+
+    @staticmethod
+    def _parse_authority(
+        split: urllib.parse.SplitResult, *, original: str,
+    ) -> Endpoint:
+        """Build the ``Endpoint`` from a urlsplit authority. http(s) requires one.
+
+        Userinfo (``user[:pass]@``) is parsed faithfully; the password is held
+        but masked at render. The host MUST be present and non-empty.
+        """
+        # urlsplit raises ValueError for a malformed bracketed-IPv6 port; treat
+        # any such failure as a malformed authority rather than leaking it.
+        try:
+            hostname = split.hostname
+            port = split.port
+            username = split.username
+            password = split.password
+        except ValueError as exc:
+            raise MalformedReference(
+                f"malformed authority: {exc}", value=original,
+                production="host",
+            ) from exc
+
+        if not hostname:
+            raise MalformedReference(
+                "http(s) reference requires a host", value=original,
+                production="host",
+            )
+
+        # urlsplit lowercases nothing and strips the IPv6 brackets from
+        # `hostname`; re-add them so validate_host (and render) see the
+        # bracketed `[::1]` form the grammar expects.
+        host = hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+
+        return Endpoint(
+            host=host, port=port, username=username, password=password,
+        )
+
+    # ------------------------------------------------------------------- #
+    # Render — canonical URL string (also __str__; password masked, §3.5).
+    # ------------------------------------------------------------------- #
+    def render(self) -> str:
+        """Render the canonical URL string (password masked, §3.5).
+
+        Form ``{scheme}://{authority}/{pathname}`` plus ``+{version}`` when a
+        version label is present. ``endpoint.render()`` masks the password by
+        default (reused). A rendered ref does not round-trip the secret — the
+        documented masked-password exception (same contract as OciReference).
+        """
+        out = f"{self.scheme}://{self.endpoint.render()}/{self.pathname}"
+        if self.version is not None:
+            out += f"+{self.version}"
+        return out
+
+    def __str__(self) -> str:
+        return self.render()
+
+    # ------------------------------------------------------------------- #
+    # Normalize — RFC-3986 canonicalization (§3.8). PURE (no FS/network).
+    # ------------------------------------------------------------------- #
+    def normalize(self) -> "UrlReference":
+        """RFC-3986 canonicalization (§3.8). Pure — no FS, symlink, or network.
+
+        Lowercases scheme + host (userinfo is NOT touched); drops the default
+        port (80 for http, 443 for https); upper-cases percent-encoding hex
+        (``%2f`` => ``%2F`` — the unambiguous §6.2.2.1 case, NO decoding); and
+        collapses ``//`` and resolves the lexical ``.``/``..`` segments in the
+        path (LEXICAL only). Idempotent: ``normalize(normalize(x)) ==
+        normalize(x)``.
+        """
+        endpoint = self.endpoint
+
+        # Lowercase host (userinfo preserved as-is); drop the default port.
+        host = endpoint.host.lower()
+        port = endpoint.port
+        if port is not None and port == _URL_DEFAULT_PORT.get(self.scheme):
+            port = None
+        endpoint = replace(endpoint, host=host, port=port)
+
+        # Lexically collapse `//`, `.`, `..` over the rebuilt path. We operate
+        # on the full pathname (path + leaf) so `a/../rootfs` resolves across
+        # the split, then re-split into (path, name).
+        collapsed = _normalize_url_path(self.pathname)
+        segments = [seg for seg in collapsed.split("/") if seg != ""]
+        if not segments:
+            name = ""
+            path = ""
+        else:
+            name = segments[-1]
+            path = "/".join(segments[:-1])
+
+        return UrlReference(
+            endpoint=endpoint, path=path, name=name, version=self.version,
+            secure=self.secure,
+        )
+
+
+def _split_name_version(name: str, *, original: str) -> tuple[str, str | None]:
+    """Split a leaf on the LAST ``+`` into ``(name, version)`` (§3.8).
+
+    The ``name+version`` convention: everything after the final ``+`` is the
+    mutable ``version`` label (need not be semver); no ``+`` => ``version`` is
+    ``None``. A trailing ``+`` (empty label) is malformed — fail closed rather
+    than record an empty string (§2 principle 5).
+    """
+    if "+" not in name:
+        return name, None
+    base, _, version = name.rpartition("+")
+    if not version:
+        raise MalformedReference(
+            "empty version label after '+'", value=original, production="version",
+        )
+    return base, version
+
+
+# A percent-encoding triplet: '%' + two hex digits. Used by normalize to
+# upper-case the hex digits (the only UNAMBIGUOUS RFC-3986 §6.2.2.1 case —
+# `%2f` == `%2F`). We do NOT decode (that would change which bytes the path
+# names, an ambiguous transform); we only canonicalize the *form*.
+_PCT_ENCODING = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def _normalize_pct_encoding(s: str) -> str:
+    """Upper-case the hex digits of every ``%xx`` triplet (RFC-3986 §6.2.2.1).
+
+    The unambiguous percent-encoding normalization: hex case is insignificant,
+    so ``%2f`` and ``%2F`` are equivalent and the canonical form is upper-case.
+    Decoding is deliberately NOT done — that would change the named bytes.
+    """
+    return _PCT_ENCODING.sub(lambda m: "%" + m.group(1).upper(), s)
+
+
+def _normalize_url_path(pathname: str) -> str:
+    """Canonicalize a URL path: pct-encoding case + lexical ``//``/``.``/``..``.
+
+    PURE string transform — no filesystem, no symlink, no network (RFC-3986
+    §6.2.2.1 + §5.2.4). Upper-cases percent-encoding hex (unambiguous), then
+    collapses ``//`` and resolves lexical ``.``/``..`` via ``posixpath.normpath``,
+    anchored so ``..`` cannot escape above the root.
+    """
+    if not pathname:
+        return ""
+    pathname = _normalize_pct_encoding(pathname)
+    # normpath collapses `//`, resolves `.`/`..`; anchor with a leading "/" so
+    # `..` cannot climb above root, then strip it back off.
+    normalized = posixpath.normpath("/" + pathname)
+    return normalized.lstrip("/")
