@@ -74,13 +74,19 @@ def test_conditionkind_is_its_string_value():
     assert json.dumps(ConditionKind.SIZE_EXCEEDED) == '"size_exceeded"'
 
 
-def test_conditionkind_seeds_only_the_four():
-    # R1 must NOT speculatively enumerate the library (director-owned seam).
+def test_conditionkind_members_are_the_seeded_seam():
+    # The director-owned merge seam grows ONLY as real blocks need kinds — no
+    # speculative enumeration of the whole library. R1 seeded four; Block B2 (the
+    # HTTPS fetcher) added its three fetch-edge kinds. This pins the CURRENT set
+    # so a future block adding a member updates this deliberately.
     assert {k.value for k in ConditionKind} == {
         "malformed_reference",
         "fragment_dropped",
         "fetch_timeout",
         "size_exceeded",
+        "non_https",
+        "fetch_failed",
+        "http_error",
     }
 
 
