@@ -33,6 +33,12 @@ from kento import (
     ValidationError,
     ForwardProtocol,
     ModeError,
+    Ok,
+    Error,
+    Condition,
+    ConditionKind,
+    Severity,
+    ResultError,
 )
 from kento import _instances
 
@@ -702,7 +708,7 @@ def test_start_delegates_to_mode_aware_func(tmp_path, mode):
     with patch("kento.start.start") as mock_start, \
             patch("kento.is_running", return_value=True), \
             patch("kento.pve_config_exists", return_value=True):
-        inst.start()
+        assert isinstance(inst.start(), Ok)
     # Delegation: called once with this handle's name/dir/raw mode.
     mock_start.assert_called_once_with(inst.name, container_dir=d, mode=mode)
     # Self-update from a fresh probe (running + config present => RUNNING).
@@ -715,7 +721,7 @@ def test_start_self_update_reflects_probe_not_a_literal(tmp_path):
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     with patch("kento.start.start"), patch("kento.is_running", return_value=False):
-        inst.start()
+        assert isinstance(inst.start(), Ok)
     assert inst.status is Status.STOPPED
 
 
@@ -729,7 +735,7 @@ def test_stop_graceful_passes_graceful_only(tmp_path):
     inst = _snapshot(d, "lxc")
     with patch("kento.stop.shutdown") as mock_sd, \
             patch("kento.is_running", return_value=False):
-        inst.stop()
+        assert isinstance(inst.stop(), Ok)
     mock_sd.assert_called_once_with(
         inst.name, graceful_only=True, container_dir=d, mode="lxc",
     )
@@ -737,18 +743,26 @@ def test_stop_graceful_passes_graceful_only(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["lxc", "vm"])
-def test_stop_graceful_stubborn_raises_stop_timeout(tmp_path, mode):
-    # LOCKED: a graceful stop that leaves the instance UP raises StopTimeout and
-    # NEVER hard-kills (no second forced shutdown call). Verified for BOTH lxc
+def test_stop_graceful_stubborn_returns_stop_timeout(tmp_path, mode):
+    # LOCKED: a graceful stop that leaves the instance UP returns Error(STOP_TIMEOUT)
+    # and NEVER hard-kills (no second forced shutdown call). Verified for BOTH lxc
     # (--nokill) and vm (no-SIGKILL). timeout=0 keeps the poll instantaneous;
-    # the still-running probe drives the raise.
+    # the still-running probe drives the StopTimeout, caught at the public
+    # boundary -> Error(STOP_TIMEOUT). Most-specific-first mapping: STOP_TIMEOUT,
+    # NOT its parent INVALID_STATE — a mis-map reddens here (mutation-proven).
     maker = _make_vm if mode == "vm" else _make_lxc
     d = maker(tmp_path, **{"kento-mode": mode})
     inst = _snapshot(d, mode)
     with patch("kento.stop.shutdown") as mock_sd, \
             patch("kento.is_running", return_value=True):
-        with pytest.raises(StopTimeout, match="cannot stop; try force"):
-            inst.stop(timeout=0)
+        result = inst.stop(timeout=0)
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.STOP_TIMEOUT
+    assert result.conditions[0].message == "cannot stop; try force"
+    # .unwrap() still raises a KentoError (ResultError) with the same message —
+    # behavior-preserving for the CLI's existing _handle (catches KentoError).
+    with pytest.raises(ResultError, match="cannot stop; try force"):
+        result.unwrap()
     # Exactly ONE shutdown call (graceful) — no forced fallback kill.
     mock_sd.assert_called_once_with(
         inst.name, graceful_only=True, container_dir=d, mode=mode,
@@ -770,11 +784,27 @@ def test_stop_force_immediate_kill(tmp_path):
     inst = _snapshot(d, "lxc")
     with patch("kento.stop.shutdown") as mock_sd, \
             patch("kento.is_running", return_value=False):
-        inst.stop(force=True)
+        assert isinstance(inst.stop(force=True), Ok)
     mock_sd.assert_called_once_with(
         inst.name, force=True, container_dir=d, mode="lxc",
     )
     assert inst.status is Status.STOPPED
+
+
+def test_stop_subprocess_failure_returns_error_with_returncode(tmp_path):
+    # S3 KIND-FIDELITY: a SubprocessError raised inside the delegated
+    # stop.shutdown surfaces at the handle boundary as Error(SUBPROCESS_FAILED),
+    # with returncode threaded into context (the CLI reads it for exit 1-vs-2).
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    from kento.errors import SubprocessError
+    err = SubprocessError("kill failed", cmd=["lxc-stop"], returncode=7)
+    with patch("kento.stop.shutdown", side_effect=err):
+        result = inst.stop(force=True)
+    assert isinstance(result, Error)
+    cond = result.conditions[0]
+    assert cond.kind is ConditionKind.SUBPROCESS_FAILED
+    assert cond.context["returncode"] == 7
 
 
 def test_stop_force_timeout_zero_is_immediate(tmp_path):
@@ -862,8 +892,9 @@ def test_stop_graceful_unobservable_probe_does_not_raise(tmp_path):
         raise KentoError("node unreachable")
 
     with patch("kento.stop.shutdown"), patch("kento.is_running", side_effect=_boom):
-        # Must not raise StopTimeout; status resolves to UNKNOWN (total probe).
-        inst.stop(timeout=0)
+        # Must not return Error(STOP_TIMEOUT); the total probe treats an
+        # unobservable instance as DOWN -> Ok, status resolves to UNKNOWN.
+        assert isinstance(inst.stop(timeout=0), Ok)
     assert inst.status is Status.UNKNOWN
 
 
@@ -898,7 +929,7 @@ def test_destroy_delegates_per_mode(tmp_path, mode):
     d = _make_for_mode(tmp_path, mode)
     inst = _snapshot(d, mode)
     with patch("kento.destroy.destroy") as mock_destroy:
-        inst.destroy()
+        assert isinstance(inst.destroy(), Ok)
     # destroy.destroy(name, force, *, container_dir, mode) — positional force.
     mock_destroy.assert_called_once_with(
         inst.name, False, container_dir=d, mode=mode,
@@ -909,23 +940,34 @@ def test_destroy_force_forwards_force(tmp_path):
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     with patch("kento.destroy.destroy") as mock_destroy:
-        inst.destroy(force=True)
+        assert isinstance(inst.destroy(force=True), Ok)
     mock_destroy.assert_called_once_with(
         inst.name, True, container_dir=d, mode="lxc",
     )
 
 
 def test_destroy_marks_handle_dead(tmp_path):
-    # After destroy, the handle is dead: any reuse raises InstanceNotFoundError.
+    # After destroy, the handle is dead. The S3-converted lifecycle methods
+    # (start/stop/destroy) now RETURN Error(INSTANCE_NOT_FOUND) at their boundary
+    # (_check_alive's raise is caught), while the not-yet-converted scrub/refresh
+    # still RAISE InstanceNotFoundError directly.
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     with patch("kento.destroy.destroy"):
-        inst.destroy()
+        assert isinstance(inst.destroy(), Ok)
     assert inst._dead is True
+    # Converted methods: Error(INSTANCE_NOT_FOUND), message preserved.
     for call in (
         lambda: inst.start(),
         lambda: inst.stop(),
         lambda: inst.destroy(),
+    ):
+        result = call()
+        assert isinstance(result, Error)
+        assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
+        assert "was destroyed" in result.conditions[0].message
+    # Not-yet-converted (S4+): still raise directly.
+    for call in (
         lambda: inst.scrub(),
         lambda: inst.refresh(),
     ):
@@ -935,13 +977,15 @@ def test_destroy_marks_handle_dead(tmp_path):
 
 def test_destroy_failure_leaves_handle_alive(tmp_path):
     # If destroy.destroy raises, the instance is NOT gone — the handle must stay
-    # alive (we only flip _dead on success), so the caller can retry.
+    # alive (we only flip _dead on success, inside the try), so the caller can
+    # retry. The StateError is caught at the boundary -> Error(INVALID_STATE).
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     from kento.errors import StateError
     with patch("kento.destroy.destroy", side_effect=StateError("running")):
-        with pytest.raises(StateError):
-            inst.destroy()
+        result = inst.destroy()
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INVALID_STATE
     assert inst._dead is False
 
 
@@ -2326,6 +2370,27 @@ def test_transient_tears_down_on_exception(tmp_path):
     handle.destroy.assert_called_once_with(force=True)
 
 
+def test_transient_teardown_failure_raises(tmp_path):
+    # S3 behavior-preservation: destroy() now RETURNS Result, so transient's
+    # finally .unwrap()s it — a FAILED teardown must still RAISE out of the
+    # context manager (a silently-swallowed Error would leak the instance).
+    handle = unittest_mock_handle()
+    handle.destroy.return_value = Error(
+        conditions=(
+            Condition(
+                severity=Severity.ERROR,
+                kind=ConditionKind.SUBPROCESS_FAILED,
+                message="teardown failed",
+            ),
+        ),
+    )
+    with patch.object(SystemContainer, "create", return_value=handle):
+        with pytest.raises(ResultError, match="teardown failed"):
+            with SystemContainer.transient("box", "img"):
+                pass
+    handle.destroy.assert_called_once_with(force=True)
+
+
 def test_transient_forwards_args_to_create(tmp_path):
     handle = unittest_mock_handle()
     with patch.object(SystemContainer, "create", return_value=handle) as mcreate:
@@ -2377,8 +2442,10 @@ def test_attach_delegates_all_modes(tmp_path, mode):
         result = inst.attach()
     # Delegates to the runtime by name (it re-dispatches per mode internally).
     mock_attach.assert_called_once_with(inst.name)
-    # int -> None (interactive console, not a status check; brief JC3).
-    assert result is None
+    # Ok(None): int -> None (interactive console, not a status check; brief JC3),
+    # wrapped in a clean-success Result at the S3 boundary.
+    assert isinstance(result, Ok)
+    assert result.unwrap() is None
 
 
 def test_attach_is_on_base_instance():
@@ -2393,7 +2460,7 @@ def test_attach_drops_nonzero_exit_code(tmp_path):
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     with patch("kento.attach.attach", return_value=3):
-        assert inst.attach() is None
+        assert inst.attach().unwrap() is None
 
 
 def test_attach_exit_code_none_before_attach(tmp_path):
@@ -2409,7 +2476,7 @@ def test_attach_stores_wrapped_exit_code(tmp_path):
     inst = _snapshot(d, "lxc")
     with patch("kento.attach.attach", return_value=7):
         result = inst.attach()
-    assert result is None
+    assert result.unwrap() is None
     assert inst.attach_exit_code == 7
 
 
@@ -2421,13 +2488,16 @@ def test_attach_exit_code_is_read_only(tmp_path):
         inst.attach_exit_code = 0
 
 
-def test_attach_dead_handle_raises(tmp_path):
+def test_attach_dead_handle_returns_error(tmp_path):
+    # S3: a dead handle's InstanceNotFoundError is caught at the boundary ->
+    # Error(INSTANCE_NOT_FOUND); the runtime is never reached.
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     inst._dead = True
     with patch("kento.attach.attach") as mock_attach:
-        with pytest.raises(InstanceNotFoundError):
-            inst.attach()
+        result = inst.attach()
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
     mock_attach.assert_not_called()
 
 
@@ -2444,11 +2514,12 @@ def test_exec_delegates_with_defaults(tmp_path):
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     with patch("kento.exec_cmd.exec_cmd", return_value=0) as mock_exec:
-        rc = inst.exec(["ls", "-la"])
+        result = inst.exec(["ls", "-la"])
     mock_exec.assert_called_once_with(
         inst.name, ["ls", "-la"], tty=False, user=None, env=None,
     )
-    assert rc == 0
+    assert isinstance(result, Ok)
+    assert result.unwrap() == 0
 
 
 def test_exec_threads_tty_user_env(tmp_path):
@@ -2476,17 +2547,22 @@ def test_exec_returns_nonzero_without_raising(tmp_path):
     # §11.9 / M13: non-zero is normal info, returned not raised.
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
+    # Non-zero is an Ok carrying the code (NOT an Error): the caller decides.
     with patch("kento.exec_cmd.exec_cmd", return_value=2):
-        assert inst.exec(["grep", "x", "/nope"]) == 2
+        result = inst.exec(["grep", "x", "/nope"])
+    assert isinstance(result, Ok)
+    assert result.unwrap() == 2
 
 
-def test_exec_dead_handle_raises(tmp_path):
+def test_exec_dead_handle_returns_error(tmp_path):
+    # S3: a dead handle -> Error(INSTANCE_NOT_FOUND); exec_cmd never reached.
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     inst._dead = True
     with patch("kento.exec_cmd.exec_cmd") as mock_exec:
-        with pytest.raises(InstanceNotFoundError):
-            inst.exec(["ls"])
+        result = inst.exec(["ls"])
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
     mock_exec.assert_not_called()
 
 
@@ -2580,17 +2656,30 @@ def test_logs_args_reach_subprocess(tmp_path):
         return iter(())
 
     with patch("kento._instances._stream_lines", fake_stream):
-        list(inst.logs(args=["--grep", "boom"]))
+        list(inst.logs(args=["--grep", "boom"]).unwrap())
     assert captured["argv"] == [
         "lxc-attach", "-n", inst.name, "--", "journalctl", "--grep", "boom"]
 
 
-def test_logs_dead_handle_raises(tmp_path):
+def test_logs_dead_handle_returns_error(tmp_path):
+    # S3: _check_alive runs EAGERLY (not lazily) — a dead handle -> Error
+    # (INSTANCE_NOT_FOUND) at the call, before any subprocess spawn.
     d = _make_lxc(tmp_path)
     inst = _snapshot(d, "lxc")
     inst._dead = True
-    with pytest.raises(InstanceNotFoundError):
-        inst.logs()
+    result = inst.logs()
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
+
+
+def test_logs_negative_lines_returns_error(tmp_path):
+    # S3: the EAGER ValidationError from _logs_argv (negative lines) is caught at
+    # the logs boundary -> Error(VALIDATION), before the iterator is built.
+    d = _make_lxc(tmp_path)
+    inst = _snapshot(d, "lxc")
+    result = inst.logs(lines=-1)
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
 
 
 class _FakeStdout:
@@ -2645,7 +2734,7 @@ def test_logs_yields_decoded_lines_and_reaps_on_eof(tmp_path):
     inst = _snapshot(d, "lxc")
     proc = _FakeProc(["line one\n", "line two\n"])
     with patch("kento._instances.subprocess.Popen", return_value=proc) as mp:
-        out = list(inst.logs(lines=2))
+        out = list(inst.logs(lines=2).unwrap())
     # Newlines stripped; finite snapshot collected via list().
     assert out == ["line one", "line two"]
     # Popen got the snapshot argv with piped stdout, text mode.
@@ -2663,7 +2752,7 @@ def test_logs_decode_uses_errors_replace(tmp_path):
     inst = _snapshot(d, "lxc")
     proc = _FakeProc(["ok\n"])
     with patch("kento._instances.subprocess.Popen", return_value=proc) as mp:
-        list(inst.logs())
+        list(inst.logs().unwrap())
     assert mp.call_args.kwargs["encoding"] == "utf-8"
     assert mp.call_args.kwargs["errors"] == "replace"
 
@@ -2675,7 +2764,7 @@ def test_logs_follow_terminates_child_on_early_close(tmp_path):
     inst = _snapshot(d, "lxc")
     proc = _FakeProc(["a\n", "b\n", "c\n"], finishes=False)
     with patch("kento._instances.subprocess.Popen", return_value=proc):
-        gen = inst.logs(follow=True)
+        gen = inst.logs(follow=True).unwrap()
         first = next(gen)        # pull one live line
         assert first == "a"
         gen.close()              # caller stops early -> GeneratorExit
@@ -2693,7 +2782,7 @@ def test_logs_follow_break_out_of_loop_reaps(tmp_path):
     proc = _FakeProc(["x\n", "y\n", "z\n"], finishes=False)
     with patch("kento._instances.subprocess.Popen", return_value=proc):
         collected = []
-        for line in inst.logs(follow=True):
+        for line in inst.logs(follow=True).unwrap():
             collected.append(line)
             if len(collected) == 2:
                 break
@@ -2728,7 +2817,7 @@ def test_logs_follow_sigkill_if_term_ignored(tmp_path):
 
     proc = _StubbornProc()
     with patch("kento._instances.subprocess.Popen", return_value=proc):
-        gen = inst.logs(follow=True)
+        gen = inst.logs(follow=True).unwrap()
         next(gen)
         gen.close()
     assert proc.terminated
@@ -2751,7 +2840,7 @@ def test_suspend_delegates_and_sets_suspended(tmp_path, mode):
     d = _make_for_mode(tmp_path, mode)
     inst = _snapshot(d, mode)
     with patch("kento.suspend.suspend") as mock_suspend:
-        inst.suspend()
+        assert isinstance(inst.suspend(), Ok)
     mock_suspend.assert_called_once_with(inst.name)
     # M17: self-update to the LITERAL SUSPENDED (not via _resolve_status, which
     # cannot see a paused VM — it reports RUNNING).
@@ -2764,7 +2853,7 @@ def test_resume_delegates_and_sets_running(tmp_path, mode):
     inst = _snapshot(d, mode)
     inst._status = Status.SUSPENDED
     with patch("kento.suspend.resume") as mock_resume:
-        inst.resume()
+        assert isinstance(inst.resume(), Ok)
     mock_resume.assert_called_once_with(inst.name)
     assert inst.status is Status.RUNNING
 
@@ -2777,18 +2866,24 @@ def test_suspend_does_not_update_status_on_failure(tmp_path):
     inst = _snapshot(d, "vm")
     before = inst.status
     with patch("kento.suspend.suspend", side_effect=StateError("not running")):
-        with pytest.raises(StateError):
-            inst.suspend()
+        result = inst.suspend()
+    # The StateError is caught at the boundary -> Error(INVALID_STATE); the
+    # self-update lives INSIDE the try, after the delegate, so a failed suspend
+    # leaves the cached status untouched.
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INVALID_STATE
     assert inst.status is before
 
 
-def test_suspend_dead_handle_raises(tmp_path):
+def test_suspend_dead_handle_returns_error(tmp_path):
+    # S3: a dead handle -> Error(INSTANCE_NOT_FOUND); the runtime is never reached.
     d = _make_for_mode(tmp_path, "vm")
     inst = _snapshot(d, "vm")
     inst._dead = True
     with patch("kento.suspend.suspend") as mock_suspend:
-        with pytest.raises(InstanceNotFoundError):
-            inst.suspend()
+        result = inst.suspend()
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
     mock_suspend.assert_not_called()
 
 
