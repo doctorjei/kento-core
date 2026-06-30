@@ -207,7 +207,9 @@ def test_ok_allows_info_note():
 
 
 def test_warning_rejects_empty_conditions():
-    with pytest.raises(ValueError):
+    # match= so the test binds to OUR guard's message, not the incidental
+    # ValueError that max(()) raises if the explicit guard were removed.
+    with pytest.raises(ValueError, match="at least one WARNING condition"):
         Warning(value="v", conditions=())
 
 
@@ -229,7 +231,9 @@ def test_warning_accepts_warning_with_notes():
 
 
 def test_error_rejects_empty_conditions():
-    with pytest.raises(ValueError):
+    # match= so the test binds to OUR guard's message, not the incidental
+    # ValueError that max(()) raises if the explicit guard were removed.
+    with pytest.raises(ValueError, match="at least one ERROR condition"):
         Error(conditions=())
 
 
