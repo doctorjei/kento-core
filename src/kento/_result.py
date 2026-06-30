@@ -111,6 +111,9 @@ class ConditionKind(str, Enum):
     FRAGMENT_DROPPED = "fragment_dropped"
     FETCH_TIMEOUT = "fetch_timeout"
     SIZE_EXCEEDED = "size_exceeded"
+    NON_HTTPS = "non_https"
+    FETCH_FAILED = "fetch_failed"
+    HTTP_ERROR = "http_error"
 
 
 # --------------------------------------------------------------------------- #
