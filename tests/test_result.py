@@ -77,8 +77,10 @@ def test_conditionkind_is_its_string_value():
 def test_conditionkind_members_are_the_seeded_seam():
     # The director-owned merge seam grows ONLY as real blocks need kinds — no
     # speculative enumeration of the whole library. R1 seeded four; Block B2 (the
-    # HTTPS fetcher) added its three fetch-edge kinds. This pins the CURRENT set
-    # so a future block adding a member updates this deliberately.
+    # HTTPS fetcher) added its three fetch-edge kinds; Block S1 (the Result
+    # propagation sweep foundation) added the nine KentoError→kind members
+    # consumed by ``_error_from``. This pins the CURRENT set so a future block
+    # adding a member updates this deliberately.
     assert {k.value for k in ConditionKind} == {
         "malformed_reference",
         "fragment_dropped",
@@ -87,6 +89,16 @@ def test_conditionkind_members_are_the_seeded_seam():
         "non_https",
         "fetch_failed",
         "http_error",
+        # Block S1 — KentoError→ConditionKind sweep mapping.
+        "validation",
+        "instance_not_found",
+        "instance_exists",
+        "image_not_found",
+        "mode_error",
+        "invalid_state",
+        "stop_timeout",
+        "subprocess_failed",
+        "internal",
     }
 
 
@@ -418,3 +430,155 @@ def test_module_all_matches_exports():
 
     for name in _result.__all__:
         assert hasattr(_result, name), name
+
+
+# --------------------------------------------------------------------------- #
+# Block S1 — _error_from boundary helper + KentoError→ConditionKind mapping.
+#
+# Mutation-proven: each subclass→kind row, the MRO most-specific rule, the bare
+# fallback, message preservation, SubprocessError context, severity, and the
+# returned Result type each have a test that reddens if the guard is changed.
+# --------------------------------------------------------------------------- #
+
+from kento import _result  # noqa: E402
+from kento._result import _error_from  # noqa: E402
+from kento.errors import (  # noqa: E402
+    ImageNotFoundError,
+    InstanceExistsError,
+    InstanceNotFoundError,
+    KentoError,
+    ModeError,
+    StateError,
+    StopTimeout,
+    SubprocessError,
+    ValidationError,
+)
+
+
+@pytest.mark.parametrize(
+    "exc, kind",
+    [
+        (ValidationError("v"), ConditionKind.VALIDATION),
+        (InstanceNotFoundError("i"), ConditionKind.INSTANCE_NOT_FOUND),
+        (InstanceExistsError("i"), ConditionKind.INSTANCE_EXISTS),
+        (ImageNotFoundError("im"), ConditionKind.IMAGE_NOT_FOUND),
+        (ModeError("m"), ConditionKind.MODE_ERROR),
+        (StateError("s"), ConditionKind.INVALID_STATE),
+        (SubprocessError("p"), ConditionKind.SUBPROCESS_FAILED),
+    ],
+)
+def test_error_from_maps_each_subclass_to_its_kind(exc, kind):
+    err = _error_from(exc)
+    assert isinstance(err, Error)
+    (cond,) = err.conditions
+    assert cond.kind is kind
+
+
+def test_error_from_stop_timeout_is_most_specific():
+    # StopTimeout subclasses StateError; the MRO walk must pick STOP_TIMEOUT, not
+    # INVALID_STATE. Mutation: drop the StopTimeout map row and this reddens
+    # (it would fall through to its parent StateError → INVALID_STATE).
+    err = _error_from(StopTimeout("grace expired"))
+    (cond,) = err.conditions
+    assert cond.kind is ConditionKind.STOP_TIMEOUT
+    assert cond.kind is not ConditionKind.INVALID_STATE
+
+
+def test_error_from_bare_kentoerror_falls_back_to_internal():
+    err = _error_from(KentoError("unexpected"))
+    (cond,) = err.conditions
+    assert cond.kind is ConditionKind.INTERNAL
+
+
+def test_error_from_unmapped_future_subclass_falls_back_to_internal():
+    # A future KentoError subclass nobody added to the map still resolves — the
+    # KentoError base in the map makes the MRO walk total.
+    class FutureError(KentoError):
+        pass
+
+    err = _error_from(FutureError("new"))
+    (cond,) = err.conditions
+    assert cond.kind is ConditionKind.INTERNAL
+
+
+def test_error_from_preserves_message():
+    err = _error_from(SubprocessError("boom", returncode=3))
+    (cond,) = err.conditions
+    assert cond.message == "boom"
+
+
+def test_error_from_subprocess_context_carries_returncode_and_cmd():
+    err = _error_from(
+        SubprocessError("boom", cmd=["pct", "start"], returncode=3)
+    )
+    (cond,) = err.conditions
+    # S7 reads returncode for exit code 1-vs-2; guard it now.
+    assert cond.context["returncode"] == 3
+    assert cond.context["cmd"] == ["pct", "start"]
+
+
+def test_error_from_subprocess_context_keys_stable_when_none():
+    # Both keys present verbatim even when None — a stable key set for the
+    # consumer (returncode is None ⇒ tool-missing ⇒ CLI exit 2 in S7).
+    err = _error_from(SubprocessError("missing tool"))
+    (cond,) = err.conditions
+    assert cond.context["returncode"] is None
+    assert cond.context["cmd"] is None
+
+
+def test_error_from_non_subprocess_context_is_empty():
+    err = _error_from(ValidationError("bad name"))
+    (cond,) = err.conditions
+    assert dict(cond.context) == {}
+
+
+def test_error_from_severity_is_always_error():
+    for exc in (
+        ValidationError("v"),
+        StateError("s"),
+        StopTimeout("t"),
+        SubprocessError("p"),
+        KentoError("k"),
+    ):
+        err = _error_from(exc)
+        (cond,) = err.conditions
+        assert cond.severity is Severity.ERROR
+
+
+def test_error_from_returns_single_condition_error():
+    err = _error_from(ValidationError("x"))
+    assert isinstance(err, Error)
+    assert not err.is_ok()
+    assert err.is_error()
+    assert len(err.conditions) == 1
+
+
+def test_error_from_unwrap_reraises_same_text():
+    # The Error round-trips back through the panic bridge with the same message.
+    err = _error_from(ModeError("vm only"))
+    with pytest.raises(ResultError) as ei:
+        err.unwrap()
+    assert str(ei.value) == "vm only"
+
+
+def test_new_condition_kinds_reexported_via_kento():
+    import kento
+
+    for name in (
+        "VALIDATION",
+        "INSTANCE_NOT_FOUND",
+        "INSTANCE_EXISTS",
+        "IMAGE_NOT_FOUND",
+        "MODE_ERROR",
+        "INVALID_STATE",
+        "STOP_TIMEOUT",
+        "SUBPROCESS_FAILED",
+        "INTERNAL",
+    ):
+        assert hasattr(kento.ConditionKind, name), name
+
+
+def test_error_from_is_private_not_in_all():
+    # _error_from is a private boundary helper; it is not part of the public
+    # surface and must not be re-exported.
+    assert "_error_from" not in _result.__all__
