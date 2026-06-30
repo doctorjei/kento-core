@@ -60,7 +60,7 @@ def test_hold_is_frozen():
 
 def test_hold_pinned_accepts_ocireference():
     """The legacy tag-pin shape: ``pinned`` is an ``OciReference``."""
-    ref = OciReference.parse("docker.io/library/debian:12")
+    ref = OciReference.parse("docker.io/library/debian:12").unwrap()
     h = Hold(instance="box", pinned=ref)
     assert h.pinned == ref
 
@@ -118,7 +118,7 @@ def test_list_legacy_tag_image_is_ocireference():
     with h_p, i_p:
         holds = Hold.list()
     assert holds == [Hold(instance="box",
-                          pinned=OciReference.parse("docker.io/library/debian:12"))]
+                          pinned=OciReference.parse("docker.io/library/debian:12").unwrap())]
 
 
 def test_list_legacy_bare_hex_image_is_digest():
@@ -169,7 +169,7 @@ def test_list_mixed_modern_and_legacy():
         holds = Hold.list()
     assert holds == [
         Hold(instance="legacy",
-             pinned=OciReference.parse("docker.io/library/debian:12")),
+             pinned=OciReference.parse("docker.io/library/debian:12").unwrap()),
         Hold(instance="modern", pinned=Digest(algorithm="sha256", encoded=SHA)),
     ]
 
@@ -222,7 +222,7 @@ def test_instance_hold_legacy_reference(monkeypatch):
     hold = _inst_with_hold(monkeypatch, image_id="",
                           image="docker.io/library/debian:12")
     assert hold == Hold(instance="box",
-                        pinned=OciReference.parse("docker.io/library/debian:12"))
+                        pinned=OciReference.parse("docker.io/library/debian:12").unwrap())
 
 
 def test_instance_hold_legacy_bare_hex_digest(monkeypatch):

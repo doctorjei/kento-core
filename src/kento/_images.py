@@ -179,7 +179,9 @@ def _parse_legacy_pinned(image: str) -> Digest | OciReference:
     """
     if _RE_BARE_SHA256.match(image):
         return _digest_from_podman_id(image)
-    return OciReference.parse(image)
+    # parse now returns a Result; .unwrap() preserves today's raise-on-bad-input
+    # behavior exactly (an Error → ResultError, a KentoError) — Block P1.
+    return OciReference.parse(image).unwrap()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -561,7 +563,7 @@ class ImageRecord:
                 return Digest.parse(ref)
             except KentoError:
                 pass
-        return OciImage.resolve_id(OciReference.parse(ref).render())
+        return OciImage.resolve_id(OciReference.parse(ref).unwrap().render())
 
 
 # --------------------------------------------------------------------------- #
@@ -993,7 +995,9 @@ class OciImage(LayeredImage):
             if not entry or "<none>" in entry:
                 continue
             try:
-                oci = OciReference.parse(entry)
+                # .unwrap() preserves the skip-on-malformed behavior: an Error
+                # → ResultError (a KentoError), caught below (Block P1).
+                oci = OciReference.parse(entry).unwrap()
                 images.append(cls.resolve(oci))
             except KentoError as exc:
                 # Total over the store: one unresolvable entry is logged and
@@ -1248,7 +1252,7 @@ class OciImage(LayeredImage):
         """
         if isinstance(ref, OciReference):
             return ref
-        return OciReference.parse(ref)
+        return OciReference.parse(ref).unwrap()
 
     # ------------------------------------------------------------------- #
     # Runtime lifecycle (§4.4) — ADDITIVE wrappers over kento.layers/kento.vm.

@@ -6,19 +6,59 @@ bare-identifier rejection, password masking, normalize (§3.4), and
 parse->render round-trip identity. Worked fixtures from §3.6. Cross-checked
 against `distribution/reference`'s own conventions.
 
-Spec: ~/workspace/kento-core-api-design.md §3.
+Block P1 (Result pivot): the THREE public ``parse`` methods
+(``OciReference.parse``/``UrlReference.parse``/``SourceReference.parse``) now
+RETURN ``Result`` — valid input → ``Ok(ref)``, malformed → ``Error`` carrying a
+single ``MALFORMED_REFERENCE``/``ERROR`` condition (preserving the offending
+``value`` + failed ``production`` in ``context``). The INTERNAL validators
+(``Digest.parse``/``Endpoint`` invariants/``OciReference``/``UrlReference``
+construction) keep RAISING ``MalformedReference``. ``.unwrap()`` bridges an
+``Error`` back to a raise (``ResultError``, a ``KentoError``) with the preserved
+message. Value tests ``.unwrap()`` the ``Ok``; rejection tests assert the
+``Error`` shape via :func:`assert_malformed`.
+
+Spec: ~/workspace/kento-core-api-design.md §3 + §2 principle 5;
+~/playbook/plans/result-type-design.md.
 """
 
 import pytest
 
 from kento import (
+    Condition,
+    ConditionKind,
     Digest,
     Endpoint,
+    Error,
     MalformedReference,
+    Ok,
     OciReference,
+    ResultError,
+    Severity,
     SourceReference,
 )
 from kento.errors import KentoError
+
+
+def assert_malformed(result, *, value=None, production=None):
+    """Assert a parse ``Result`` is an ``Error`` with ONE
+    ``MALFORMED_REFERENCE``/``ERROR`` condition (Block P1 — the parse boundary).
+
+    Replaces the old ``pytest.raises(MalformedReference)`` around a public
+    ``parse`` call: malformed input is now a returned ``Error``, not a raise.
+    Optionally checks the preserved ``value``/``production`` in ``context``.
+    Returns the condition for callers that want to assert further.
+    """
+    assert isinstance(result, Error), f"expected Error, got {result!r}"
+    assert len(result.conditions) == 1
+    cond = result.conditions[0]
+    assert isinstance(cond, Condition)
+    assert cond.kind == ConditionKind.MALFORMED_REFERENCE
+    assert cond.severity == Severity.ERROR
+    if value is not None:
+        assert cond.context["value"] == value
+    if production is not None:
+        assert cond.context["production"] == production
+    return cond
 
 
 # --------------------------------------------------------------------------- #
@@ -45,7 +85,7 @@ WORKED = [
     ids=[w[0] for w in WORKED],
 )
 def test_worked_examples(s, host, port, path, name, version, digest_str):
-    ref = OciReference.parse(s)
+    ref = OciReference.parse(s).unwrap()
     if host is None:
         assert ref.endpoint is None
     else:
@@ -64,7 +104,7 @@ def test_worked_examples(s, host, port, path, name, version, digest_str):
 
 def test_normalize_worked_example():
     # `ubuntu` after normalize => docker.io / library / ubuntu / latest.
-    ref = OciReference.parse("ubuntu").normalize()
+    ref = OciReference.parse("ubuntu").unwrap().normalize()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "docker.io"
     assert ref.path == "library"
@@ -74,19 +114,101 @@ def test_normalize_worked_example():
 
 
 # --------------------------------------------------------------------------- #
+# Block P1 — parse returns Result (the panic→Result pivot, §2 principle 5).
+# --------------------------------------------------------------------------- #
+
+def test_oci_parse_valid_is_ok():
+    result = OciReference.parse("ubuntu:latest")
+    assert isinstance(result, Ok)
+    assert result.is_ok()
+    assert result.unwrap().name == "ubuntu"
+    assert result.conditions == ()       # clean success carries no caveats
+
+
+def test_oci_parse_malformed_is_error_with_condition():
+    result = OciReference.parse("ubuntu:")
+    assert_malformed(result, value="ubuntu:", production="tag")
+    assert result.is_error()
+    assert not result.is_ok()
+
+
+def test_oci_parse_error_unwrap_raises_resulterror_preserving_message():
+    # The unwrap bridge: an Error.unwrap() raises ResultError (a KentoError),
+    # message preserved from the original MalformedReference text.
+    raising = OciReference._parse  # the internal raising body
+    try:
+        raising("ubuntu:")
+    except MalformedReference as exc:
+        expected = str(exc)
+    result = OciReference.parse("ubuntu:")
+    with pytest.raises(ResultError) as caught:
+        result.unwrap()
+    assert str(caught.value) == expected
+    assert isinstance(caught.value, KentoError)   # the panic-channel base type
+
+
+def test_url_parse_error_unwrap_raises_resulterror():
+    result = UrlReference.parse("https://host/x?y=1")
+    assert isinstance(result, Error)
+    with pytest.raises(ResultError) as caught:
+        result.unwrap()
+    assert isinstance(caught.value, KentoError)
+
+
+def test_dispatcher_unknown_scheme_error_unwrap_raises():
+    result = SourceReference.parse("ftp://host/x")
+    assert_malformed(result, production="scheme")
+    with pytest.raises(ResultError):
+        result.unwrap()
+
+
+def test_oci_parse_construction_panic_propagates_not_converted(monkeypatch):
+    # Spec discipline (LOCKED #2): the boundary wraps ONLY parsing+validation;
+    # the final OciReference(...) construction is OUTSIDE the try, so a
+    # __post_init__ invariant breach (a bug) PANICS and is NOT converted to an
+    # input Error. Force a breach at construction and assert it propagates.
+    orig = OciReference.__post_init__
+
+    def boom(self):
+        raise MalformedReference("invariant breach", value="x",
+                                 production="name")
+
+    monkeypatch.setattr(OciReference, "__post_init__", boom)
+    # A perfectly VALID input string — the only raise is the forced construction
+    # breach, which must escape parse (not become an Error).
+    with pytest.raises(MalformedReference):
+        OciReference.parse("ubuntu:latest")
+
+
+def test_url_parse_construction_panic_propagates_not_converted(monkeypatch):
+    # Same discipline for UrlReference: the final construction is outside the
+    # boundary (the Endpoint built INSIDE _parse stays inside — it parses
+    # untrusted authority bytes). A forced UrlReference invariant breach panics.
+    from kento import UrlReference
+
+    def boom(self):
+        raise MalformedReference("invariant breach", value="x",
+                                 production="endpoint")
+
+    monkeypatch.setattr(UrlReference, "__post_init__", boom)
+    with pytest.raises(MalformedReference):
+        UrlReference.parse("https://host/x")
+
+
+# --------------------------------------------------------------------------- #
 # §3.3 endpoint disambiguation heuristic.
 # --------------------------------------------------------------------------- #
 
 def test_disambiguation_foo_bar_is_path_not_endpoint():
     # `foo/bar`: `foo` has no '.'/':'/uppercase and isn't localhost => path.
-    ref = OciReference.parse("foo/bar")
+    ref = OciReference.parse("foo/bar").unwrap()
     assert ref.endpoint is None
     assert ref.path == "foo"
     assert ref.name == "bar"
 
 
 def test_disambiguation_dotted_is_endpoint():
-    ref = OciReference.parse("foo.com/bar")
+    ref = OciReference.parse("foo.com/bar").unwrap()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "foo.com"
     assert ref.path == ""
@@ -94,7 +216,7 @@ def test_disambiguation_dotted_is_endpoint():
 
 
 def test_disambiguation_localhost_is_endpoint():
-    ref = OciReference.parse("localhost/bar")
+    ref = OciReference.parse("localhost/bar").unwrap()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "localhost"
     assert ref.path == ""
@@ -103,7 +225,7 @@ def test_disambiguation_localhost_is_endpoint():
 
 def test_disambiguation_uppercase_is_endpoint():
     # `Foo` has an uppercase letter => treated as a domain (endpoint).
-    ref = OciReference.parse("Foo/bar")
+    ref = OciReference.parse("Foo/bar").unwrap()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "Foo"
     assert ref.path == ""
@@ -111,7 +233,7 @@ def test_disambiguation_uppercase_is_endpoint():
 
 
 def test_disambiguation_port_colon_is_endpoint():
-    ref = OciReference.parse("myhost:5000/bar")
+    ref = OciReference.parse("myhost:5000/bar").unwrap()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "myhost"
     assert ref.endpoint.port == 5000
@@ -120,7 +242,7 @@ def test_disambiguation_port_colon_is_endpoint():
 
 def test_single_component_no_slash_is_name():
     # No '/', so the lone component is always the name (never an endpoint).
-    ref = OciReference.parse("ubuntu")
+    ref = OciReference.parse("ubuntu").unwrap()
     assert ref.endpoint is None
     assert ref.path == ""
     assert ref.name == "ubuntu"
@@ -131,14 +253,14 @@ def test_single_component_no_slash_is_name():
 # --------------------------------------------------------------------------- #
 
 def test_parse_applies_no_defaults():
-    ref = OciReference.parse("ubuntu")
+    ref = OciReference.parse("ubuntu").unwrap()
     assert ref.endpoint is None          # not docker.io
     assert ref.path == ""                # not library
     assert ref.version is None           # not latest
 
 
 def test_parse_then_normalize_is_separate_and_pure():
-    ref = OciReference.parse("ubuntu")
+    ref = OciReference.parse("ubuntu").unwrap()
     norm = ref.normalize()
     # original is unchanged (frozen / pure)
     assert ref.endpoint is None
@@ -155,7 +277,7 @@ def test_parse_then_normalize_is_separate_and_pure():
 
 def test_tag_and_digest_co_occur():
     s = "debian:12@sha256:" + "b" * 64
-    ref = OciReference.parse(s)
+    ref = OciReference.parse(s).unwrap()
     assert ref.name == "debian"
     assert ref.version == "12"
     assert ref.digest is not None
@@ -165,13 +287,14 @@ def test_tag_and_digest_co_occur():
 
 def test_digest_only_no_tag():
     s = "debian@sha256:" + "c" * 64
-    ref = OciReference.parse(s)
+    ref = OciReference.parse(s).unwrap()
     assert ref.version is None
     assert ref.digest is not None
 
 
 # --------------------------------------------------------------------------- #
-# Digest decomposition (§3.1).
+# Digest decomposition (§3.1). Digest.parse is an INTERNAL validator — it keeps
+# RAISING MalformedReference (Block P1: only the 3 public parse methods convert).
 # --------------------------------------------------------------------------- #
 
 def test_digest_decomposition():
@@ -217,6 +340,12 @@ def test_digest_rejects_bad_algorithm():
         Digest.parse("1bad:" + "a" * 64)
 
 
+# A bad digest reached THROUGH the public OciReference.parse boundary, by
+# contrast, surfaces as an Error (the boundary catches the validator's raise).
+def test_oci_parse_bad_digest_is_error():
+    assert_malformed(OciReference.parse("repo:tag@notadigest"))
+
+
 # --------------------------------------------------------------------------- #
 # 255-char total cap (§3.1).
 # --------------------------------------------------------------------------- #
@@ -224,21 +353,19 @@ def test_digest_rejects_bad_algorithm():
 def test_repo_name_at_cap_ok():
     # exactly 255 chars of remote-name is allowed.
     name = "a" * 255
-    ref = OciReference.parse(name)
+    ref = OciReference.parse(name).unwrap()
     assert ref.name == name
 
 
 def test_repo_name_over_cap_rejected():
-    with pytest.raises(MalformedReference):
-        OciReference.parse("a" * 256)
+    assert_malformed(OciReference.parse("a" * 256))
 
 
 def test_repo_name_cap_counts_domain():
     # domain + '/' + remote-name together must be <= 255.
     long_repo = "reg.example.com/" + "a" * 250
     assert len(long_repo) > 255
-    with pytest.raises(MalformedReference):
-        OciReference.parse(long_repo)
+    assert_malformed(OciReference.parse(long_repo))
 
 
 # --------------------------------------------------------------------------- #
@@ -247,20 +374,19 @@ def test_repo_name_cap_counts_domain():
 
 def test_bare_identifier_rejected_as_name():
     # a bare 64-hex [a-f0-9] string is an image ID, NOT a name.
-    with pytest.raises(MalformedReference):
-        OciReference.parse("a" * 64)
+    assert_malformed(OciReference.parse("a" * 64))
 
 
 def test_identifier_qualified_by_registry_is_ok():
     # qualified (has an endpoint), the 64-hex string is a legitimate name.
-    ref = OciReference.parse("localhost/" + "a" * 64)
+    ref = OciReference.parse("localhost/" + "a" * 64).unwrap()
     assert ref.name == "a" * 64
     assert ref.endpoint.host == "localhost"
 
 
 def test_63_hex_is_not_an_identifier():
     # only exactly 64 [a-f0-9] is the identifier short form.
-    ref = OciReference.parse("a" * 63)
+    ref = OciReference.parse("a" * 63).unwrap()
     assert ref.name == "a" * 63
 
 
@@ -269,12 +395,12 @@ def test_64_hex_with_uppercase_is_not_identifier():
     # short-ID form. But a single no-slash component is the NAME, and a
     # path-component is strictly [a-z0-9]+ (§3.1) — so an uppercase letter
     # makes it an invalid name, not a valid one.
-    with pytest.raises(MalformedReference):
-        OciReference.parse("A" + "a" * 63)
+    assert_malformed(OciReference.parse("A" + "a" * 63))
 
 
 # --------------------------------------------------------------------------- #
-# Invalid references — each production violated.
+# Invalid references — each production violated. Now returned as an Error
+# (Block P1), not raised.
 # --------------------------------------------------------------------------- #
 
 INVALID = [
@@ -293,18 +419,22 @@ INVALID = [
 
 
 @pytest.mark.parametrize("s", INVALID)
-def test_invalid_references_raise(s):
-    with pytest.raises(MalformedReference):
-        OciReference.parse(s)
+def test_invalid_references_return_error(s):
+    # The condition's context["value"] is whatever the inner validator that
+    # rejected the input recorded — for a digest/tag violation that is the
+    # offending SUBSTRING, not the full `s` (faithful to the pre-P1 raise). So
+    # we only assert the Error/kind shape here, not a specific value.
+    assert_malformed(OciReference.parse(s))
 
 
-def test_parse_non_string_raises():
-    with pytest.raises(MalformedReference):
-        OciReference.parse(None)  # type: ignore[arg-type]
+def test_parse_non_string_returns_error():
+    assert_malformed(OciReference.parse(None))  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
-# Component validators are total (raise, never None).
+# Component validators are total (raise, never None). Endpoint construction is
+# an INTERNAL invariant (__post_init__) — it keeps RAISING (Block P1: only the
+# 3 public parse methods convert to Result).
 # --------------------------------------------------------------------------- #
 
 def test_endpoint_rejects_negative_port():
@@ -377,12 +507,12 @@ ROUND_TRIP = [
 
 @pytest.mark.parametrize("s", ROUND_TRIP, ids=ROUND_TRIP)
 def test_round_trip_identity(s):
-    ref = OciReference.parse(s)
+    ref = OciReference.parse(s).unwrap()
     assert ref.render() == s
     # render is also __str__
     assert str(ref) == s
     # re-parsing the rendered form is stable
-    assert OciReference.parse(ref.render()) == ref
+    assert OciReference.parse(ref.render()).unwrap() == ref
 
 
 # --------------------------------------------------------------------------- #
@@ -390,7 +520,7 @@ def test_round_trip_identity(s):
 # --------------------------------------------------------------------------- #
 
 def test_ipv6_host_with_port():
-    ref = OciReference.parse("[2001:db8::1]:5000/app")
+    ref = OciReference.parse("[2001:db8::1]:5000/app").unwrap()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "[2001:db8::1]"
     assert ref.endpoint.port == 5000
@@ -398,7 +528,7 @@ def test_ipv6_host_with_port():
 
 
 def test_ipv6_host_no_port():
-    ref = OciReference.parse("[::1]/app")
+    ref = OciReference.parse("[::1]/app").unwrap()
     assert ref.endpoint is not None
     assert ref.endpoint.host == "[::1]"
     assert ref.endpoint.port is None
@@ -409,25 +539,28 @@ def test_ipv6_host_no_port():
 # --------------------------------------------------------------------------- #
 
 def test_normalize_default_domain():
-    assert OciReference.parse("foo/bar").normalize().endpoint.host == "docker.io"
+    assert OciReference.parse("foo/bar").unwrap().normalize().endpoint.host \
+        == "docker.io"
 
 
 def test_normalize_library_prefix():
-    norm = OciReference.parse("ubuntu").normalize()
+    norm = OciReference.parse("ubuntu").unwrap().normalize()
     assert norm.path == "library"
 
 
 def test_normalize_no_library_prefix_when_namespaced():
-    norm = OciReference.parse("myorg/app").normalize()
+    norm = OciReference.parse("myorg/app").unwrap().normalize()
     assert norm.path == "myorg"          # already namespaced, no library prefix
 
 
 def test_normalize_default_tag_latest():
-    assert OciReference.parse("foo/bar").normalize().version == "latest"
+    assert OciReference.parse("foo/bar").unwrap().normalize().version \
+        == "latest"
 
 
 def test_normalize_legacy_index_docker_io():
-    norm = OciReference.parse("index.docker.io/library/ubuntu").normalize()
+    norm = OciReference.parse("index.docker.io/library/ubuntu") \
+        .unwrap().normalize()
     assert norm.endpoint.host == "docker.io"
 
 
@@ -435,35 +568,34 @@ def test_parse_rejects_uppercase_path_component():
     # §3.1 path-component is [a-z0-9]+ — strict parse rejects uppercase, so
     # the Docker "lowercase repo" normalize step is unreachable (no-op) and
     # is documented as omitted in normalize().
-    with pytest.raises(MalformedReference):
-        OciReference.parse("docker.io/Library/Ubuntu")
+    assert_malformed(OciReference.parse("docker.io/Library/Ubuntu"))
 
 
 def test_normalize_preserves_digest():
-    norm = OciReference.parse("ubuntu@sha256:" + "a" * 64).normalize()
+    norm = OciReference.parse("ubuntu@sha256:" + "a" * 64).unwrap().normalize()
     assert norm.digest is not None
     assert norm.version == "latest"      # still gets default tag
 
 
 def test_normalize_idempotent():
-    once = OciReference.parse("ubuntu").normalize()
+    once = OciReference.parse("ubuntu").unwrap().normalize()
     twice = once.normalize()
     assert once == twice
 
 
 # --------------------------------------------------------------------------- #
-# SourceReference base — scheme dispatch (§3.8).
+# SourceReference base — scheme dispatch (§3.8). Dispatch returns Result.
 # --------------------------------------------------------------------------- #
 
 def test_dispatch_schemeless_routes_to_oci():
-    ref = SourceReference.parse("ubuntu:latest")
+    ref = SourceReference.parse("ubuntu:latest").unwrap()
     assert isinstance(ref, OciReference)
     assert ref.scheme == "oci"
     assert ref.name == "ubuntu"
 
 
 def test_dispatch_oci_scheme_routes_to_oci():
-    ref = SourceReference.parse("oci://docker.io/library/debian:12")
+    ref = SourceReference.parse("oci://docker.io/library/debian:12").unwrap()
     assert isinstance(ref, OciReference)
     assert ref.endpoint.host == "docker.io"
     assert ref.name == "debian"
@@ -472,20 +604,22 @@ def test_dispatch_oci_scheme_routes_to_oci():
 def test_dispatch_http_routes_to_urlreference():
     # Block B1 flipped this branch: http(s) now parses, no longer raises.
     from kento import UrlReference
-    assert isinstance(SourceReference.parse("http://example.com/x"),
+    assert isinstance(SourceReference.parse("http://example.com/x").unwrap(),
                       UrlReference)
-    assert isinstance(SourceReference.parse("https://example.com/x"),
+    assert isinstance(SourceReference.parse("https://example.com/x").unwrap(),
                       UrlReference)
 
 
 def test_dispatch_file_not_yet_implemented():
+    # NotImplementedError is a PANIC (unbuilt feature ≠ malformed input) — it is
+    # raised, NOT returned as an Error (Block P1, LOCKED decision 5).
     with pytest.raises(NotImplementedError):
         SourceReference.parse("file:///path/to/thing")
 
 
 def test_oci_colon_is_tag_not_scheme():
     # `foo:bar` is a name:tag, NOT a scheme — only `<scheme>://` is a scheme.
-    ref = SourceReference.parse("foo:bar")
+    ref = SourceReference.parse("foo:bar").unwrap()
     assert isinstance(ref, OciReference)
     assert ref.name == "foo"
     assert ref.version == "bar"
@@ -496,17 +630,17 @@ def test_oci_colon_is_tag_not_scheme():
 # --------------------------------------------------------------------------- #
 
 def test_pathname_with_namespace():
-    ref = OciReference.parse("docker.io/library/debian:12")
+    ref = OciReference.parse("docker.io/library/debian:12").unwrap()
     assert ref.pathname == "library/debian"
 
 
 def test_pathname_no_namespace():
-    ref = OciReference.parse("localhost/foo")
+    ref = OciReference.parse("localhost/foo").unwrap()
     assert ref.pathname == "foo"
 
 
 def test_pathname_bare_name():
-    ref = OciReference.parse("ubuntu")
+    ref = OciReference.parse("ubuntu").unwrap()
     assert ref.pathname == "ubuntu"
 
 
@@ -519,28 +653,33 @@ def test_malformed_reference_is_kento_error():
 
 
 def test_malformed_reference_carries_value_and_production():
-    with pytest.raises(MalformedReference) as exc:
-        OciReference.parse("ubuntu:")
-    assert exc.value.value == "ubuntu:"
-    assert exc.value.production is not None
+    # The boundary preserves the offending value + failed production in the
+    # Error condition's context (Block P1 — the structured/--json edge).
+    cond = assert_malformed(OciReference.parse("ubuntu:"))
+    assert cond.context["value"] == "ubuntu:"
+    assert cond.context["production"] is not None
 
 
 def test_reference_is_frozen():
-    ref = OciReference.parse("ubuntu")
+    ref = OciReference.parse("ubuntu").unwrap()
     with pytest.raises(Exception):
         ref.name = "changed"  # type: ignore[misc]
 
 
 def test_references_value_equality():
-    assert OciReference.parse("ubuntu:1") == OciReference.parse("ubuntu:1")
-    assert OciReference.parse("ubuntu:1") != OciReference.parse("ubuntu:2")
+    assert OciReference.parse("ubuntu:1").unwrap() \
+        == OciReference.parse("ubuntu:1").unwrap()
+    assert OciReference.parse("ubuntu:1").unwrap() \
+        != OciReference.parse("ubuntu:2").unwrap()
 
 
 # --------------------------------------------------------------------------- #
 # Construction is CLOSED under the grammar (gate C — Finding 1).
 # Direct construction / replace() must not yield a ref whose render() parse()
 # would reject. __post_init__ enforces the SAME `name`-production checks parse
-# does: components, the 255 cap, AND the bare-identifier rejection.
+# does: components, the 255 cap, AND the bare-identifier rejection. Construction
+# is an INTERNAL invariant — it keeps RAISING (Block P1: a __post_init__ breach
+# is a bug/panic, NOT a returned Error).
 # --------------------------------------------------------------------------- #
 
 def test_construct_rejects_bare_identifier_leaf():
@@ -590,7 +729,7 @@ def test_construct_allows_qualified_64hex_leaf():
 
 def test_replace_cannot_smuggle_invalid_ref():
     from dataclasses import replace
-    ref = OciReference.parse("localhost/foo")
+    ref = OciReference.parse("localhost/foo").unwrap()
     # turning it into an unqualified bare-identifier must raise
     with pytest.raises(MalformedReference):
         replace(ref, endpoint=None, name="a" * 64)
@@ -599,13 +738,13 @@ def test_replace_cannot_smuggle_invalid_ref():
 def test_construction_closed_under_grammar_via_round_trip():
     # Any OciReference that constructs must re-parse from its own render().
     refs = [
-        OciReference.parse("ubuntu"),
-        OciReference.parse("docker.io/library/debian:12"),
-        OciReference.parse("localhost/" + "a" * 64),
-        OciReference.parse("reg.example.com:5000/team/proj/app:1.2"),
+        OciReference.parse("ubuntu").unwrap(),
+        OciReference.parse("docker.io/library/debian:12").unwrap(),
+        OciReference.parse("localhost/" + "a" * 64).unwrap(),
+        OciReference.parse("reg.example.com:5000/team/proj/app:1.2").unwrap(),
     ]
     for ref in refs:
-        assert OciReference.parse(ref.render()) == ref
+        assert OciReference.parse(ref.render()).unwrap() == ref
 
 
 # =========================================================================== #
@@ -620,7 +759,7 @@ from kento import UrlReference  # noqa: E402  (grouped with the block's tests)
 # --------------------------------------------------------------------------- #
 
 def test_url_parse_basic_https_no_version():
-    ref = UrlReference.parse("https://host/path/to/rootfs.txz")
+    ref = UrlReference.parse("https://host/path/to/rootfs.txz").unwrap()
     assert isinstance(ref, UrlReference)
     assert ref.scheme == "https"
     assert ref.secure is True
@@ -632,20 +771,26 @@ def test_url_parse_basic_https_no_version():
     assert ref.pathname == "path/to/rootfs.txz"
 
 
+def test_url_parse_valid_is_ok():
+    result = UrlReference.parse("https://host/x")
+    assert isinstance(result, Ok)
+    assert result.conditions == ()
+
+
 def test_url_parse_http_scheme_captured():
-    ref = UrlReference.parse("http://host/x")
+    ref = UrlReference.parse("http://host/x").unwrap()
     assert ref.scheme == "http"
     assert ref.secure is False
 
 
 def test_url_parse_with_version_suffix():
-    ref = UrlReference.parse("https://host/path/rootfs+1.2")
+    ref = UrlReference.parse("https://host/path/rootfs+1.2").unwrap()
     assert ref.name == "rootfs"
     assert ref.version == "1.2"
 
 
 def test_url_parse_userinfo_password_held_but_masked_on_render():
-    ref = UrlReference.parse("https://u:p@host:8443/x")
+    ref = UrlReference.parse("https://u:p@host:8443/x").unwrap()
     assert ref.endpoint.username == "u"
     assert ref.endpoint.password == "p"        # held faithfully
     assert ref.endpoint.port == 8443
@@ -654,33 +799,35 @@ def test_url_parse_userinfo_password_held_but_masked_on_render():
 
 
 def test_url_parse_userinfo_username_only():
-    ref = UrlReference.parse("https://user@host/x")
+    ref = UrlReference.parse("https://user@host/x").unwrap()
     assert ref.endpoint.username == "user"
     assert ref.endpoint.password is None
     assert ref.render() == "https://user@host/x"
 
 
 def test_url_parse_ipv4_host():
-    ref = UrlReference.parse("https://192.168.0.1:9000/img/rootfs")
+    ref = UrlReference.parse("https://192.168.0.1:9000/img/rootfs").unwrap()
     assert ref.endpoint.host == "192.168.0.1"
     assert ref.endpoint.port == 9000
 
 
 def test_url_parse_bracketed_ipv6_host():
-    ref = UrlReference.parse("http://[2001:db8::1]:8080/x/kernel")
+    ref = UrlReference.parse("http://[2001:db8::1]:8080/x/kernel").unwrap()
     assert ref.endpoint.host == "[2001:db8::1]"
     assert ref.endpoint.port == 8080
     # brackets survive a render round-trip
-    assert UrlReference.parse(ref.render()).endpoint.host == "[2001:db8::1]"
+    assert UrlReference.parse(ref.render()).unwrap().endpoint.host \
+        == "[2001:db8::1]"
 
 
 def test_url_parse_port_present_and_absent():
-    assert UrlReference.parse("https://host:8443/x").endpoint.port == 8443
-    assert UrlReference.parse("https://host/x").endpoint.port is None
+    assert UrlReference.parse("https://host:8443/x").unwrap().endpoint.port \
+        == 8443
+    assert UrlReference.parse("https://host/x").unwrap().endpoint.port is None
 
 
 def test_url_parse_no_path_yields_empty_name_and_path():
-    ref = UrlReference.parse("https://host")
+    ref = UrlReference.parse("https://host").unwrap()
     assert ref.name == ""
     assert ref.path == ""
     assert ref.endpoint.host == "host"
@@ -692,12 +839,13 @@ def test_url_parse_no_path_yields_empty_name_and_path():
 
 def test_url_parse_rejects_missing_host():
     # mutation guard: removing the no-host check in _parse_authority reddens.
-    with pytest.raises(MalformedReference):
-        UrlReference.parse("https:///path/to/rootfs")
+    # Through the public parse boundary this is now a returned Error.
+    assert_malformed(UrlReference.parse("https:///path/to/rootfs"))
 
 
 def test_url_construct_rejects_none_endpoint():
     # mutation guard: removing the endpoint-None check in __post_init__ reddens.
+    # Construction is an internal invariant — it RAISES (not a returned Error).
     with pytest.raises(MalformedReference):
         UrlReference(endpoint=None, path="", name="rootfs", version=None,
                      secure=True)
@@ -705,7 +853,7 @@ def test_url_construct_rejects_none_endpoint():
 
 def test_url_replace_cannot_drop_endpoint():
     from dataclasses import replace
-    ref = UrlReference.parse("https://host/x")
+    ref = UrlReference.parse("https://host/x").unwrap()
     with pytest.raises(MalformedReference):
         replace(ref, endpoint=None)
 
@@ -715,21 +863,20 @@ def test_url_replace_cannot_drop_endpoint():
 # --------------------------------------------------------------------------- #
 
 def test_url_version_splits_on_last_plus():
-    ref = UrlReference.parse("https://host/a+b+1.2")
+    ref = UrlReference.parse("https://host/a+b+1.2").unwrap()
     assert ref.name == "a+b"
     assert ref.version == "1.2"
 
 
 def test_url_version_absent_without_plus():
-    ref = UrlReference.parse("https://host/rootfs.txz")
+    ref = UrlReference.parse("https://host/rootfs.txz").unwrap()
     assert ref.version is None
 
 
 def test_url_trailing_plus_is_malformed():
     # mutation guard: dropping the empty-label check in _split_name_version
-    # would record version="" instead of raising.
-    with pytest.raises(MalformedReference):
-        UrlReference.parse("https://host/rootfs+")
+    # would record version="" instead of producing an Error.
+    assert_malformed(UrlReference.parse("https://host/rootfs+"))
 
 
 # --------------------------------------------------------------------------- #
@@ -737,25 +884,25 @@ def test_url_trailing_plus_is_malformed():
 # --------------------------------------------------------------------------- #
 
 def test_url_normalize_drops_default_https_port():
-    ref = UrlReference.parse("https://host:443/x").normalize()
+    ref = UrlReference.parse("https://host:443/x").unwrap().normalize()
     assert ref.endpoint.port is None
 
 
 def test_url_normalize_drops_default_http_port():
-    ref = UrlReference.parse("http://host:80/x").normalize()
+    ref = UrlReference.parse("http://host:80/x").unwrap().normalize()
     assert ref.endpoint.port is None
 
 
 def test_url_normalize_keeps_non_default_port():
-    ref = UrlReference.parse("https://host:8443/x").normalize()
+    ref = UrlReference.parse("https://host:8443/x").unwrap().normalize()
     assert ref.endpoint.port == 8443
     # an http URL on :443 is NOT the default for http, so it survives
-    ref2 = UrlReference.parse("http://host:443/x").normalize()
+    ref2 = UrlReference.parse("http://host:443/x").unwrap().normalize()
     assert ref2.endpoint.port == 443
 
 
 def test_url_normalize_lowercases_scheme_and_host_not_userinfo():
-    ref = UrlReference.parse("https://User:Pass@HOST/x").normalize()
+    ref = UrlReference.parse("https://User:Pass@HOST/x").unwrap().normalize()
     assert ref.endpoint.host == "host"
     assert ref.scheme == "https"
     # userinfo is preserved verbatim (NOT lowercased)
@@ -769,7 +916,7 @@ def test_url_normalize_lowercases_constructed_uppercase_host():
     # host. validate_host permits uppercase, so this path is reachable — and
     # removing the `.lower()` in normalize() must redden THIS test.
     from dataclasses import replace
-    ref = UrlReference.parse("https://host/a/rootfs")
+    ref = UrlReference.parse("https://host/a/rootfs").unwrap()
     upper = replace(ref, endpoint=Endpoint(host="HOST", port=8443))
     assert upper.endpoint.host == "HOST"           # construction keeps it
     assert upper.normalize().endpoint.host == "host"
@@ -779,7 +926,7 @@ def test_url_normalize_uppercases_percent_encoding_hex():
     # RFC-3986 §6.2.2.1: percent-encoding hex is case-insensitive; canonical
     # form is UPPER-case. mutation guard: dropping _normalize_pct_encoding
     # leaves `%2f` verbatim and reddens this.
-    ref = UrlReference.parse("https://host/a%2fb/root%5ffs").normalize()
+    ref = UrlReference.parse("https://host/a%2fb/root%5ffs").unwrap().normalize()
     assert "%2F" in ref.pathname
     assert "%5F" in ref.pathname
     assert "%2f" not in ref.pathname
@@ -788,21 +935,22 @@ def test_url_normalize_uppercases_percent_encoding_hex():
 
 
 def test_url_normalize_collapses_dot_dotdot_and_double_slash():
-    ref = UrlReference.parse("https://host/a//b/../rootfs.txz").normalize()
+    ref = UrlReference.parse("https://host/a//b/../rootfs.txz") \
+        .unwrap().normalize()
     assert ref.path == "a"
     assert ref.name == "rootfs.txz"
     assert ref.pathname == "a/rootfs.txz"
 
 
 def test_url_normalize_is_idempotent():
-    ref = UrlReference.parse("HTTPS://Host:443/a/./b/../rootfs+1.0")
+    ref = UrlReference.parse("HTTPS://Host:443/a/./b/../rootfs+1.0").unwrap()
     once = ref.normalize()
     assert once.normalize() == once
 
 
 def test_url_normalize_dotdot_cannot_escape_root():
     # Lexical resolution must not climb above the root.
-    ref = UrlReference.parse("https://host/../../rootfs").normalize()
+    ref = UrlReference.parse("https://host/../../rootfs").unwrap().normalize()
     assert ".." not in ref.pathname
     assert ref.name == "rootfs"
 
@@ -812,14 +960,15 @@ def test_url_normalize_dotdot_cannot_escape_root():
 # --------------------------------------------------------------------------- #
 
 def test_url_render_form():
-    ref = UrlReference.parse("https://host/path/rootfs+2.0")
+    ref = UrlReference.parse("https://host/path/rootfs+2.0").unwrap()
     assert ref.render() == "https://host/path/rootfs+2.0"
     assert str(ref) == ref.render()
 
 
 def test_url_render_round_trips_through_parse_normalized():
-    x = UrlReference.parse("https://u:p@host:8443/a/b/rootfs+1.0").normalize()
-    y = SourceReference.parse(x.render())
+    x = UrlReference.parse("https://u:p@host:8443/a/b/rootfs+1.0") \
+        .unwrap().normalize()
+    y = SourceReference.parse(x.render()).unwrap()
     assert isinstance(y, UrlReference)
     assert y.scheme == x.scheme
     assert y.endpoint.host == x.endpoint.host
@@ -837,18 +986,20 @@ def test_url_render_round_trips_through_parse_normalized():
 # --------------------------------------------------------------------------- #
 
 def test_dispatch_https_returns_urlreference():
-    ref = SourceReference.parse("https://host/path/rootfs.txz")
+    ref = SourceReference.parse("https://host/path/rootfs.txz").unwrap()
     assert isinstance(ref, UrlReference)
     assert ref.scheme == "https"
 
 
 def test_dispatch_http_returns_urlreference():
-    assert isinstance(SourceReference.parse("http://host/x"), UrlReference)
+    assert isinstance(SourceReference.parse("http://host/x").unwrap(),
+                      UrlReference)
 
 
 def test_dispatch_oci_and_bare_still_oci():
-    assert isinstance(SourceReference.parse("oci://ubuntu"), OciReference)
-    assert isinstance(SourceReference.parse("ubuntu"), OciReference)
+    assert isinstance(SourceReference.parse("oci://ubuntu").unwrap(),
+                      OciReference)
+    assert isinstance(SourceReference.parse("ubuntu").unwrap(), OciReference)
 
 
 def test_dispatch_file_still_not_implemented():
@@ -857,8 +1008,9 @@ def test_dispatch_file_still_not_implemented():
 
 
 def test_dispatch_unknown_scheme_still_malformed():
-    with pytest.raises(MalformedReference):
-        SourceReference.parse("ftp://host/x")
+    # unknown scheme is malformed input → a returned Error (Block P1).
+    assert_malformed(SourceReference.parse("ftp://host/x"),
+                     value="ftp://host/x", production="scheme")
 
 
 # --------------------------------------------------------------------------- #
@@ -866,25 +1018,21 @@ def test_dispatch_unknown_scheme_still_malformed():
 # --------------------------------------------------------------------------- #
 
 def test_url_rejects_query_string():
-    with pytest.raises(MalformedReference):
-        UrlReference.parse("https://host/x?y=1")
+    assert_malformed(UrlReference.parse("https://host/x?y=1"))
 
 
 def test_url_rejects_fragment():
-    with pytest.raises(MalformedReference):
-        UrlReference.parse("https://host/x#frag")
+    assert_malformed(UrlReference.parse("https://host/x#frag"))
 
 
 def test_url_parse_rejects_empty_string():
-    with pytest.raises(MalformedReference):
-        UrlReference.parse("")
+    assert_malformed(UrlReference.parse(""))
 
 
 def test_url_parse_rejects_non_http_scheme_defensively():
     # Calling UrlReference.parse directly with a non-http(s) scheme is rejected
     # (defence in depth — the dispatch should never route it here).
-    with pytest.raises(MalformedReference):
-        UrlReference.parse("oci://ubuntu")
+    assert_malformed(UrlReference.parse("oci://ubuntu"))
 
 
 # --------------------------------------------------------------------------- #
@@ -901,12 +1049,12 @@ def test_url_construction_closed_under_grammar_via_round_trip():
     # Any UrlReference that constructs must re-parse from its own render()
     # (password is the documented exception; compare the masked rendering).
     refs = [
-        UrlReference.parse("https://host/path/to/rootfs.txz"),
-        UrlReference.parse("http://host:8080/x/kernel+1.0"),
-        UrlReference.parse("https://[2001:db8::1]/img/rootfs"),
+        UrlReference.parse("https://host/path/to/rootfs.txz").unwrap(),
+        UrlReference.parse("http://host:8080/x/kernel+1.0").unwrap(),
+        UrlReference.parse("https://[2001:db8::1]/img/rootfs").unwrap(),
     ]
     for ref in refs:
-        reparsed = UrlReference.parse(ref.render())
+        reparsed = UrlReference.parse(ref.render()).unwrap()
         assert reparsed.endpoint.host == ref.endpoint.host
         assert reparsed.path == ref.path
         assert reparsed.name == ref.name

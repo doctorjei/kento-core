@@ -114,7 +114,7 @@ def test_snapshot_lxc_minimal(tmp_path):
     assert inst.name == "mybox"
     # hostname fallback = name (no hostname key written; † back-fill is Phase 6)
     assert inst.hostname == "mybox"
-    assert inst.sources == (OciReference.parse("droste-hair:latest"),)
+    assert inst.sources == (OciReference.parse("droste-hair:latest").unwrap(),)
     assert inst.directory == d  # observed identity (§11.0); == the snapshot's dir
     assert inst.storage is StorageMode.OVERLAY
     assert inst.status is Status.RUNNING
@@ -2100,7 +2100,7 @@ def test_create_mid_matching_platform_ok(tmp_path):
 
 
 def test_create_image_ocireference(tmp_path):
-    ref = OciReference.parse("registry.example.com/foo/bar:1.2")
+    ref = OciReference.parse("registry.example.com/foo/bar:1.2").unwrap()
     with patch("kento.create.create") as mock_create, \
             patch.object(SystemContainer, "get", return_value=object()):
         SystemContainer.create("box", ref)
@@ -2801,7 +2801,7 @@ def _fake_oci_image():
     from kento._images import OciImage, Layer
     from kento._references import Digest
     return OciImage(
-        source=OciReference.parse("droste-hair:latest"),
+        source=OciReference.parse("droste-hair:latest").unwrap(),
         id=Digest(algorithm="sha256", encoded="a" * 64),
         layers=(Layer(id="x", short_link=""),),
         overlay_root=Path("/store"),
@@ -2815,7 +2815,7 @@ def test_image_no_override_both_none(tmp_path):
         inst = _instances._load_snapshot(d, "vm")
     with patch("kento._images.OciImage.resolve", return_value=base) as mres:
         img = inst.image()
-    mres.assert_called_once_with(OciReference.parse("droste-hair:latest"))
+    mres.assert_called_once_with(OciReference.parse("droste-hair:latest").unwrap())
     assert img.kernel is None
     assert img.initramfs is None
     # No override -> the resolved image is returned unmodified (same object).
@@ -2846,7 +2846,7 @@ def test_image_echoes_both_overrides(tmp_path):
     assert img.kernel == kcopy
     assert img.initramfs == icopy
     # The base resolved fields are untouched (replace only sets the override).
-    assert img.source == OciReference.parse("droste-hair:latest")
+    assert img.source == OciReference.parse("droste-hair:latest").unwrap()
 
 
 def test_image_initramfs_only_override(tmp_path):

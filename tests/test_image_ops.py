@@ -18,17 +18,16 @@ import pytest
 from kento import (
     ImageNotFoundError,
     OciImage,
-    MalformedReference,
     OciReference,
 )
-from kento.errors import StateError, SubprocessError
+from kento.errors import KentoError, StateError, SubprocessError
 
 SHA = "a" * 64
 DIGEST_STR = f"sha256:{SHA}"
 
 
 def _ref(s="docker.io/library/ubuntu:latest"):
-    return OciReference.parse(s)
+    return OciReference.parse(s).unwrap()
 
 
 def _ok(args):
@@ -84,8 +83,12 @@ def test_pull_accepts_str_and_parses_before_shelling_out():
 
 
 def test_pull_malformed_str_raises_before_any_podman_call():
+    # Block P1: parse returns a Result; pull's `_coerce_ref` .unwrap()s it, so a
+    # malformed ref now raises ResultError (a KentoError) instead of
+    # MalformedReference directly. Behavior-preserving: still a KentoError, still
+    # before any podman call. Assert the base type (robust to the type change).
     with patch("kento.subprocess_util.subprocess.run") as m_run:
-        with pytest.raises(MalformedReference):
+        with pytest.raises(KentoError):
             OciImage.pull("UPPER/case@bad")  # invalid ref grammar
     m_run.assert_not_called()  # never reached the shell
 

@@ -64,9 +64,10 @@ check("flat surface present", lambda: (
 # --------------------------------------------------------------------------- #
 section("B. pure value types (as a consumer would call them)")
 check("OciReference.parse + render round-trip", lambda: (
-    kento.OciReference.parse("ghcr.io/doctorjei/droste-hair:latest").render()))
+    kento.OciReference.parse(
+        "ghcr.io/doctorjei/droste-hair:latest").unwrap().render()))
 check("OciReference.normalize (docker-conv)", lambda: (
-    kento.OciReference.parse("busybox").normalize().render()))
+    kento.OciReference.parse("busybox").unwrap().normalize().render()))
 check("Digest.parse", lambda: kento.Digest.parse(
     "sha256:" + "a" * 64).render()[:14] + "…")
 check("parse_forward_spec (ssh/docker grammar)", lambda: str(

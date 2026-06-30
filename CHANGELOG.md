@@ -55,6 +55,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Image.initramfs` from the persisted override so `info` can report the
     override source; an image with no override resolves with both `None`.
 
+### Changed
+
+- **`parse` returns `Result` (§2 principle 5 — the panic-vs-`Result` pivot,
+  Block P1).** The three public source-reference parsers — `OciReference.parse`,
+  `UrlReference.parse`, and the `SourceReference.parse` dispatcher — now **return
+  `Result[…Reference]`** instead of raising `MalformedReference`: valid input →
+  `Ok(ref)`, malformed input → `Error` carrying one `Condition` with
+  `kind=MALFORMED_REFERENCE`, `severity=ERROR`, the original message, and the
+  offending `value` + failed `production` in `context`. Malformed input is a
+  *predictable* outcome a caller is expected to handle, so it is now a returned
+  value, not a thrown exception. The internal validators (`Digest.parse`,
+  `validate_tag`, the name/host/port productions, `Endpoint`/`OciReference`/
+  `UrlReference` `__post_init__`) are **unchanged** — they still raise
+  `MalformedReference`; each public `parse` is the boundary that catches it and
+  converts. `file://` (unbuilt) still raises `NotImplementedError` and a
+  `__post_init__` invariant breach still panics — not-implemented and
+  constructed-garbage are not malformed *input*. `Result.unwrap()` bridges an
+  `Error` back to a raise (`ResultError`, a `KentoError`) with the original
+  message preserved, so existing `except KentoError` handlers behave exactly as
+  before. **Behavior-preserving** for all in-library callers (they `.unwrap()`).
+
 ## [1.6.3.dev0] - 2026-06-30
 
 > **Synced dev line.** kento-core and kento (CLI) now share a single version,

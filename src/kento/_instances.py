@@ -2822,7 +2822,7 @@ def _load_sources(container_dir: Path) -> tuple[SourceReference, ...]:
     image = _read_meta(container_dir, "kento-image")
     if not image:
         return ()
-    return (OciReference.parse(image),)
+    return (OciReference.parse(image).unwrap(),)
 
 
 def _load_storage(container_dir: Path) -> StorageMode:

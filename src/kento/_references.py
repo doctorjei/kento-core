@@ -24,6 +24,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
 from kento.errors import KentoError
+from kento._result import (
+    Condition,
+    ConditionKind,
+    Error,
+    Ok,
+    Result,
+    Severity,
+)
 
 __all__ = [
     "MalformedReference",
@@ -52,6 +60,29 @@ class MalformedReference(KentoError):
         else:
             full = f"malformed reference: {message}: {value!r}"
         super().__init__(full)
+
+
+def _malformed_error(exc: MalformedReference) -> Error:
+    """Convert a caught ``MalformedReference`` to a boundary ``Error`` (§2 pr.5).
+
+    The single parse-boundary crossing from the panic channel to the ``Result``
+    channel (result-type-design §4/§5): the internal validators keep *raising*
+    ``MalformedReference``, and each public ``parse`` catches it here and maps it
+    to an ``Error`` carrying one ``MALFORMED_REFERENCE`` condition. The original
+    message is preserved verbatim (so ``unwrap()`` re-raises the same text), and
+    the offending ``value`` + failed ``production`` ride in ``context`` for the
+    structured/``--json`` edge.
+    """
+    return Error(
+        conditions=(
+            Condition(
+                severity=Severity.ERROR,
+                kind=ConditionKind.MALFORMED_REFERENCE,
+                message=str(exc),
+                context={"value": exc.value, "production": exc.production},
+            ),
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -307,15 +338,20 @@ class SourceReference(ABC):
 
     # ----- parse: dispatch by scheme (§3.8) -----
     @staticmethod
-    def parse(s: str) -> "SourceReference":
-        """Parse a locator string, dispatching by scheme (§3.8).
+    def parse(s: str) -> Result["SourceReference"]:
+        """Parse a locator string, dispatching by scheme (§3.8). Returns ``Result``.
 
         Scheme-less or ``oci://`` routes to :meth:`OciReference.parse`
         (a bare ``droste-hair:latest`` is equivalent to ``oci://…``,
         back-compat). ``http(s)://`` routes to :meth:`UrlReference.parse`
-        (which owns the scheme, so it receives the FULL ``s``). ``file://`` is
-        a FUTURE block — it raises a clear "not yet implemented" error rather
-        than being silently dropped.
+        (which owns the scheme, so it receives the FULL ``s``). Both members now
+        return a ``Result``, so the dispatcher returns the member's result
+        directly (an ``Ok`` member result IS-A ``Ok[SourceReference]``).
+
+        Malformed input is a PREDICTABLE failure → ``Error`` (§2 principle 5): an
+        unknown scheme returns ``Error(MALFORMED_REFERENCE)``. ``file://`` is an
+        UNBUILT feature, not malformed input → it stays a PANIC
+        (``NotImplementedError``); not-implemented ≠ malformed.
         """
         scheme, rest = _split_scheme(s)
         if scheme is None or scheme == "oci":
@@ -327,9 +363,11 @@ class SourceReference(ABC):
                 f"file:// source references (FileReference) are not yet "
                 f"implemented: {s!r}"
             )
-        raise MalformedReference(
-            f"unknown source-reference scheme {scheme!r}", value=s,
-            production="scheme",
+        return _malformed_error(
+            MalformedReference(
+                f"unknown source-reference scheme {scheme!r}", value=s,
+                production="scheme",
+            )
         )
 
     # ----- render / normalize: per-subclass -----
@@ -413,12 +451,46 @@ class OciReference(SourceReference):
     # Parse — faithful, no defaults, with the disambiguation heuristic.
     # ------------------------------------------------------------------- #
     @staticmethod
-    def parse(s: str) -> "OciReference":
-        """Parse an OCI reference faithfully (§3.3). Total; raises on violation.
+    def parse(s: str) -> Result["OciReference"]:
+        """Parse an OCI reference faithfully (§3.3). Returns ``Result``.
 
         Applies NO defaults — no ``docker.io``, no ``library/``, no
         ``latest`` — recording exactly what was written. Normalization is a
         separate, explicit step (:meth:`normalize`).
+
+        Malformed input is a PREDICTABLE failure (§2 principle 5): valid input
+        → ``Ok(ref)``; a grammar violation → ``Error(MALFORMED_REFERENCE)``. The
+        internal validators (``Digest.parse``/``validate_tag``/the name
+        production/``Endpoint`` invariants) keep RAISING ``MalformedReference``;
+        this method is the parse boundary that catches it and converts. A
+        ``__post_init__`` invariant breach is NOT caught (constructed garbage is
+        a bug → panic).
+        """
+        try:
+            endpoint, path, name, version, digest = OciReference._parse(s)
+        except MalformedReference as exc:
+            return _malformed_error(exc)
+        # Construction is OUTSIDE the boundary: a __post_init__ invariant breach
+        # is a PANIC (constructed garbage = a bug, §2 principle 5), so it must
+        # propagate, NOT be caught and converted to an input Error. In practice
+        # _parse already validated every production __post_init__ re-checks, so
+        # this never fires — but the structure keeps the two channels separate.
+        return Ok(value=OciReference(
+            endpoint=endpoint, path=path, name=name, version=version,
+            digest=digest,
+        ))
+
+    @staticmethod
+    def _parse(
+        s: str,
+    ) -> tuple[Endpoint | None, str, str, str | None, Digest | None]:
+        """The raising parse/validation body — returns the validated COMPONENTS.
+
+        Internal: the public :meth:`parse` boundary catches its
+        ``MalformedReference`` and converts to an ``Error``, then constructs the
+        ``OciReference`` OUTSIDE that boundary (so a ``__post_init__`` breach
+        panics rather than converting). Returns
+        ``(endpoint, path, name, version, digest)``.
         """
         if not isinstance(s, str) or not s:
             raise MalformedReference(
@@ -464,11 +536,7 @@ class OciReference(SourceReference):
             )
 
         endpoint, path, name = OciReference._parse_name(name_part, original=s)
-
-        return OciReference(
-            endpoint=endpoint, path=path, name=name, version=version,
-            digest=digest,
-        )
+        return endpoint, path, name, version, digest
 
     @staticmethod
     def _parse_name(name_part: str, *, original: str) -> tuple[Endpoint | None, str, str]:
@@ -728,14 +796,42 @@ class UrlReference(SourceReference):
     # Parse — RFC-3986 via urllib.parse.urlsplit (PURE: no I/O).
     # ------------------------------------------------------------------- #
     @staticmethod
-    def parse(s: str) -> "UrlReference":
-        """Parse a full ``http(s)://…`` URL faithfully (RFC-3986). Total.
+    def parse(s: str) -> Result["UrlReference"]:
+        """Parse a full ``http(s)://…`` URL faithfully (RFC-3986). Returns ``Result``.
 
         Receives the FULL string INCLUDING the scheme (the dispatch hands over
         ``s``, not a scheme-less remainder). Applies NO defaults — records
-        exactly what was written; canonicalization is :meth:`normalize`. Raises
-        ``MalformedReference`` on every violation — never returns ``None``/``""``
-        (§2 principle 5).
+        exactly what was written; canonicalization is :meth:`normalize`.
+        Malformed input (incl. a query/fragment — NOT modelled in v1) is a
+        PREDICTABLE failure → ``Error(MALFORMED_REFERENCE)`` (§2 principle 5);
+        valid input → ``Ok(ref)``. The internal validators keep raising; this
+        method is the parse boundary that catches and converts.
+        """
+        try:
+            endpoint, path, name, version, secure = UrlReference._parse(s)
+        except MalformedReference as exc:
+            return _malformed_error(exc)
+        # Construction is OUTSIDE the boundary: a final-value __post_init__
+        # invariant breach is a PANIC, not an input Error (§2 principle 5). The
+        # ``Endpoint`` built INSIDE _parse, by contrast, parses untrusted
+        # authority bytes — its MalformedReference IS malformed input and so is
+        # caught above (it stays inside the boundary).
+        return Ok(value=UrlReference(
+            endpoint=endpoint, path=path, name=name, version=version,
+            secure=secure,
+        ))
+
+    @staticmethod
+    def _parse(
+        s: str,
+    ) -> tuple[Endpoint, str, str, str | None, bool]:
+        """The raising parse/validation body — returns the validated COMPONENTS.
+
+        Internal: the public :meth:`parse` boundary catches its
+        ``MalformedReference`` and converts to an ``Error``, then constructs the
+        ``UrlReference`` OUTSIDE that boundary (so a ``__post_init__`` breach
+        panics rather than converting). Returns
+        ``(endpoint, path, name, version, secure)``.
         """
         if not isinstance(s, str) or not s:
             raise MalformedReference(
@@ -779,11 +875,7 @@ class UrlReference(SourceReference):
             path = "/".join(segments[:-1])
 
         name, version = _split_name_version(name, original=s)
-
-        return UrlReference(
-            endpoint=endpoint, path=path, name=name, version=version,
-            secure=(scheme == "https"),
-        )
+        return endpoint, path, name, version, (scheme == "https")
 
     @staticmethod
     def _parse_authority(
