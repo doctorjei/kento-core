@@ -2039,7 +2039,10 @@ def test_sc_create_decomposes_standard(tmp_path):
     with patch("kento.create.create") as mock_create, \
             patch.object(SystemContainer, "_get_impl", return_value=sentinel) as mget:
         out = SystemContainer.create("box", "img:tag")
-    assert out is sentinel
+    # S5: create now returns Ok(<handle>); the boundary re-snapshots via the
+    # raising _get_impl and wraps it. .unwrap() yields the new handle.
+    assert isinstance(out, Ok)
+    assert out.unwrap() is sentinel
     mget.assert_called_once_with("box")
     kwargs = mock_create.call_args.kwargs
     assert kwargs["image"] == "img:tag"
@@ -2061,7 +2064,9 @@ def test_vm_create_decomposes_standard(tmp_path):
     with patch("kento.create.create") as mock_create, \
             patch.object(VirtualMachine, "_get_impl", return_value=sentinel) as mget:
         out = VirtualMachine.create("vm1", "img:tag")
-    assert out is sentinel
+    # S5: create now returns Ok(<handle>); .unwrap() yields the new handle.
+    assert isinstance(out, Ok)
+    assert out.unwrap() is sentinel
     mget.assert_called_once_with("vm1")
     kwargs = mock_create.call_args.kwargs
     assert kwargs["mode"] == "vm"
@@ -2115,9 +2120,12 @@ def test_create_extra_args_conflict_raises(tmp_path):
                            extra_args=("a=1",))
     with patch("kento.create.create"), \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
-        with pytest.raises(ValidationError):
-            SystemContainer.create("box", "img", platform=plat,
-                                   extra_args=["b=2"])
+        # S5: the internal ValidationError is caught at the create boundary and
+        # surfaces as Error(VALIDATION) (kind-fidelity), not a raise.
+        result = SystemContainer.create("box", "img", platform=plat,
+                                        extra_args=["b=2"])
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
 
 
 def test_create_extra_args_equal_ok(tmp_path):
@@ -2137,8 +2145,10 @@ def test_create_mac_on_lxc_rejected(tmp_path):
                              link_config={"mac": "aa:bb:cc:dd:ee:ff"})
     with patch("kento.create.create") as mock_create, \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
-        with pytest.raises(ValidationError):
-            SystemContainer.create("box", "img", network=conn)
+        # S5: rejected before reaching create.py -> Error(VALIDATION).
+        result = SystemContainer.create("box", "img", network=conn)
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
     mock_create.assert_not_called()
 
 
@@ -2155,8 +2165,9 @@ def test_create_conflicting_mid_vs_platform_raises(tmp_path):
     plat = PlatformProfile(mode=PlatformMode.PVE, mid=200, extra_args=())
     with patch("kento.create.create"), \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
-        with pytest.raises(ValidationError):
-            SystemContainer.create("box", "img", platform=plat, mid=201)
+        result = SystemContainer.create("box", "img", platform=plat, mid=201)
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
 
 
 def test_create_mid_matching_platform_ok(tmp_path):
@@ -2181,8 +2192,9 @@ def test_create_image_ocireference(tmp_path):
 def test_create_image_rejects_bad_type(tmp_path):
     with patch("kento.create.create"), \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
-        with pytest.raises(ValidationError):
-            SystemContainer.create("box", 12345)  # type: ignore[arg-type]
+        result = SystemContainer.create("box", 12345)  # type: ignore[arg-type]
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
 
 
 # -- create: the create-time long tail (§11.4 M15 enumerated tail) ------------
@@ -2308,8 +2320,9 @@ def test_create_network_dns2_rejected(tmp_path):
     )
     with patch("kento.create.create"), \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
-        with pytest.raises(ValidationError):
-            SystemContainer.create("box", "img", network=conn)
+        result = SystemContainer.create("box", "img", network=conn)
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
 
 
 def test_create_resources_and_environment(tmp_path):
@@ -2329,8 +2342,9 @@ def test_create_resources_and_environment(tmp_path):
 def test_create_resources_unknown_key_rejected(tmp_path):
     with patch("kento.create.create"), \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
-        with pytest.raises(ValidationError):
-            SystemContainer.create("box", "img", resources={"disk": 10})
+        result = SystemContainer.create("box", "img", resources={"disk": 10})
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
 
 
 def test_create_passes_lxc_and_qemu_and_extra_args(tmp_path):
@@ -2366,6 +2380,12 @@ def test_create_hostname_passed_through(tmp_path):
 def test_create_non_overlay_storage_raises(tmp_path):
     # Only StorageMode.OVERLAY is supported in 1.0; any other value RAISES
     # (gate C — not silently ignored). Use any non-OVERLAY enum member.
+    #
+    # S5: the guard raises NotImplementedError, which is a PANIC (NOT a
+    # KentoError), so it PROPAGATES through the create boundary unchanged rather
+    # than becoming an Error value (sweep doctrine: non-KentoError = panic =
+    # propagates). An unsupported-backend is a not-yet-implemented programming
+    # condition, deliberately distinct from a ValidationError on user input.
     other = next(m for m in StorageMode if m is not StorageMode.OVERLAY)
     with patch("kento.create.create") as mock_create, \
             patch.object(SystemContainer, "_get_impl", return_value=object()):
@@ -2374,12 +2394,81 @@ def test_create_non_overlay_storage_raises(tmp_path):
     mock_create.assert_not_called()
 
 
+# -- create: KIND-FIDELITY — deep create.py raises surface their real kind -----
+# A KentoError raised DEEP inside the delegated create.py:create (its 33 raise
+# sites) is caught at the create boundary and surfaces with its REAL kind, NOT
+# a generic INTERNAL. These mock create.py:create with a raising side_effect.
+
+
+def test_create_duplicate_name_returns_instance_exists(tmp_path):
+    from kento.errors import InstanceExistsError
+    err = InstanceExistsError("box already exists; use force=True")
+    with patch("kento.create.create", side_effect=err), \
+            patch.object(SystemContainer, "_get_impl", return_value=object()):
+        result = SystemContainer.create("box", "img")
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INSTANCE_EXISTS
+
+
+def test_create_mode_mismatch_returns_mode_error(tmp_path):
+    err = ModeError("vm mode requires KVM; not available on this host")
+    with patch("kento.create.create", side_effect=err), \
+            patch.object(VirtualMachine, "_get_impl", return_value=object()):
+        result = VirtualMachine.create("vm1", "img")
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.MODE_ERROR
+
+
+def test_create_subprocess_failure_returns_error_with_returncode(tmp_path):
+    # A pct/qm failure deep in create.py surfaces as Error(SUBPROCESS_FAILED)
+    # with returncode threaded into context (the CLI reads it for exit 1-vs-2).
+    from kento.errors import SubprocessError
+    err = SubprocessError("pct create failed", cmd=["pct", "create"],
+                          returncode=5)
+    with patch("kento.create.create", side_effect=err), \
+            patch.object(SystemContainer, "_get_impl", return_value=object()):
+        result = SystemContainer.create("box", "img")
+    assert isinstance(result, Error)
+    cond = result.conditions[0]
+    assert cond.kind is ConditionKind.SUBPROCESS_FAILED
+    assert cond.context["returncode"] == 5
+
+
+def test_create_deep_validation_keeps_real_kind_not_internal(tmp_path):
+    # The load-bearing kind-fidelity check: a ValidationError raised DEEP in
+    # create.py is NOT collapsed to INTERNAL — it keeps VALIDATION. (Mutation:
+    # if the boundary re-wrapped via a generic ResultError it would redden to
+    # INTERNAL.)
+    err = ValidationError("bad image reference")
+    with patch("kento.create.create", side_effect=err), \
+            patch.object(SystemContainer, "_get_impl", return_value=object()):
+        result = SystemContainer.create("box", "img")
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.VALIDATION
+    assert result.conditions[0].kind is not ConditionKind.INTERNAL
+
+
+def test_create_get_impl_not_found_surfaces_not_found(tmp_path):
+    # If the post-create re-snapshot (_get_impl) cannot find the instance, the
+    # InstanceNotFoundError surfaces as Error(INSTANCE_NOT_FOUND) at the boundary
+    # (kind-fidelity through the raising _get_impl tail, not INTERNAL).
+    with patch("kento.create.create"), \
+            patch.object(SystemContainer, "_get_impl",
+                         side_effect=InstanceNotFoundError("vanished")):
+        result = SystemContainer.create("box", "img")
+    assert isinstance(result, Error)
+    assert result.conditions[0].kind is ConditionKind.INSTANCE_NOT_FOUND
+
+
 # -- transient: teardown on normal AND exceptional exit -----------------------
 
 
 def test_transient_tears_down_on_normal_exit(tmp_path):
     handle = unittest_mock_handle()
-    with patch.object(SystemContainer, "create", return_value=handle) as mcreate:
+    # S5: create returns a Result; transient .unwrap()s it to get the handle, so
+    # the mock returns Ok(handle) (a plain handle would break the .unwrap()).
+    with patch.object(SystemContainer, "create",
+                      return_value=Ok(value=handle)) as mcreate:
         with SystemContainer.transient("box", "img", start=True) as c:
             assert c is handle
     mcreate.assert_called_once()
@@ -2388,7 +2477,7 @@ def test_transient_tears_down_on_normal_exit(tmp_path):
 
 def test_transient_tears_down_on_exception(tmp_path):
     handle = unittest_mock_handle()
-    with patch.object(VirtualMachine, "create", return_value=handle):
+    with patch.object(VirtualMachine, "create", return_value=Ok(value=handle)):
         with pytest.raises(RuntimeError, match="boom"):
             with VirtualMachine.transient("vm1", "img") as c:
                 assert c is handle
@@ -2411,16 +2500,57 @@ def test_transient_teardown_failure_raises(tmp_path):
             ),
         ),
     )
-    with patch.object(SystemContainer, "create", return_value=handle):
+    with patch.object(SystemContainer, "create", return_value=Ok(value=handle)):
         with pytest.raises(ResultError, match="teardown failed"):
             with SystemContainer.transient("box", "img"):
                 pass
     handle.destroy.assert_called_once_with(force=True)
 
 
+def test_transient_raises_when_create_returns_error(tmp_path):
+    # S5: transient (a @contextmanager) STAYS RAISING — it .unwrap()s the now-
+    # Result create, so a create that returns Error must RAISE out of the `with`
+    # (caught by the caller's except), never enter the body, and never tear down
+    # a handle it never got. Mutation: dropping the create .unwrap() in transient
+    # would yield the Error VALUE as the body var (no raise) -> reddens here.
+    err = Error(
+        conditions=(
+            Condition(
+                severity=Severity.ERROR,
+                kind=ConditionKind.INSTANCE_EXISTS,
+                message="box already exists",
+            ),
+        ),
+    )
+    entered = False
+    with patch.object(SystemContainer, "create", return_value=err):
+        with pytest.raises(ResultError, match="box already exists"):
+            with SystemContainer.transient("box", "img"):
+                entered = True  # pragma: no cover — must NOT run
+    assert entered is False
+
+
+def test_vm_transient_raises_when_create_returns_error(tmp_path):
+    # Same as above for the VM kind (one per kind, per the brief).
+    err = Error(
+        conditions=(
+            Condition(
+                severity=Severity.ERROR,
+                kind=ConditionKind.MODE_ERROR,
+                message="vm needs KVM",
+            ),
+        ),
+    )
+    with patch.object(VirtualMachine, "create", return_value=err):
+        with pytest.raises(ResultError, match="vm needs KVM"):
+            with VirtualMachine.transient("vm1", "img"):
+                pass  # pragma: no cover — must NOT run
+
+
 def test_transient_forwards_args_to_create(tmp_path):
     handle = unittest_mock_handle()
-    with patch.object(SystemContainer, "create", return_value=handle) as mcreate:
+    with patch.object(SystemContainer, "create",
+                      return_value=Ok(value=handle)) as mcreate:
         with SystemContainer.transient(
             "box", "img", hostname="h", unprivileged=True, start=True,
         ):

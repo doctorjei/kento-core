@@ -1042,7 +1042,7 @@ class Instance(ABC):
     # ------------------------------------------------------------------- #
     @classmethod
     @abstractmethod
-    def create(cls, *args, **kwargs) -> "Instance":
+    def create(cls, *args, **kwargs) -> Result["Instance"]:
         """Create a new instance (contract only; bodies are Phase 4, §10.1).
 
         Abstract on the base so the base stays uninstantiable and every concrete
@@ -1052,6 +1052,17 @@ class Instance(ABC):
         class (``abstractmethod`` only blocks *instantiation*), so ``Instance``'s
         own create must fail loudly rather than return a non-``Instance`` (gate C;
         §10.1 "calling ``Instance.create()`` hits the abstract body and raises").
+
+        Public Result boundary (Result-propagation sweep, Block S5): the concrete
+        overrides (``SystemContainer.create`` / ``VirtualMachine.create``) return
+        ``Result[<kind>]`` — ``Ok`` of the new handle, or an ``Error`` whose kind
+        reflects the predictable failure (``ValidationError``→VALIDATION,
+        ``InstanceExistsError``→INSTANCE_EXISTS, ``ModeError``→MODE_ERROR,
+        ``StateError``→INVALID_STATE, ``SubprocessError``→SUBPROCESS_FAILED).
+        This abstract body RAISES ``NotImplementedError`` (a PANIC, not a
+        ``KentoError``): calling ``Instance.create()`` directly is a programming
+        error, not a predictable runtime condition, so it propagates rather than
+        becoming an ``Error`` value (gate C — it never fabricates a handle).
         """
         raise NotImplementedError(
             "Instance is abstract — call SystemContainer.create(...) or "
@@ -1761,7 +1772,7 @@ class SystemContainer(Instance):
         ssh_host_key_dir: str | None = None,
         config_mode: str = "auto",
         force: bool = False,
-    ) -> "SystemContainer":
+    ) -> Result["SystemContainer"]:
         """Create a new LXC system container (M15, §11.4) — wraps ``create.create``.
 
         Decomposes the typed parameter objects into the flat ``create.py:create``
@@ -1787,39 +1798,57 @@ class SystemContainer(Instance):
         / ``config_mode`` / ``force``. Each defaults to ``create.py``'s own
         default, so leaving any unset is BYTE-IDENTICAL to before. ``searchdomain``
         is a create input, NOT a ``NetworkConnection`` field (§5.3).
+
+        Public Result boundary (Result-propagation sweep, Block S5): the whole
+        body is wrapped — any ``KentoError`` raised inside (the typed-arg
+        decomposition's ``ValidationError`` — bad image type, MAC-on-LXC, network
+        dns2, mid/extra_args conflicts, unknown resource key; ``create.py``'s
+        ``ValidationError`` / ``InstanceExistsError`` / ``ModeError`` /
+        ``StateError`` / ``SubprocessError`` over its 33 raise sites;
+        ``_get_impl``'s ``InstanceNotFoundError``) is caught at this boundary and
+        converted to an ``Error`` with the real kind (KIND-FIDELITY rule —
+        ``create.py`` stays raising as internal control flow). On success returns
+        ``Ok`` of the freshly re-snapshotted, kind-checked handle. A
+        non-``KentoError`` is a PANIC and propagates — note the non-OVERLAY
+        ``storage`` guard raises ``NotImplementedError`` (a panic), so an
+        unsupported backend propagates rather than becoming an ``Error``.
         """
         from kento import create as create_mod
 
-        kwargs = _build_create_kwargs(
-            kind_mode="lxc",
-            name=name,
-            image=image,
-            hostname=hostname,
-            platform=platform,
-            mid=mid,
-            network=network,
-            forwards=forwards,
-            resources=resources,
-            environment=environment,
-            start=start,
-            storage=storage,
-            nesting=nesting,
-            extra_args=extra_args,
-            searchdomain=searchdomain,
-            timezone=timezone,
-            ssh_keys=ssh_keys,
-            ssh_key_user=ssh_key_user,
-            ssh_host_keys=ssh_host_keys,
-            ssh_host_key_dir=ssh_host_key_dir,
-            config_mode=config_mode,
-            force=force,
-        )
-        kwargs["unprivileged"] = unprivileged
-        kwargs["lxc_args"] = list(lxc_args) if lxc_args else None
-        create_mod.create(**kwargs)
-        # Raising _get_impl (not the Result-returning get): still-raising internal
-        # caller; keeps create's own raise contract intact (Block S4).
-        return cls._get_impl(name)
+        try:
+            kwargs = _build_create_kwargs(
+                kind_mode="lxc",
+                name=name,
+                image=image,
+                hostname=hostname,
+                platform=platform,
+                mid=mid,
+                network=network,
+                forwards=forwards,
+                resources=resources,
+                environment=environment,
+                start=start,
+                storage=storage,
+                nesting=nesting,
+                extra_args=extra_args,
+                searchdomain=searchdomain,
+                timezone=timezone,
+                ssh_keys=ssh_keys,
+                ssh_key_user=ssh_key_user,
+                ssh_host_keys=ssh_host_keys,
+                ssh_host_key_dir=ssh_host_key_dir,
+                config_mode=config_mode,
+                force=force,
+            )
+            kwargs["unprivileged"] = unprivileged
+            kwargs["lxc_args"] = list(lxc_args) if lxc_args else None
+            create_mod.create(**kwargs)
+            # Raising _get_impl (not the Result-returning get): still-raising
+            # internal caller; a deep InstanceNotFoundError reaches THIS boundary
+            # with its real kind rather than collapsing to INTERNAL (Block S4/S5).
+            return Ok(value=cls._get_impl(name))
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
     @contextmanager
@@ -1860,6 +1889,13 @@ class SystemContainer(Instance):
         a context manager (no ``__enter__``/``__exit__`` on ``Instance``), so
         ``with SystemContainer.create(...)`` raises ``TypeError`` — teardown
         happens iff the caller typed ``transient`` (JC6, footgun-free).
+
+        STAYS RAISING (Result-propagation sweep, Block S5): a ``@contextmanager``
+        yields a value and cannot return a ``Result`` (idiom constraint, same
+        class as the property setters). ``create`` now returns a ``Result`` (this
+        block), so it is ``.unwrap()``\\ed here — a FAILED create RAISES out of
+        ``transient`` exactly as before the conversion (caught by the caller's
+        ``except``), and a successful one yields the unwrapped handle.
         """
         inst = cls.create(
             name, image,
@@ -1871,7 +1907,7 @@ class SystemContainer(Instance):
             ssh_key_user=ssh_key_user, ssh_host_keys=ssh_host_keys,
             ssh_host_key_dir=ssh_host_key_dir, config_mode=config_mode,
             force=force,
-        )
+        ).unwrap()
         try:
             yield inst
         finally:
@@ -2107,7 +2143,7 @@ class VirtualMachine(Instance):
         ssh_host_key_dir: str | None = None,
         config_mode: str = "auto",
         force: bool = False,
-    ) -> "VirtualMachine":
+    ) -> Result["VirtualMachine"]:
         """Create a new QEMU/KVM virtual machine (M16, §11.4) — wraps ``create.create``.
 
         Same decomposition shape as :meth:`SystemContainer.create`, with the VM
@@ -2125,40 +2161,57 @@ class VirtualMachine(Instance):
         create-time long tail
         (``forwards``/``searchdomain``/``timezone``/``ssh_*``/``config_mode``/
         ``force``) is the SAME as :meth:`SystemContainer.create`.
+
+        Public Result boundary (Result-propagation sweep, Block S5): identical to
+        :meth:`SystemContainer.create` — the whole body is wrapped, any
+        ``KentoError`` (the typed-arg decomposition's ``ValidationError``;
+        ``create.py``'s validation / exists / mode / state / subprocess raises;
+        the ``kernel``/``initramfs`` boot-source-override validation;
+        ``_get_impl``'s not-found) is caught here and converted to an ``Error``
+        with the real kind (KIND-FIDELITY rule). On success returns ``Ok`` of the
+        freshly re-snapshotted handle. A non-``KentoError`` is a PANIC and
+        propagates — the non-OVERLAY ``storage`` guard's ``NotImplementedError``
+        propagates rather than becoming an ``Error`` (same as the LXC kind).
         """
         from kento import create as create_mod
 
-        kwargs = _build_create_kwargs(
-            kind_mode="vm",
-            name=name,
-            image=image,
-            hostname=hostname,
-            platform=platform,
-            mid=mid,
-            network=network,
-            forwards=forwards,
-            resources=resources,
-            environment=environment,
-            start=start,
-            storage=storage,
-            nesting=nesting,
-            extra_args=extra_args,
-            searchdomain=searchdomain,
-            timezone=timezone,
-            ssh_keys=ssh_keys,
-            ssh_key_user=ssh_key_user,
-            ssh_host_keys=ssh_host_keys,
-            ssh_host_key_dir=ssh_host_key_dir,
-            config_mode=config_mode,
-            force=force,
-        )
-        kwargs["qemu_args"] = list(qemu_args) if qemu_args else None
-        kwargs["kernel"] = str(kernel) if kernel is not None else None
-        kwargs["initramfs"] = str(initramfs) if initramfs is not None else None
-        create_mod.create(**kwargs)
-        # Raising _get_impl (not the Result-returning get): still-raising internal
-        # caller; keeps create's own raise contract intact (Block S4).
-        return cls._get_impl(name)
+        try:
+            kwargs = _build_create_kwargs(
+                kind_mode="vm",
+                name=name,
+                image=image,
+                hostname=hostname,
+                platform=platform,
+                mid=mid,
+                network=network,
+                forwards=forwards,
+                resources=resources,
+                environment=environment,
+                start=start,
+                storage=storage,
+                nesting=nesting,
+                extra_args=extra_args,
+                searchdomain=searchdomain,
+                timezone=timezone,
+                ssh_keys=ssh_keys,
+                ssh_key_user=ssh_key_user,
+                ssh_host_keys=ssh_host_keys,
+                ssh_host_key_dir=ssh_host_key_dir,
+                config_mode=config_mode,
+                force=force,
+            )
+            kwargs["qemu_args"] = list(qemu_args) if qemu_args else None
+            kwargs["kernel"] = str(kernel) if kernel is not None else None
+            kwargs["initramfs"] = (
+                str(initramfs) if initramfs is not None else None
+            )
+            create_mod.create(**kwargs)
+            # Raising _get_impl (not the Result-returning get): still-raising
+            # internal caller; a deep InstanceNotFoundError reaches THIS boundary
+            # with its real kind rather than collapsing to INTERNAL (Block S4/S5).
+            return Ok(value=cls._get_impl(name))
+        except KentoError as exc:
+            return _error_from(exc)
 
     @classmethod
     @contextmanager
@@ -2198,6 +2251,12 @@ class VirtualMachine(Instance):
         ``destroy(force=True)`` (normal OR exceptional). The ONLY context-manager
         entry — a plain ``create``/``get`` handle raises ``TypeError`` under
         ``with`` (JC6, §11.4).
+
+        STAYS RAISING (Result-propagation sweep, Block S5): a ``@contextmanager``
+        cannot return a ``Result`` (idiom constraint). ``create`` now returns a
+        ``Result`` (this block), so it is ``.unwrap()``\\ed here — a FAILED create
+        RAISES out of ``transient`` exactly as before, a successful one yields the
+        unwrapped handle.
         """
         inst = cls.create(
             name, image,
@@ -2210,7 +2269,7 @@ class VirtualMachine(Instance):
             ssh_key_user=ssh_key_user, ssh_host_keys=ssh_host_keys,
             ssh_host_key_dir=ssh_host_key_dir, config_mode=config_mode,
             force=force,
-        )
+        ).unwrap()
         try:
             yield inst
         finally:
