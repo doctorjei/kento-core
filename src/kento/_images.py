@@ -10,9 +10,13 @@ locator's scheme:
 * ``LayeredImage`` (ABC) — "the layering": a union of read-only directory layers
   (overlayfs). Abstract and source-agnostic; the concrete layer shape + identity
   are decided per subclass.
-* ``OciImage`` — the podman/OCI-store ``LayeredImage``. The ONLY built member for
-  1.0; holds all the OCI/podman specifics (``source: OciReference``, the content
-  ``id``, ``layers``, ``overlay_root``) and the full lifecycle.
+* ``OciImage`` — the podman/OCI-store ``LayeredImage``. Holds all the OCI/podman
+  specifics (``source: OciReference``, the content ``id``, ``layers``,
+  ``overlay_root``) and the full lifecycle.
+* ``LocalDirectoryImage`` — the first NON-OCI ``LayeredImage`` (URL-VM Phase B,
+  OPTION 2): a ``.txz`` rootfs fetched from an ``https://`` URL and extracted into
+  a directory that becomes the VM's single overlay lowerdir. ``source:
+  UrlReference``; NO content ``id`` (identity is the URL location, not a digest).
 * ``VolumeImage`` — one partition (single fs) over block-overlay. The first
   post-1.0 feature; declared here as a **documented stub** with NO lifecycle.
 * ``CompositeImage`` — Images composited at mount points (the image-lifecycle
@@ -40,9 +44,10 @@ are ADDITIVE wrappers: they **delegate** to the existing procedural functions in
 ``kento.layers`` and ``kento.vm`` and do NOT reimplement their logic or touch
 their live callers (``create.py`` / ``vm.py`` / ``hook.py`` / the CLI).
 
-The public surface (``Image``, ``LayeredImage``, ``OciImage``, ``Layer``,
-``DiskFormat``, ``VolumeImage``, ``CompositeImage``) is re-exported flat from
-``kento`` — refer to ``kento.OciImage``, not ``kento._images.OciImage``.
+The public surface (``Image``, ``LayeredImage``, ``OciImage``,
+``LocalDirectoryImage``, ``Layer``, ``DiskFormat``, ``VolumeImage``,
+``CompositeImage``) is re-exported flat from ``kento`` — refer to
+``kento.OciImage``, not ``kento._images.OciImage``.
 
 Spec: ``~/workspace/kento-core-api-design.md`` §4.1 (AMENDED run 36), §4.3, §4.4,
 §12.1; §3.8 (``Digest`` is the content id).
@@ -58,7 +63,7 @@ from enum import Enum
 from pathlib import Path
 
 from kento._diagnosis import Diagnosis, PruneScope, ReclaimReport
-from kento._references import Digest, OciReference, SourceReference
+from kento._references import Digest, OciReference, SourceReference, UrlReference
 from kento._result import Ok, Result, _error_from
 from kento.errors import ImageNotFoundError, KentoError, StateError
 
@@ -81,6 +86,7 @@ __all__ = [
     "Image",
     "LayeredImage",
     "OciImage",
+    "LocalDirectoryImage",
     "VolumeImage",
     "CompositeImage",
 ]
@@ -1475,6 +1481,157 @@ class OciImage(LayeredImage):
         """
         root = self.overlay_root
         return ":".join(str(root / layer.id / "diff") for layer in self.layers)
+
+
+# --------------------------------------------------------------------------- #
+# LocalDirectoryImage — the first NON-OCI LayeredImage: a fetched-and-extracted
+# rootfs directory (URL-VM Phase B, OPTION 2). NOT in the podman store; the base
+# is a single extracted tree that becomes the overlay's one lowerdir (§4.1).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, kw_only=True)
+class LocalDirectoryImage(LayeredImage):
+    """A fetched-and-extracted rootfs DIRECTORY tree — the first non-OCI image (§4.1).
+
+    The URL-VM (OPTION 2) representation: a ``.txz`` rootfs streamed from an
+    ``https://`` URL and extracted into a local directory that becomes the VM's
+    SINGLE overlay ``lowerdir``. Unlike ``OciImage`` it is NOT in the podman store
+    and is NOT content-addressed:
+
+    * ``source`` is narrowed to a ``UrlReference`` (mirrors how ``OciImage``
+      narrows ``source`` to ``OciReference``).
+    * There is deliberately **NO** ``id: Digest`` — identity is the URL location,
+      not a content digest (a URL rootfs is fetched fresh, not addressed by
+      content; §4.1: a content ``Digest`` is the content-addressed member's
+      addition, not a base field). It therefore has no kento image-record either
+      (the base ``_record_id`` raises ``StateError`` — inherited unchanged).
+    * ``kernel`` / ``initramfs`` are inherited from the base (unset here);
+      ``Instance.image()`` populates them from the ``kento-kernel`` /
+      ``kento-initramfs`` markers via ``dataclasses.replace``, exactly as for OCI.
+    * It carries NONE of the OCI-store fields (``id`` / ``layers`` /
+      ``overlay_root``) — those are podman-store specifics.
+
+    ``is_writable()`` is ``False``: the extracted base is a read-only lowerdir;
+    the writable layer is the overlay ``upper``, same as ``OciImage`` (§4.1).
+
+    The runtime lifecycle mirrors ``OciImage``'s four primitives, but the base is
+    a single extracted directory rather than a podman layer union:
+
+    * ``prepare`` — the heavy I/O: fetch + extract the ``.txz`` into
+      ``state_dir/rootfs-base`` (via the shared ``urlvm`` helper), then create the
+      overlay ``upper``/``work`` dirs.
+    * ``mount`` — overlay-mount with ``rootfs-base`` as the SINGLE lowerdir.
+    * ``unmount`` — the inverse (identical to ``OciImage``).
+    * ``release`` — REMOVE the extracted ``rootfs-base`` (and the ``.txz`` if it
+      lingered): the ephemeral discard, where this DIFFERS from ``OciImage``'s
+      no-op release (a URL rootfs is not persisted store content).
+    """
+
+    source: UrlReference
+
+    def is_writable(self) -> bool:
+        """The extracted base is a read-only lowerdir → always ``False`` (§4.1).
+
+        Same as ``OciImage``: the writable layer is the overlay ``upper``, not the
+        base tree. The capability is data-source-determined (§4.1) — an extracted
+        rootfs directory is treated as a read-only base.
+        """
+        return False
+
+    @classmethod
+    def resolve(cls, source: UrlReference) -> "LocalDirectoryImage":
+        """Build the handle from a ``UrlReference`` — CHEAP, no I/O (§4.3, §4.5).
+
+        Unlike ``OciImage.resolve`` (which queries the podman store), there is
+        nothing to snapshot here at resolve time: the URL is not fetched (fetching
+        needs a per-instance ``state_dir`` for the ``.txz`` + extraction target —
+        that is :meth:`prepare`'s job). So ``resolve`` just constructs the frozen
+        value. It is TOTAL and pure, hence a plain value (no ``Result``): a URL is
+        already a validated ``UrlReference`` and no store lookup can fail.
+        """
+        return cls(source=source)
+
+    def prepare(self, state_dir: Path) -> None:
+        """Fetch + extract the rootfs, then create ``upper``/``work`` (§4.4).
+
+        The heavy I/O: streams the ``.txz`` from ``self.source`` and extracts it
+        into ``state_dir/rootfs-base`` via the shared ``urlvm.fetch_and_extract_
+        rootfs`` helper (the SAME composition B3b's procedural create path uses —
+        no forked logic), then mkdirs the overlay ``upper``/``work`` dirs (mirrors
+        ``OciImage.prepare``).
+
+        **The ``.unwrap()`` seam (DISCLOSED).** The helper is ``Result``-native,
+        but the base ``Image.prepare`` contract returns ``None`` (and raises a
+        typed error on failure — the four-primitive ABC signature every image
+        implements). So this primitive ``.unwrap()``s the helper's ``Result``: a
+        PREDICTABLE fetch/extract failure (an ``Error``) surfaces HERE as a raised
+        ``ResultError`` (a ``KentoError``), matching the ABC's raising signature.
+        The ``Result``-native seam is the shared ``urlvm`` helper itself — a
+        library caller wanting a ``Result`` from the fetch/extract composition
+        calls ``fetch_and_extract_rootfs`` directly; the primitive matches the base
+        contract. (Making the base ``Image.prepare`` return a ``Result`` would be a
+        family-wide ABC refactor — out of scope for this block.) A fragment-drop
+        ``Warning`` unwraps to its value cleanly (``Warning.unwrap`` returns the
+        value), so a benign warning does not abort ``prepare``.
+        """
+        from kento.urlvm import fetch_and_extract_rootfs
+
+        fetch_and_extract_rootfs(
+            self.source,
+            state_dir / "rootfs.txz",
+            state_dir / "rootfs-base",
+        ).unwrap()
+        (state_dir / "upper").mkdir(parents=True, exist_ok=True)
+        (state_dir / "work").mkdir(parents=True, exist_ok=True)
+
+    def mount(self, host_dir: Path, state_dir: Path) -> None:
+        """Overlay-mount the extracted base at ``host_dir/rootfs`` (§4.4).
+
+        The extracted ``state_dir/rootfs-base`` is the SINGLE overlay lowerdir.
+        ``vm.mount_rootfs`` re-derives the lowerdir form from the absolute string
+        via ``to_overlay_lowerdir``, which gracefully degrades for a single
+        non-store directory (it does not match the podman ``<root>/<id>/diff``
+        shape → returns ``("", <absolute dir>)`` and mounts it as an absolute
+        single lowerdir). So we hand it the absolute ``rootfs-base`` path. Mirrors
+        ``OciImage.mount`` (same delegation, same host overlay-mount logic).
+        """
+        from kento import vm as _vm
+
+        _vm.mount_rootfs(host_dir, str(state_dir / "rootfs-base"), state_dir)
+
+    def unmount(self, host_dir: Path) -> None:
+        """Inverse of ``mount`` — unmount ``host_dir/rootfs`` (§4.4).
+
+        Delegates to ``vm.unmount_rootfs`` (identical to ``OciImage.unmount``).
+        """
+        from kento import vm as _vm
+
+        _vm.unmount_rootfs(host_dir)
+
+    def release(self, state_dir: Path) -> None:
+        """Inverse of ``prepare`` — DISCARD the extracted base (§4.4).
+
+        Where this DIFFERS from ``OciImage.release`` (a no-op that keeps the
+        persisted store content): a URL rootfs is NOT store content, so the
+        extracted ``state_dir/rootfs-base`` tree is ephemeral and is removed here,
+        along with the intermediate ``.txz`` if it ever lingered (it is normally
+        already deleted by the ``urlvm`` helper after a successful extract). This
+        is the ephemeral no-store discard.
+
+        A disk error while removing is an environmental fault → it PROPAGATES
+        (panic): ``shutil.rmtree`` runs with ``ignore_errors=False`` (its default)
+        so an ``OSError`` is not swallowed, consistent with the leaves' /
+        primitives' disk-``OSError`` boundary. ``missing_ok`` on the ``.txz`` /
+        the ``rootfs-base`` existence check keep a re-run idempotent (a
+        double-release does not fail on already-gone state).
+        """
+        import shutil
+
+        base = state_dir / "rootfs-base"
+        if base.exists():
+            shutil.rmtree(base, ignore_errors=False)
+        (state_dir / "rootfs.txz").unlink(missing_ok=True)
 
 
 def _decompose_layers(
