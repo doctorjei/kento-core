@@ -124,6 +124,7 @@ class ConditionKind(str, Enum):
     NON_HTTPS = "non_https"
     FETCH_FAILED = "fetch_failed"
     HTTP_ERROR = "http_error"
+    EXTRACT_FAILED = "extract_failed"
 
     # --- Result-propagation-sweep kinds (Block S1). One kind per KentoError
     # subclass — same granularity a caller gets from the exception type today.

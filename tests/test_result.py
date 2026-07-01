@@ -79,8 +79,9 @@ def test_conditionkind_members_are_the_seeded_seam():
     # speculative enumeration of the whole library. R1 seeded four; Block B2 (the
     # HTTPS fetcher) added its three fetch-edge kinds; Block S1 (the Result
     # propagation sweep foundation) added the nine KentoError→kind members
-    # consumed by ``_error_from``. This pins the CURRENT set so a future block
-    # adding a member updates this deliberately.
+    # consumed by ``_error_from``; Block B2-extract added the ``.txz`` extractor's
+    # one edge kind. This pins the CURRENT set so a future block adding a member
+    # updates this deliberately.
     assert {k.value for k in ConditionKind} == {
         "malformed_reference",
         "fragment_dropped",
@@ -99,6 +100,8 @@ def test_conditionkind_members_are_the_seeded_seam():
         "stop_timeout",
         "subprocess_failed",
         "internal",
+        # Block B2-extract — the `.txz` extractor's boundary kind.
+        "extract_failed",
     }
 
 
