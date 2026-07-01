@@ -856,6 +856,52 @@ class TestGenerateQmArgs:
         assert "-kernel /var/lib/kento/vm/t/rootfs/boot/vmlinuz" in args
         assert "-initrd /var/lib/kento/vm/t/rootfs/boot/initramfs.img" in args
 
+    def test_no_markers_falls_back_to_in_image(self, tmp_path):
+        """FIX-2: with no override markers the args reference the in-image
+        rootfs/boot/* paths (byte-equivalent to the pre-override OCI path)."""
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert f"-kernel {tmp_path}/rootfs/boot/vmlinuz" in args
+        assert f"-initrd {tmp_path}/rootfs/boot/initramfs.img" in args
+
+    def test_kernel_and_initramfs_override(self, tmp_path):
+        """FIX-2: with both kento-kernel and kento-initramfs markers present,
+        the emitted args reference the resolved override paths (mirrors
+        vm.resolve_boot_sources), not the in-image rootfs/boot/*."""
+        (tmp_path / "kento-kernel").write_text(f"{tmp_path}/kernel\n")
+        (tmp_path / "kento-initramfs").write_text(f"{tmp_path}/initramfs.img\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert f"-kernel {tmp_path}/kernel" in args
+        assert f"-initrd {tmp_path}/initramfs.img" in args
+        assert "rootfs/boot/vmlinuz" not in args
+        assert "rootfs/boot/initramfs.img" not in args
+
+    def test_kernel_only_override_keeps_in_image_initramfs(self, tmp_path):
+        """FIX-2: a kernel-only override resolves the kernel from the marker
+        but keeps the in-image initramfs — the two sides are independent."""
+        (tmp_path / "kento-kernel").write_text(f"{tmp_path}/kernel\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert f"-kernel {tmp_path}/kernel" in args
+        assert f"-initrd {tmp_path}/rootfs/boot/initramfs.img" in args
+
+    def test_initramfs_only_override_keeps_in_image_kernel(self, tmp_path):
+        """FIX-2: an initramfs-only override resolves the initramfs from the
+        marker but keeps the in-image kernel — independent sides."""
+        (tmp_path / "kento-initramfs").write_text(f"{tmp_path}/initramfs.img\n")
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert f"-kernel {tmp_path}/rootfs/boot/vmlinuz" in args
+        assert f"-initrd {tmp_path}/initramfs.img" in args
+
+    def test_override_matches_resolve_boot_sources(self, tmp_path):
+        """FIX-2 drift-guard: the emitted -kernel/-initrd must resolve to the
+        exact paths vm.resolve_boot_sources returns for the same markers."""
+        from kento.vm import resolve_boot_sources
+        (tmp_path / "kento-kernel").write_text(f"{tmp_path}/k\n")
+        rootfs = tmp_path / "rootfs"
+        kernel, initramfs = resolve_boot_sources(tmp_path, rootfs)
+        args = generate_qm_args(tmp_path, memory=512, kvm=True)
+        assert f"-kernel {kernel}" in args
+        assert f"-initrd {initramfs}" in args
+
     def test_used_by_generate_qm_config(self):
         """``generate_qm_config`` must emit the same args payload as
         ``generate_qm_args`` so create/scrub can't drift."""

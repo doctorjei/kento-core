@@ -382,6 +382,21 @@ def generate_qm_args(container_dir: Path, *,
     rootfs = container_dir / "rootfs"
     socket_path = container_dir / "virtiofsd.sock"
 
+    # Boot-source override (§8 Phase A / URL-VM). resolve_boot_sources is the
+    # SINGLE source of truth for the kernel/initramfs override policy: it reads
+    # the kento-kernel / kento-initramfs markers (written by create.py before
+    # this config is generated) and returns the resolved HOST paths, else the
+    # in-image rootfs/boot/* defaults — each side independent. QEMU reads
+    # -kernel/-initrd from the host fs, so an absolute container_dir path is
+    # exactly right (mirrors plain vm.py's _launch_qemu). Local import matches
+    # the _read_hostfwds pattern below and dodges any import-cycle risk.
+    # DRIFT-GUARD: the pre-start hookscript (vm_hook.py) VALIDATES the same two
+    # paths and MUST replicate this policy in shell. If this resolver changes,
+    # update the shell twin in vm_hook.py (and vice versa) so the emitted
+    # -kernel/-initrd and the hook's -f test always resolve to the same files.
+    from kento.vm import resolve_boot_sources
+    kernel, initramfs = resolve_boot_sources(container_dir, rootfs)
+
     args_parts = []
     if kvm:
         args_parts.append("-enable-kvm")
@@ -399,8 +414,8 @@ def generate_qm_args(container_dir: Path, *,
         cpu = "host" if nesting_on else "host,vmx=off,svm=off"
         args_parts.append(f"-cpu {cpu}")
     args_parts += [
-        f"-kernel {rootfs}/boot/vmlinuz",
-        f"-initrd {rootfs}/boot/initramfs.img",
+        f"-kernel {kernel}",
+        f"-initrd {initramfs}",
         '-append "console=ttyS0 rootfstype=virtiofs root=rootfs"',
         "-nographic",
         f"-chardev socket,id=vfs,path={socket_path}",
