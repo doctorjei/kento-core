@@ -238,6 +238,23 @@ def test_truncated_xz_rejected(tmp_path):
     assert [c.kind for c in result.conditions] == [ConditionKind.EXTRACT_FAILED]
 
 
+def test_gzip_tar_named_txz_rejected_pins_r_xz(tmp_path):
+    # The format is LOCKED to xz: we open ``mode="r:xz"`` so a NON-xz tar (here a
+    # gzip-compressed tar merely NAMED .txz) fails closed rather than being
+    # silently accepted. A ``r:xz`` opener raises ReadError ⊆ TarError on a gzip
+    # stream → EXTRACT_FAILED. Mutation guard: relaxing ``r:xz`` to ``r:*`` would
+    # ACCEPT this gzip tar → this test reddens.
+    archive = tmp_path / "actually-gzip.txz"
+    with tarfile.open(archive, mode="w:gz") as tar:
+        _add_file(tar, "./etc/hostname", b"gemet\n")
+
+    result = extract_txz(archive, tmp_path / "root")
+
+    assert isinstance(result, Error)
+    assert [c.kind for c in result.conditions] == [ConditionKind.EXTRACT_FAILED]
+    assert result.conditions[0].context["archive"] == str(archive)
+
+
 def test_valid_xz_non_tar_payload_rejected(tmp_path):
     # A well-formed xz stream whose decompressed payload is NOT a tar.
     archive = tmp_path / "notar.txz"
