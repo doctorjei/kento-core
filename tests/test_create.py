@@ -1914,7 +1914,7 @@ class TestLxcPortForwarding:
                                             tmp_path):
         """Plain VM + --network bridge (no name, auto-detect) is rejected.
 
-        In practice resolve_network() already defaults plain VM to usermode
+        In practice _resolve_network() already defaults plain VM to usermode
         when net_type is None (see 9bb2eb6), so to hit this path we have to
         pass net_type='bridge' explicitly with no bridge name and rely on
         bridge auto-detection. Either way, a resolved type of 'bridge' must

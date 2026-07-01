@@ -85,7 +85,7 @@ __all__ = [
     "Result", "Ok", "Warning", "Error", "Condition", "Severity",
     "ConditionKind", "ResultError",
     # module-level helpers (defined in this module)
-    "validate_name", "detect_bridge", "resolve_network", "read_mode",
+    "validate_name", "detect_bridge", "read_mode",
     "require_root", "detect_mode", "upper_base", "sanitize_image_name",
     "next_instance_name", "pve_config_exists", "is_running",
     "resolve_container", "resolve_in_namespace", "resolve_any",
@@ -151,8 +151,8 @@ def detect_bridge() -> str | None:
     return None
 
 
-def resolve_network(net_type: str | None, bridge_name: str | None,
-                    mode: str, port: str | None = None) -> dict:
+def _resolve_network(net_type: str | None, bridge_name: str | None,
+                     mode: str, port: str | None = None) -> dict:
     """Resolve network configuration for container/VM creation.
 
     Returns dict with keys: type, bridge, port

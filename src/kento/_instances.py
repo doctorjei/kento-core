@@ -99,7 +99,7 @@ def _is_vm_mode(mode: str) -> bool:
 # kento-net-type (bridge/host/usermode/none) -> NetworkMode.
 #
 # The persisted ``kento-net-type`` is the create-resolved transport string
-# (``resolve_network``: bridge/host/usermode/none), NOT the typed NetworkMode
+# (``_resolve_network``: bridge/host/usermode/none), NOT the typed NetworkMode
 # value. We map it faithfully: a BRIDGE attachment is DHCP unless a static
 # kento-net (ip=) is present, in which case it is STATIC (§5.1/§5.5). host ->
 # HOST, usermode -> USER, none -> DISABLED. An unrecognized string falls back to
@@ -3105,7 +3105,7 @@ def _load_network(container_dir: Path) -> NetworkConnection:
     """Build ``NetworkConnection`` from kento-net-type/-bridge/-mac/-net (§5.5).
 
     Maps the create-resolved ``kento-net-type`` transport string
-    (bridge/host/usermode/none — ``resolve_network``) to the typed
+    (bridge/host/usermode/none — ``_resolve_network``) to the typed
     ``NetworkMode``: a BRIDGE attachment is ``STATIC`` when a static
     ``kento-net`` (``ip=``) is present, else ``DHCP``; host -> HOST, usermode ->
     USER, none -> DISABLED (§5.1). The ``kento-net`` key=value lines

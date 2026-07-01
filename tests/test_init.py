@@ -11,7 +11,7 @@ from kento import (
     require_root, upper_base, LXC_BASE, VM_BASE,
     sanitize_image_name, next_instance_name, resolve_container,
     resolve_in_namespace, resolve_any, check_name_conflict,
-    detect_bridge, resolve_network, is_running, pve_config_exists,
+    detect_bridge, _resolve_network, is_running, pve_config_exists,
 )
 from kento.errors import (
     KentoError, ValidationError, InstanceNotFoundError, StateError,
@@ -580,18 +580,18 @@ class TestDetectBridge:
         assert detect_bridge() == "vmbr0"
 
 
-# --- resolve_network ---
+# --- _resolve_network ---
 
 
 class TestResolveNetwork:
     @patch("kento.detect_bridge", return_value="vmbr0")
     def test_auto_detect_bridge(self, mock_detect):
-        result = resolve_network(None, None, "lxc")
+        result = _resolve_network(None, None, "lxc")
         assert result == {"type": "bridge", "bridge": "vmbr0", "port": None}
 
     @patch("kento.detect_bridge", return_value=None)
     def test_auto_detect_vm_usermode(self, mock_detect):
-        result = resolve_network(None, None, "vm")
+        result = _resolve_network(None, None, "vm")
         assert result == {"type": "usermode", "bridge": None, "port": None}
 
     @patch("kento.detect_bridge", return_value="lxcbr0")
@@ -599,68 +599,68 @@ class TestResolveNetwork:
         """Plain VM mode with no --network must default to usermode even when
         a bridge exists on the host. start_vm has no bridge/tap support, so
         auto-detecting bridge here would produce a VM with no network."""
-        result = resolve_network(None, None, "vm")
+        result = _resolve_network(None, None, "vm")
         assert result == {"type": "usermode", "bridge": None, "port": None}
 
     @patch("kento.detect_bridge", return_value="vmbr0")
     def test_auto_detect_pve_vm_bridge(self, mock_detect):
         """PVE-VM auto-detects bridge (qm generates proper bridge network)."""
-        result = resolve_network(None, None, "pve-vm")
+        result = _resolve_network(None, None, "pve-vm")
         assert result == {"type": "bridge", "bridge": "vmbr0", "port": None}
 
     @patch("kento.detect_bridge", return_value=None)
     def test_auto_detect_lxc_none(self, mock_detect):
-        result = resolve_network(None, None, "lxc")
+        result = _resolve_network(None, None, "lxc")
         assert result == {"type": "none", "bridge": None, "port": None}
 
     def test_explicit_bridge_with_name(self):
-        result = resolve_network("bridge", "vmbr1", "lxc")
+        result = _resolve_network("bridge", "vmbr1", "lxc")
         assert result == {"type": "bridge", "bridge": "vmbr1", "port": None}
 
     @patch("kento.detect_bridge", return_value="lxcbr0")
     def test_bridge_auto_detect_name(self, mock_detect):
-        result = resolve_network("bridge", None, "lxc")
+        result = _resolve_network("bridge", None, "lxc")
         assert result == {"type": "bridge", "bridge": "lxcbr0", "port": None}
 
     @patch("kento.detect_bridge", return_value=None)
     def test_bridge_no_interface_errors(self, mock_detect):
         with pytest.raises(ValidationError, match="no bridge interface found"):
-            resolve_network("bridge", None, "lxc")
+            _resolve_network("bridge", None, "lxc")
 
     def test_port_implies_usermode_for_vm(self):
         """Port implies usermode for VM mode."""
-        result = resolve_network(None, None, "vm", port="10022:22")
+        result = _resolve_network(None, None, "vm", port="10022:22")
         assert result == {"type": "usermode", "bridge": None, "port": "10022:22"}
 
     @patch("kento.detect_bridge", return_value="lxcbr0")
     def test_port_does_not_imply_usermode_for_lxc(self, mock_detect):
         """Port does NOT imply usermode for LXC — auto-detects bridge instead."""
-        result = resolve_network(None, None, "lxc", port="10022:22")
+        result = _resolve_network(None, None, "lxc", port="10022:22")
         assert result["type"] == "bridge"
         assert result["port"] == "10022:22"
 
     @patch("kento.detect_bridge", return_value=None)
     def test_port_lxc_no_bridge_falls_to_none(self, mock_detect):
         """Port for LXC with no bridge found falls to 'none' (validation elsewhere)."""
-        result = resolve_network(None, None, "lxc", port="10022:22")
+        result = _resolve_network(None, None, "lxc", port="10022:22")
         assert result["type"] == "none"
         assert result["port"] == "10022:22"
 
     def test_port_implies_usermode_for_pve_vm(self):
         """Port implies usermode for PVE-VM mode."""
-        result = resolve_network(None, None, "pve-vm", port="10022:22")
+        result = _resolve_network(None, None, "pve-vm", port="10022:22")
         assert result == {"type": "usermode", "bridge": None, "port": "10022:22"}
 
     def test_explicit_none(self):
-        result = resolve_network("none", None, "lxc")
+        result = _resolve_network("none", None, "lxc")
         assert result == {"type": "none", "bridge": None, "port": None}
 
     def test_explicit_host(self):
-        result = resolve_network("host", None, "lxc")
+        result = _resolve_network("host", None, "lxc")
         assert result == {"type": "host", "bridge": None, "port": None}
 
     def test_explicit_usermode(self):
-        result = resolve_network("usermode", None, "vm")
+        result = _resolve_network("usermode", None, "vm")
         assert result == {"type": "usermode", "bridge": None, "port": None}
 
 
