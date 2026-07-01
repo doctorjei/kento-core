@@ -33,6 +33,7 @@ import logging
 import os
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -94,6 +95,64 @@ def _wire_url(ref: UrlReference) -> str:
     if ref.query:
         url += f"?{ref.query}"
     return url
+
+
+class _RedirectObserver(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that OBSERVES insecure (cleartext) hops, policy unchanged.
+
+    urllib follows redirects transparently; we subclass its default handler and
+    override ``redirect_request`` only to *record* any hop whose target scheme is
+    ``http://`` — we do NOT change whether the hop is followed. ``super()`` keeps
+    urllib's normal redirect policy (it already follows http/https and refuses
+    exotic schemes), so we record a hop only when ``super()`` would actually
+    follow it (returns a non-``None`` request). This warns about a cleartext
+    downgrade the fetch really takes, never about one urllib itself refuses.
+
+    ``insecure_hops`` holds the raw ``newurl`` of each recorded cleartext hop —
+    kept raw here (never logged), and reduced to scheme+host at the WARNING
+    boundary (``_insecure_redirect_condition``) so no query token ever leaks.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.insecure_hops: list[str] = []
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and newurl.lower().startswith("http://"):
+            self.insecure_hops.append(newurl)
+        return new
+
+
+def _redirect_opener() -> tuple[urllib.request.OpenerDirector, _RedirectObserver]:
+    """Build an opener carrying a fresh ``_RedirectObserver`` and return both.
+
+    The observer must be reachable after the stream so its ``insecure_hops`` can
+    be inspected, so we return it alongside the opener. Factored out (rather than
+    inlined) as the single seam the tests patch to inject a recorded hop.
+    """
+    observer = _RedirectObserver()
+    return urllib.request.build_opener(observer), observer
+
+
+def _insecure_redirect_condition(hops: list[str]) -> Condition:
+    """Reduce recorded insecure hops to ONE WARNING condition — secret-safe.
+
+    A redirect ``Location`` can carry a presigned token in its query, so the
+    message and context expose ONLY the LAST hop's scheme+host (parsed via
+    ``urllib.parse.urlsplit`` → ``.hostname``), never the raw query/path/userinfo
+    — mirroring the fetcher's existing password-masking discipline. Multiple hops
+    collapse to a single condition summarizing the count and the last host.
+    """
+    host = urllib.parse.urlsplit(hops[-1]).hostname or "<unknown>"
+    return Condition(
+        severity=Severity.WARNING,
+        kind=ConditionKind.INSECURE_REDIRECT,
+        message=(
+            f"followed a redirect to a non-https host {host!r} (cleartext)"
+        ),
+        context={"insecure_hop_host": host, "hop_count": len(hops)},
+    )
 
 
 def _is_timeout(exc: urllib.error.URLError) -> bool:
@@ -173,11 +232,21 @@ def fetch_url(
     wire = _wire_url(ref)
     logger.debug("fetch: GET %s -> %s (cap=%d)", masked, dest, cap)
 
+    # The redirect-observing opener + its observer. urllib follows redirects
+    # transparently; the observer records any cleartext (``http://``) hop WITHOUT
+    # changing whether it is followed (LOCKED: follow, don't fail). After a
+    # SUCCESSFUL stream, a recorded hop becomes ONE INSECURE_REDIRECT Warning
+    # appended to ``conditions`` — the warning rides only on Ok→Warning, never on
+    # an Error (a failed fetch returns its Error; the warning is dropped).
+    opener, observer = _redirect_opener()
+
     # --- The boundary. Catch ONLY the predictable network failures and convert
     # them to an Error; let everything else propagate (panic). HTTPError is a
     # subclass of URLError, so it MUST be caught first.
     try:
-        return _stream_to_file(wire, dest, cap, timeout, masked, conditions)
+        return _stream_to_file(
+            wire, dest, cap, timeout, masked, conditions, opener, observer
+        )
     except urllib.error.HTTPError as exc:
         return Error(
             conditions=(
@@ -232,21 +301,33 @@ def _stream_to_file(
     timeout: float,
     masked: str,
     conditions: list[Condition],
+    opener: urllib.request.OpenerDirector,
+    observer: _RedirectObserver,
 ) -> Result[Path]:
     """Open ``wire``, stream the body to ``dest``, enforcing ``cap`` per-chunk.
 
-    Returns ``Result.of(dest, conditions)`` on a clean read (``Ok`` or, when the
-    fragment was dropped, ``Warning``). On a body that EXCEEDS the cap mid-stream
-    it aborts, deletes the partial ``dest``, and returns ``Error(SIZE_EXCEEDED)``
-    — the cap is enforced on bytes actually STREAMED, never on the (lie-able)
-    Content-Length. Network failures raise out of this function to ``fetch_url``'s
-    boundary; a disk ``OSError`` while writing also propagates (panic) — it is NOT
-    converted here.
+    Returns ``Result.of(dest, conditions)`` on a clean read (``Ok``, or a
+    ``Warning`` when the fragment was dropped and/or a cleartext redirect hop was
+    observed). On a body that EXCEEDS the cap mid-stream it aborts, deletes the
+    partial ``dest``, and returns ``Error(SIZE_EXCEEDED)`` — the cap is enforced
+    on bytes actually STREAMED, never on the (lie-able) Content-Length. Network
+    failures raise out of this function to ``fetch_url``'s boundary; a disk
+    ``OSError`` while writing also propagates (panic) — it is NOT converted here.
+
+    The connection is opened through ``opener`` (which carries ``observer``), so
+    urllib's redirect chain flows through ``observer`` and any cleartext hop is
+    recorded — with NO global state touched (a scoped opener, not
+    ``install_opener``). An INSECURE_REDIRECT ``Warning`` is appended to
+    ``conditions`` ONLY on a clean read — never on the SIZE_EXCEEDED Error, and
+    never on a network failure (those raise before the append), honouring "the
+    warning rides only on Ok→Warning".
     """
-    # ``urlopen`` opens the connection (may raise URLError/HTTPError/timeout — the
-    # boundary catches it). The ``with`` on the response closes the socket on every
-    # exit path. We do NOT pass/honor any cache (no-cache: a fresh GET each call).
-    with urllib.request.urlopen(wire, timeout=timeout) as resp:
+    # ``opener.open`` opens the connection (may raise URLError/HTTPError/timeout —
+    # the boundary catches it) and follows redirects through ``observer``. It is
+    # the scoped equivalent of ``urlopen`` (which is just the module-default
+    # opener), so we hold NO global state. The ``with`` on the response closes the
+    # socket on every exit path. No cache (no-cache: a fresh GET each call).
+    with opener.open(wire, timeout=timeout) as resp:
         total = 0
         exceeded = False
         # The destination file handle is opened in the SAME ``with`` as the
@@ -269,6 +350,13 @@ def _stream_to_file(
                 out.write(chunk)
 
     if not exceeded:
+        # Clean read → this is the ONLY path that surfaces the redirect warning
+        # (success). A recorded cleartext hop becomes one INSECURE_REDIRECT
+        # WARNING; ``Result.of`` then makes the outcome a ``Warning``. The
+        # SIZE_EXCEEDED Error below and any network failure (which raised before
+        # reaching here) never carry it.
+        if observer.insecure_hops:
+            conditions.append(_insecure_redirect_condition(observer.insecure_hops))
         return Result.of(dest, tuple(conditions))
 
     # The cap-break fired. The partial file is now closed; remove it. A failure
