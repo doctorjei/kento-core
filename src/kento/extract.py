@@ -32,10 +32,14 @@ the host. We do NOT hand-roll the tar-slip defense — hand-rolled symlink-aware
 extraction safety is a known CVE source. We extract with the PEP 706 stdlib
 **tar filter** (``tarfile.tar_filter``, ``for_data=False``), the vetted,
 maintained filter INTENDED for Unix/system tar archives (filesystem IMAGES, not
-untrusted data archives). It STILL blocks every traversal-write outside
-``dest_dir`` — a ``..`` name, an absolute member NAME (leading slash stripped so
-it lands inside dest), and a link whose target escapes the destination all raise.
-But it DELIBERATELY PERMITS absolute symlink TARGETS (e.g.
+untrusted data archives). It STILL blocks every traversal-WRITE outside
+``dest_dir``: a ``..`` name and an absolute member NAME are contained (the
+leading slash is stripped so the member lands inside dest), and a member whose
+extraction would WRITE outside dest — a link (or hardlink) whose target resolves
+outside the destination, or a write THROUGH such a link — raises. (A bare
+dangling symlink whose target merely points elsewhere is NOT a write and does not
+raise; write-containment, not target-restriction, is the guarantee.) It
+DELIBERATELY PERMITS absolute symlink TARGETS (e.g.
 ``/usr/lib/ssl/certs -> /etc/ssl/certs``) and special files (device nodes,
 fifos), which are CORRECT-BY-CONSTRUCTION in a real OS rootfs — a gemet rootfs
 carries hundreds of them — and are never a host-side hazard, since the host never
