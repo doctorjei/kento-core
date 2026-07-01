@@ -4,3 +4,7 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Generated API reference (make docs). The docstrings are the source of truth;
+# the rendered HTML is a build artifact and is not committed.
+docs/api/

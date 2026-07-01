@@ -5,10 +5,43 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0.dev0] — unreleased
+
+> **The library-1.0 line.** This entry gathers the object-model finalization —
+> the `Result` pivot, the URL-VM boot source (Option 2), and the docstring +
+> reference-doc pass — into the next synced `.devN` heading (still above the
+> stable `1.6.2`, nothing yanked; the package version stays on the shared
+> pre-release line until a coordinated cut).
 
 ### Added
 
+- **URL-VM boot source (Option 2 — §3.8/§4.1/§8, URL-VM Phase B).** A
+  `VirtualMachine` can boot directly from an `https://…/rootfs.txz` rootfs, with
+  the kernel and initramfs fetched from their own `https://` URLs — **VM-only**,
+  **ephemeral** (fetched + extracted at start, discarded on destroy), no OCI
+  store involved. E2E-proven end-to-end in both `vm` and `pve-vm` modes against
+  real gemet v1.7.3 release assets.
+  - `VirtualMachine.create()` / `transient()`: `image` accepts an
+    `https://…/rootfs.txz` URL string (in addition to an OCI ref /
+    `OciReference` / `Image`), and `kernel` / `initramfs` each accept a **local
+    path OR an `https://` URL string**, independently (`None` → in-image
+    `/boot`). A URL rootfs on `SystemContainer` (LXC) is rejected (VM-only).
+  - New stdlib-only fetch/extract path: `kento.fetch.fetch_url` (https-only, no
+    cache, size-capped — default **2 GiB**, override with the
+    `KENTO_URL_MAX_BYTES` env var; an `https://`→`http://` redirect is followed
+    but surfaced as a `Warning`) and `kento.extract.extract_txz` (safe `.txz`
+    extraction). New value type `LocalDirectoryImage` (a `LayeredImage` — the
+    fetched-and-extracted rootfs directory, no content `Digest`, ephemeral
+    `release`); `Instance.image()` resolves a URL boot source to it.
+  - New `ConditionKind` members for the fetch/extract boundary:
+    `fragment_dropped`, `fetch_timeout`, `size_exceeded`, `non_https`,
+    `fetch_failed`, `http_error`, `extract_failed`, `insecure_redirect`.
+- **`docs/library-guide.md` + generated API reference.** A narrative front door
+  for the `import kento` library consumer (the typed object model, `Result`
+  handling, URL-VM from code, lookup/lifecycle, `transient`), plus a `make docs`
+  target that renders the public docstrings to HTML with `pdoc` (the new `docs`
+  optional-dependency group; output `docs/api/` is git-ignored — the docstrings
+  are the source of truth).
 - **`UrlReference` source-reference value type (§3.8 — URL-VM Phase B, Block
   B1).** The `http(s)://` member of the `SourceReference` family, reserved as
   FUTURE in run 29 and now built. A pure, frozen, RFC-3986 locator value type
@@ -75,6 +108,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Error` back to a raise (`ResultError`, a `KentoError`) with the original
   message preserved, so existing `except KentoError` handlers behave exactly as
   before. **Behavior-preserving** for all in-library callers (they `.unwrap()`).
+
+- **`Result` pivot completed across the verb surface (Blocks S1–S7).**
+  Following the `parse` boundary (P1), the whole public verb surface now returns
+  `Result[T]` for **predictable** outcomes instead of raising: creation
+  (`SystemContainer.create` / `VirtualMachine.create`), lookup/lifecycle
+  (`Instance.get` / `list` / `adopt` / `start` / `stop` / `destroy` / `attach` /
+  `exec` / `logs`), and the module-level `kento.diagnose()`. Exceptions are now
+  **panic-only** — a broken invariant or genuine API misuse (e.g. a non-`OVERLAY`
+  `storage` raises `NotImplementedError`). Each verb wraps its body at the
+  boundary: a caught `KentoError` becomes a one-`Condition` `Error` with a `kind`
+  matching the exception type (`validation`, `instance_not_found`,
+  `instance_exists`, `image_not_found`, `mode_error`, `invalid_state`,
+  `stop_timeout`, `subprocess_failed`, else `internal`), most-specific-first,
+  message preserved for `unwrap()`. The still-raising surfaces by design: the
+  property setters, `transient()` (a context manager cannot return a `Result` —
+  it `unwrap()`s internally), and `require_root()`.
+
+### Changed
+
+- **Object-model surface finalized for library-1.0.** The typed public surface
+  re-exported from `kento` is locked (instance/image/reference/result/value
+  families). `resolve_network` is **no longer public** — it is now the internal
+  `_resolve_network` (the network resolution is a runtime helper, not part of the
+  library contract).
+
+### Fixed
+
+- **`extract_txz` uses `tarfile.tar_filter` (not `data_filter`) for `.txz`
+  rootfs extraction.** `data_filter` (PEP-706, for untrusted *data* archives)
+  rejects the absolute-target symlinks a real OS rootfs carries by construction
+  (`/usr/lib/ssl/certs → /etc/ssl/certs`, masked systemd units `→ /dev/null`,
+  etc.), so no Debian-based rootfs would extract. `tar_filter` (`for_data=False`)
+  still blocks the only threat that matters here — a path-traversal **write**
+  outside the destination — while permitting absolute link targets and special
+  files, which are correct for a filesystem image. Still fails closed on Python
+  without the filter (< 3.11.4).
+- **VM kernel/initramfs boot-source override now honored in `pve-vm`.** The
+  Phase-A / URL-VM `kernel` / `initramfs` override (the `kento-kernel` /
+  `kento-initramfs` markers) was previously read only by the plain-`vm` boot
+  path; the `pve-vm` `qm args:` generation and the pre-start hookscript hardcoded
+  the in-image `/boot` path, so an override (and thus URL-VM) failed to boot on a
+  PVE host. Both the args generation and the hookscript now honor the override,
+  falling back to the in-image path — verified booting on `pve-vm` and plain
+  `vm`.
 
 ## [1.6.3.dev0] - 2026-06-30
 

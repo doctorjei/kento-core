@@ -11,6 +11,12 @@ license = "GPL-3.0-only"
 
 # NO [project.scripts] — the console entry point lives in kento-cli (separate repo).
 
+# Optional dependency groups. `docs` supplies the API-reference generator
+# (pdoc renders the public docstrings to HTML). Install + generate with:
+#   pip install -e '.[docs]'   then   make docs
+[project.optional-dependencies]
+docs = ["pdoc>=14"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

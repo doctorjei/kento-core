@@ -2195,13 +2195,18 @@ class VirtualMachine(Instance):
         (``create.py`` promotes to ``"pve-vm"`` for PVE); there is NO
         ``unprivileged``/``lxc_args`` (VMs have their own isolation), and the
         backend pass-through is ``qemu_args`` (``--qemu-arg``) instead.
-        ``kernel``/``initramfs`` are the OPT-IN boot-source override (§8 Phase A):
-        LOCAL filesystem paths to a kernel / initramfs that supersede the
-        in-image ``/boot`` for VM direct-kernel-boot, each side independent
-        (``None`` → in-image fallback). They are COPIED into the instance state
-        dir at create (reaped on destroy) and echoed on the resolved
-        :attr:`image`. ``machine`` STAYS a non-param image-contract constant
-        (M16, §11.0). ``storage`` other than ``OVERLAY`` raises (JC4). The
+        ``kernel``/``initramfs`` are the OPT-IN boot-source override (§8): a
+        kernel / initramfs that supersedes the in-image ``/boot`` for VM
+        direct-kernel-boot, each side independent (``None`` → in-image fallback).
+        Each accepts EITHER a LOCAL filesystem path (Phase A) OR an ``https://``
+        URL string (Phase B / URL-VM Option 2) — a URL is fetched into the
+        instance dir at create; a local file is copied. Whichever form, the
+        resolved override is stored in the instance state dir (reaped on destroy)
+        and echoed on the resolved :attr:`image`. Likewise ``image`` may be a
+        ``str`` OCI reference OR (VM modes only) an ``https://…/rootfs.txz`` URL
+        string, which is fetched + extracted into an ephemeral rootfs at start.
+        ``machine`` STAYS a non-param image-contract constant (M16, §11.0).
+        ``storage`` other than ``OVERLAY`` raises (JC4). The
         create-time long tail
         (``forwards``/``searchdomain``/``timezone``/``ssh_*``/``config_mode``/
         ``force``) is the SAME as :meth:`SystemContainer.create`.
@@ -2290,8 +2295,10 @@ class VirtualMachine(Instance):
         """Context-manager create for a throwaway VM (M27, §11.4).
 
         Same parameters as :meth:`create` (including the create-time long tail
-        and the §8 Phase A ``kernel``/``initramfs`` boot-source override); the
-        handle is ``with``-scoped and **guaranteed torn down on exit** via
+        and the §8 ``kernel``/``initramfs`` boot-source override — each a LOCAL
+        path OR an ``https://`` URL string, per :meth:`create`; ``image`` may
+        likewise be an OCI ref or an ``https://…/rootfs.txz`` URL for VM modes);
+        the handle is ``with``-scoped and **guaranteed torn down on exit** via
         ``destroy(force=True)`` (normal OR exceptional). The ONLY context-manager
         entry — a plain ``create``/``get`` handle raises ``TypeError`` under
         ``with`` (JC6, §11.4).
