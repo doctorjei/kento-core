@@ -126,6 +126,12 @@ class ConditionKind(str, Enum):
     HTTP_ERROR = "http_error"
     EXTRACT_FAILED = "extract_failed"
 
+    # --- Block B2-redirect-warn — a server redirect DOWN to cleartext
+    # ``http://`` is FOLLOWED (not failed) but surfaced as a WARNING so the
+    # cleartext hop is user-visible (contrast NON_HTTPS, the hard Error for a
+    # non-https INITIAL url). Emitted only by the fetcher, only on a clean fetch.
+    INSECURE_REDIRECT = "insecure_redirect"
+
     # --- Result-propagation-sweep kinds (Block S1). One kind per KentoError
     # subclass — same granularity a caller gets from the exception type today.
     # Consumed by ``_error_from`` (the boundary helper below); seadog/CLI branch

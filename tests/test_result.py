@@ -102,6 +102,8 @@ def test_conditionkind_members_are_the_seeded_seam():
         "internal",
         # Block B2-extract — the `.txz` extractor's boundary kind.
         "extract_failed",
+        # Block B2-redirect-warn — cleartext-downgrade redirect warning.
+        "insecure_redirect",
     }
 
 
@@ -577,6 +579,7 @@ def test_new_condition_kinds_reexported_via_kento():
         "STOP_TIMEOUT",
         "SUBPROCESS_FAILED",
         "INTERNAL",
+        "INSECURE_REDIRECT",
     ):
         assert hasattr(kento.ConditionKind, name), name
 
