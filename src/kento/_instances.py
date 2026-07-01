@@ -1265,8 +1265,15 @@ class Instance(ABC):
                         inst = _load_snapshot(
                             container_dir, _read_raw_mode(container_dir)
                         )
-                    except (OSError, KentoError) as exc:
+                    except (OSError, KentoError, NotImplementedError) as exc:
                         # Total over the store: skip+log a corrupt/raced entry.
+                        # ``NotImplementedError`` covers a boot source whose scheme
+                        # is a designed-but-unbuilt feature (e.g. a ``file://``
+                        # marker → ``SourceReference.parse`` panics): a DIRECT
+                        # ``get``/``image`` load still panics on it (that scheme
+                        # genuinely isn't resolvable), but a single such entry must
+                        # not abort enumeration of every healthy instance —
+                        # totality is an enumeration property (§7.2).
                         _instances_logger.warning(
                             "skipping unreadable instance %s: %s",
                             container_dir.name, exc,

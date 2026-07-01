@@ -26,6 +26,7 @@ from kento import (
     NetworkConnection,
     NetworkMode,
     OciReference,
+    SourceReference,
     PlatformMode,
     PlatformProfile,
     Status,
@@ -3205,3 +3206,62 @@ def test_image_file_scheme_source_still_unresolvable(tmp_path):
     with patch("kento.is_running", return_value=False):
         with pytest.raises(NotImplementedError):
             _instances._load_snapshot(d, "vm")
+
+
+def test_image_else_branch_raises_for_unhandled_source(tmp_path):
+    """image() raises for a SourceReference it can resolve neither as OCI nor URL.
+
+    A gate-C defensive guard: today _load_sources only yields Oci/Url sources, so
+    the else-branch is unreachable via a real snapshot. We exercise it directly by
+    installing a non-Oci, non-Url SourceReference into _sources — a future
+    (unhandled) member must fail loudly (InstanceNotFoundError), not silently
+    resolve to a wrong image.
+    """
+    from dataclasses import dataclass
+
+    d = _make_vm(tmp_path)
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+
+    @dataclass(frozen=True)
+    class _FutureSource(SourceReference):  # not Oci, not Url
+        def render(self, *, mask_password: bool = True) -> str:
+            return "future://x"
+
+        def normalize(self):
+            return self
+
+        @property
+        def scheme(self) -> str:
+            return "future"
+
+    future = _FutureSource(endpoint=None, path="x", name="x", version=None)
+    object.__setattr__(inst, "_sources", (future,))
+    with pytest.raises(InstanceNotFoundError):
+        inst.image()
+
+
+def test_list_skips_file_scheme_entry_not_raises(tmp_path):
+    """list() SKIPS (not raises) a file:// entry, still returning the good ones.
+
+    The seam-fix follow-on: _load_sources now dispatches via SourceReference.parse,
+    which PANICS (NotImplementedError) on a file:// marker. Enumeration must stay
+    TOTAL (§7.2) — one unbuilt-scheme entry skips+logs, it does NOT abort the whole
+    listing. (A DIRECT get()/image() load of that entry still panics — totality is
+    an enumeration property, not a per-load one.)
+    """
+    lxc_base = tmp_path / "lxc"
+    vm_base = tmp_path / "vm"
+    lxc_base.mkdir()
+    vm_base.mkdir()
+    _make_vm(vm_base, name="good")  # resolvable oci marker
+    _make_vm(vm_base, name="bad", **{"kento-image": "file:///srv/rootfs"})
+    with patch("kento.LXC_BASE", lxc_base), \
+            patch("kento.VM_BASE", vm_base), \
+            patch("kento.is_running", return_value=False):
+        result = VirtualMachine.list()
+    # Mutation guard: without the NotImplementedError skip, the file:// entry
+    # escapes the per-entry except and this call raises instead of returning.
+    assert isinstance(result, Ok)
+    names = sorted(i.name for i in result.unwrap())
+    assert names == ["good"]  # the file:// entry was skipped, the good one kept
