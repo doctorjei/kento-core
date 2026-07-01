@@ -3233,3 +3233,228 @@ class TestBootSourceOverride:
             with pytest.raises(ModeError, match="VM modes only"):
                 create("img:latest", name="c", mode="lxc",
                        initramfs=str(ifile))
+
+
+class TestCreateUrlRootfs:
+    """URL-VM Phase B (OPTION 2, B3b) — the W2 procedural URL rootfs branch.
+
+    A ``https://…/rootfs.txz`` `image` is fetched+extracted at create time via
+    ``urlvm.fetch_and_extract_rootfs`` and recorded so the existing start/boot
+    path runs unchanged; LXC modes reject a URL rootfs. NO real network — the
+    helper/fetcher are patched to materialize the dirs/files.
+    """
+
+    URL = "https://example.com/images/rootfs.txz"
+
+    def _mk_bases(self, tmp_path):
+        lxc_base = tmp_path / "lxc"
+        vm_base = tmp_path / "vm"
+        lxc_base.mkdir(exist_ok=True)
+        vm_base.mkdir(exist_ok=True)
+        return lxc_base, vm_base
+
+    def _fake_fetch_extract(self):
+        """Return a fetch_and_extract_rootfs stand-in that creates rootfs-base.
+
+        Signature mirrors the real helper (source, txz_dest, rootfs_dir) and
+        returns Ok(rootfs_dir) after creating the extracted tree — modelling a
+        clean fetch+extract with no network.
+        """
+        from kento._result import Ok
+
+        def _fake(source, txz_dest, rootfs_dir):
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            (rootfs_dir / "sentinel").write_text("rootfs")
+            return Ok(value=rootfs_dir)
+
+        return _fake
+
+    def _fake_fetch_url(self, content="FETCHED"):
+        """Return a fetch_url stand-in that writes `content` to dest, Ok(dest)."""
+        from kento._result import Ok
+
+        def _fake(ref, dest, **kw):
+            dest.write_text(content)
+            return Ok(value=dest)
+
+        return _fake
+
+    # ---- URL rootfs create (mode=vm): happy path + marker correctness -------
+
+    def test_url_rootfs_create_vm_writes_markers(self, tmp_path):
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        fake = MagicMock(side_effect=self._fake_fetch_extract())
+        with patch("kento.create.require_root"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.urlvm.fetch_and_extract_rootfs", fake), \
+             patch("kento.create.resolve_layers") as m_layers, \
+             patch("kento.create.resolve_image_id") as m_id, \
+             patch("kento.create.detect_cloudinit") as m_cloud:
+            create(self.URL, name="urlvm", mode="vm")
+
+        vm_dir = vm_base / "urlvm"
+        # kento-image is the URL verbatim.
+        assert (vm_dir / "kento-image").read_text().strip() == self.URL
+        # kento-layers is the single rootfs-base absolute path.
+        assert (vm_dir / "kento-layers").read_text().strip() == \
+            str(vm_dir / "rootfs-base")
+        # No kento-image-id for a URL rootfs (no content digest).
+        assert not (vm_dir / "kento-image-id").exists()
+        # The extracted tree is present.
+        assert (vm_dir / "rootfs-base" / "sentinel").is_file()
+        # The helper was called with the (ref, txz_dest, rootfs_dir) it should.
+        fake.assert_called_once()
+        args = fake.call_args.args
+        assert args[1] == vm_dir / "rootfs.txz"
+        assert args[2] == vm_dir / "rootfs-base"
+        # No podman/store op was performed on the URL image.
+        m_layers.assert_not_called()
+        m_id.assert_not_called()
+        m_cloud.assert_not_called()
+
+    def test_url_rootfs_skips_image_hold(self, tmp_path):
+        """A URL rootfs is self-contained — no podman image-hold is created."""
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        with patch("kento.create.require_root"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.urlvm.fetch_and_extract_rootfs",
+                   side_effect=self._fake_fetch_extract()), \
+             patch("kento.layers.create_image_hold") as m_hold:
+            create(self.URL, name="urlvm", mode="vm")
+        m_hold.assert_not_called()
+
+    # ---- VM-only reject: URL rootfs on LXC/PVE-LXC, before any mkdir/fetch ---
+
+    def test_url_rootfs_lxc_rejected_before_side_effects(self, tmp_path):
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        fake = MagicMock(side_effect=self._fake_fetch_extract())
+        with patch("kento.create.require_root"), \
+             patch("kento.pve.is_pve", return_value=False), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.urlvm.fetch_and_extract_rootfs", fake):
+            with pytest.raises(ModeError, match="VM modes only"):
+                create(self.URL, name="urlc", mode="lxc")
+        # No fetch, no instance dir — reject fired before any side effect.
+        fake.assert_not_called()
+        assert not (lxc_base / "urlc").exists()
+
+    def test_url_rootfs_pve_lxc_rejected(self, tmp_path):
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        fake = MagicMock(side_effect=self._fake_fetch_extract())
+        with patch("kento.create.require_root"), \
+             patch("kento.pve.is_pve", return_value=True), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.urlvm.fetch_and_extract_rootfs", fake):
+            # pve=True + mode="lxc" promotes to "pve" (pve-lxc) → URL rejected.
+            with pytest.raises(ModeError, match="VM modes only"):
+                create(self.URL, name="urlc", mode="lxc", pve=True)
+        fake.assert_not_called()
+
+    # ---- URL kernel / URL initrd (mode=vm): fetch, not copy -----------------
+
+    def test_url_kernel_fetched_and_marker_points_in_dir(self, tmp_path):
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        with patch("kento.create.require_root"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.resolve_layers", return_value="/a:/b"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.fetch.fetch_url",
+                   side_effect=self._fake_fetch_url("KBYTES")):
+            # OCI image + URL kernel: the kernel side is fetched.
+            create("img:latest", name="vmk", mode="vm",
+                   kernel="https://example.com/vmlinuz")
+        vm_dir = vm_base / "vmk"
+        assert (vm_dir / "kernel").read_text() == "KBYTES"
+        assert (vm_dir / "kento-kernel").read_text().strip() == \
+            str(vm_dir / "kernel")
+        assert not (vm_dir / "kento-initramfs").exists()
+
+    def test_url_initrd_fetched_and_marker_points_in_dir(self, tmp_path):
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        with patch("kento.create.require_root"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.resolve_layers", return_value="/a:/b"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.fetch.fetch_url",
+                   side_effect=self._fake_fetch_url("IBYTES")):
+            create("img:latest", name="vmi", mode="vm",
+                   initramfs="https://example.com/initrd.img")
+        vm_dir = vm_base / "vmi"
+        assert (vm_dir / "initramfs.img").read_text() == "IBYTES"
+        assert (vm_dir / "kento-initramfs").read_text().strip() == \
+            str(vm_dir / "initramfs.img")
+        assert not (vm_dir / "kento-kernel").exists()
+
+    def test_local_kernel_still_copied_not_fetched(self, tmp_path):
+        """Phase A regression: a LOCAL kernel path is copied, fetch untouched."""
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        kfile = tmp_path / "localkernel"
+        kfile.write_text("LOCAL")
+        m_fetch = MagicMock(side_effect=self._fake_fetch_url())
+        with patch("kento.create.require_root"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.resolve_layers", return_value="/a:/b"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.fetch.fetch_url", m_fetch):
+            create("img:latest", name="vmk", mode="vm", kernel=str(kfile))
+        vm_dir = vm_base / "vmk"
+        assert (vm_dir / "kernel").read_text() == "LOCAL"
+        assert (vm_dir / "kento-kernel").read_text().strip() == \
+            str(vm_dir / "kernel")
+        m_fetch.assert_not_called()
+
+    def test_url_kernel_lxc_rejected(self, tmp_path):
+        """A URL kernel on LXC hits the unchanged VM-only kernel guard."""
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        with patch("kento.create.require_root"), \
+             patch("kento.pve.is_pve", return_value=False), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base):
+            with pytest.raises(ModeError, match="VM modes only"):
+                create("img:latest", name="c", mode="lxc",
+                       kernel="https://example.com/vmlinuz")
+
+    # ---- failure → no orphan (undos cleanup) --------------------------------
+
+    def test_fetch_failure_leaves_no_orphan_dir(self, tmp_path):
+        """A predictable fetch Error (unwrap raises) rolls back the container dir."""
+        from kento._result import Error, Condition, ConditionKind, Severity
+
+        def _fail(source, txz_dest, rootfs_dir):
+            return Error(conditions=(
+                Condition(severity=Severity.ERROR,
+                          kind=ConditionKind.SIZE_EXCEEDED,
+                          message="download exceeded size cap"),))
+
+        lxc_base, vm_base = self._mk_bases(tmp_path)
+        with patch("kento.create.require_root"), \
+             patch("kento.create.subprocess.run"), \
+             patch("kento.create.LXC_BASE", lxc_base), \
+             patch("kento.create.VM_BASE", vm_base), \
+             patch("kento.create.upper_base",
+                   side_effect=lambda n, b=None: (b or lxc_base) / n), \
+             patch("kento.urlvm.fetch_and_extract_rootfs", side_effect=_fail):
+            from kento._result import ResultError
+            with pytest.raises(ResultError, match="size cap"):
+                create(self.URL, name="orphan", mode="vm")
+        # The container dir was removed by the undos cleanup — no orphan.
+        assert not (vm_base / "orphan").exists()
