@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kento-core"
-version = "1.6.3.dev0"
+version = "1.7.0.dev0"
 description = "Kento core library — compose OCI images into LXC/VM system containers (importable engine)"
 requires-python = ">=3.11"
 license = "GPL-3.0-only"

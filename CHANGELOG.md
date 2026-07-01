@@ -5,7 +5,7 @@ All notable changes to kento are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.0.dev0] — unreleased
+## [1.7.0.dev0] - 2026-07-01
 
 > **The library-1.0 line.** This entry gathers the object-model finalization —
 > the `Result` pivot, the URL-VM boot source (Option 2), and the docstring +
