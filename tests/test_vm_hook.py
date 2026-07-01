@@ -101,6 +101,29 @@ class TestGenerateVmHook:
         assert "vmlinuz" in hook
         assert "initramfs" in hook
 
+    def test_kernel_override_resolution_shell_twin(self):
+        """FIX-2: the hook is the shell twin of vm.resolve_boot_sources — it
+        must resolve the kernel/initramfs from the kento-kernel / kento-initramfs
+        override markers when present, else the in-image rootfs/boot/* default,
+        each side independent, then validate the RESOLVED path."""
+        hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
+        # In-image defaults seed the two vars.
+        assert 'KERNEL="$ROOTFS/boot/vmlinuz"' in hook
+        assert 'INITRAMFS="$ROOTFS/boot/initramfs.img"' in hook
+        # Per-side override read from the markers (mirrors resolve_boot_sources).
+        assert '[ -f "$CONTAINER_DIR/kento-kernel" ] && KERNEL=$(cat "$CONTAINER_DIR/kento-kernel")' in hook
+        assert '[ -f "$CONTAINER_DIR/kento-initramfs" ] && INITRAMFS=$(cat "$CONTAINER_DIR/kento-initramfs")' in hook
+        # Validation + error messages reference the RESOLVED path, not the
+        # hardcoded in-image one.
+        assert '[ ! -f "$KERNEL" ]' in hook
+        assert '[ ! -f "$INITRAMFS" ]' in hook
+        assert 'kernel not found at $KERNEL' in hook
+        assert 'initramfs not found at $INITRAMFS' in hook
+        # umount-on-failure preserved for both sides.
+        assert hook.count('umount "$ROOTFS" 2>/dev/null || true') >= 2
+        # Drift-guard comment points at the Python source of truth.
+        assert "resolve_boot_sources" in hook
+
     def test_is_executable_shell_script(self):
         hook = generate_vm_hook(Path("/d"), "/a:/b", "x", Path("/d"))
         assert hook.startswith("#!/bin/sh")

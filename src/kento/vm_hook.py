@@ -101,15 +101,27 @@ case "$PHASE" in
             exit 1
         }}
 
-        # 4. Validate kernel and initramfs
-        if [ ! -f "$ROOTFS/boot/vmlinuz" ]; then
+        # 4. Resolve + validate kernel and initramfs.
+        # DRIFT-GUARD: this is the SHELL TWIN of vm.py:resolve_boot_sources
+        # (the Python source of truth) — the qm args: line in pve.py resolves
+        # the exact same paths via that resolver, and this hook MUST validate
+        # the identical files or a start can pass validation yet boot a wrong
+        # (or missing) kernel. Same policy: kento-kernel / kento-initramfs
+        # markers (host-absolute override paths written by create.py) win per
+        # side, else the in-image rootfs/boot/* default. If the Python resolver
+        # changes, update this shell twin (and vice versa).
+        KERNEL="$ROOTFS/boot/vmlinuz"
+        [ -f "$CONTAINER_DIR/kento-kernel" ] && KERNEL=$(cat "$CONTAINER_DIR/kento-kernel")
+        INITRAMFS="$ROOTFS/boot/initramfs.img"
+        [ -f "$CONTAINER_DIR/kento-initramfs" ] && INITRAMFS=$(cat "$CONTAINER_DIR/kento-initramfs")
+        if [ ! -f "$KERNEL" ]; then
             umount "$ROOTFS" 2>/dev/null || true
-            echo "kento-hook: error: kernel not found at $ROOTFS/boot/vmlinuz" >&2
+            echo "kento-hook: error: kernel not found at $KERNEL" >&2
             exit 1
         fi
-        if [ ! -f "$ROOTFS/boot/initramfs.img" ]; then
+        if [ ! -f "$INITRAMFS" ]; then
             umount "$ROOTFS" 2>/dev/null || true
-            echo "kento-hook: error: initramfs not found at $ROOTFS/boot/initramfs.img" >&2
+            echo "kento-hook: error: initramfs not found at $INITRAMFS" >&2
             exit 1
         fi
 
