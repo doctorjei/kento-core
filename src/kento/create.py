@@ -338,6 +338,29 @@ def _validate_env(env: list[str]) -> None:
             )
 
 
+def _url_ref_or_none(value: str):
+    """Return a ``UrlReference`` if ``value`` is an http(s) URL, else ``None``.
+
+    Used to classify a ``--kernel``/``--initrd`` side, which is a LOCAL PATH or
+    an http(s) URL (never an OCI ref). We must key on the URL SCHEME, not on
+    ``SourceReference.parse`` alone: a local absolute path (``/boot/vmlinuz``)
+    is not a valid source reference and ``parse`` would RAISE
+    ``MalformedReference`` on it — that raise is not a "this is a URL" signal.
+    So we only parse (and return the ``UrlReference``) when the string carries a
+    genuine ``http://``/``https://`` scheme prefix; anything else — a path, a
+    bare name — returns ``None`` and is handled as a local file. A malformed
+    http(s) URL still surfaces its parse error via ``.unwrap()`` (a real input
+    error), consistent with the rootfs ``image`` boundary.
+    """
+    from kento._references import SourceReference, UrlReference
+    import re
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)://", value)
+    if m is None or m.group(1).lower() not in ("http", "https"):
+        return None
+    ref = SourceReference.parse(value).unwrap()
+    return ref if isinstance(ref, UrlReference) else None
+
+
 def _run_cleanup(undos: list[tuple[str, object]]) -> None:
     """Run cleanup callables in reverse order. Best-effort — log and continue on errors.
 
@@ -768,6 +791,17 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             else:
                 mode = "pve"
 
+    # URL-VM Phase B (OPTION 2, B3b): classify the `image` source ONCE, here —
+    # after PVE promotion so `mode` is resolved, before any store/FS work. A
+    # bare tag / oci:// parses to an OciReference (the working OCI path,
+    # UNCHANGED); an https URL parses to a UrlReference (the W2 procedural URL
+    # branch). `.unwrap()` is deliberate: a malformed `image` string is
+    # pre-existing create behavior — it surfaces at create's boundary (S5's
+    # classmethod maps it via _error_from), exactly as a bad OCI ref does today.
+    from kento._references import SourceReference, UrlReference
+    rootfs_ref = SourceReference.parse(image).unwrap()
+    rootfs_is_url = isinstance(rootfs_ref, UrlReference)
+
     # --lxc-arg targets plain-LXC's native config ONLY. On a PVE host the
     # LXC config IS the PVE .conf (which carries raw lxc.* lines via
     # --pve-arg), and VM modes have no native LXC config at all. Reject here
@@ -786,11 +820,26 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 "LXC config)."
             )
 
-    # Boot-source override (§8 Phase A, run 38): --kernel/--initrd are VM-only,
-    # LOCAL-FILE-only. Validate + reject for LXC here — after PVE promotion so
-    # `mode` is resolved — BEFORE any filesystem mutation. Containers share the
-    # host kernel; there is no per-instance kernel to override, so any override
-    # on an LXC mode is a hard ModeError (mirrors --lxc-arg/--unprivileged).
+    # URL-VM (OPTION 2, B3b): a URL rootfs is VM-only — it is fetched+extracted
+    # into a single overlay lowerdir at create time and booted as a VM; an LXC
+    # instance is assembled from the podman store, which a self-contained URL
+    # rootfs never enters. Reject here — after PVE promotion so `mode` is
+    # resolved — BEFORE any mkdir/fetch (mirrors the kernel/initrd guard just
+    # below). Message mirrors the kernel/initrd ModeError shape.
+    if rootfs_is_url and mode not in ("vm", "pve-vm"):
+        raise ModeError(
+            "a URL rootfs (https://…) applies to VM modes only — a system "
+            "container is assembled from the local OCI store, not from a "
+            "fetched rootfs archive."
+        )
+
+    # Boot-source override (§8 Phase A, run 38; URL sides added B3b):
+    # --kernel/--initrd are VM-only. Validate + reject for LXC here — after PVE
+    # promotion so `mode` is resolved — BEFORE any filesystem mutation.
+    # Containers share the host kernel; there is no per-instance kernel to
+    # override, so any override on an LXC mode is a hard ModeError (mirrors
+    # --lxc-arg/--unprivileged). A side may be a LOCAL FILE (Phase A) or an
+    # https URL (B3b, fetched in-try below); the VM-only guard covers both.
     if kernel is not None or initramfs is not None:
         if mode not in ("vm", "pve-vm"):
             raise ModeError(
@@ -798,16 +847,28 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
                 "container shares the host kernel (no per-instance kernel "
                 "to override)."
             )
-        # LOCAL FILE ONLY (no URL/fetch in Phase A): each given path must EXIST
-        # and be a regular FILE. Name the path + flag so the error is actionable.
-        if kernel is not None and not Path(kernel).is_file():
+        # Per side: an http(s) URL is fetched at create time (no local-file
+        # check — a URL is not a path); a LOCAL side must EXIST and be a regular
+        # FILE (Phase A behavior UNCHANGED). _url_ref_or_none keys on the URL
+        # scheme, so a local path never mis-classifies and its non-reference
+        # form never raises. The parsed ref is stashed for the fetch below (no
+        # re-parse). Scheme policy (http vs https) is the fetcher's job.
+        kernel_url_ref = _url_ref_or_none(kernel) if kernel is not None else None
+        initramfs_url_ref = (_url_ref_or_none(initramfs)
+                             if initramfs is not None else None)
+        if (kernel is not None and kernel_url_ref is None
+                and not Path(kernel).is_file()):
             raise ValidationError(
                 f"--kernel file not found (or not a regular file): {kernel}"
             )
-        if initramfs is not None and not Path(initramfs).is_file():
+        if (initramfs is not None and initramfs_url_ref is None
+                and not Path(initramfs).is_file()):
             raise ValidationError(
                 f"--initrd file not found (or not a regular file): {initramfs}"
             )
+    else:
+        kernel_url_ref = None
+        initramfs_url_ref = None
 
     # --unprivileged: validate mode + run the fail-closed per-layer idmap probe
     # BEFORE any filesystem mutation (mirrors the apparmor pre-flight's
@@ -905,22 +966,37 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     # creates. resolve_layers either returns a non-empty string or raises
     # ImageNotFoundError on a missing image, so no defensive empty-string check
     # is needed here.
-    layers = resolve_layers(image)
-
-    # Fail closed on an over-deep overlay BEFORE any filesystem side effect.
-    # The kernel caps classic mount(2) options at one 4096-byte page; an image
-    # with more than MAX_OVERLAY_LAYERS layers would overrun it and be silently
-    # truncated, failing the overlay mount with cryptic errors. The layer-count
-    # cap is checked here (zero side effects); the exact-byte backstop runs once
-    # state_dir is known (below). See layers.preflight_overlay_layers.
+    #
+    # URL branch (B3b): a URL rootfs is NOT in the podman store — there is no
+    # image to resolve/probe. SKIP resolve_layers, the layer-count preflight,
+    # and the cloud-init probe (all podman/OCI-store operations that would fail
+    # on a URL). ``layers`` is set in-try from the fetched+extracted rootfs dir
+    # (a single lowerdir); ``has_cloudinit`` is False (a URL rootfs has no store
+    # to auto-detect cloud-init in — an explicit --config-mode cloudinit is
+    # rejected below by the same has_cloudinit=False path as an OCI image
+    # without cloud-init).
     from kento.layers import preflight_overlay_layers
-    preflight_overlay_layers(layers)
+    if rootfs_is_url:
+        layers = None
+        has_cloudinit = False
+    else:
+        layers = resolve_layers(image)
 
-    # detect_cloudinit() does filesystem I/O over every layer. ``layers`` is
-    # resolved once and never reassigned, so probe once and reuse the boolean
-    # at all three decision sites below (cloudinit-mode precondition, the
-    # root-ssh advisory, and the effective config-mode selection).
-    has_cloudinit = detect_cloudinit(layers)
+        # Fail closed on an over-deep overlay BEFORE any filesystem side effect.
+        # The kernel caps classic mount(2) options at one 4096-byte page; an
+        # image with more than MAX_OVERLAY_LAYERS layers would overrun it and be
+        # silently truncated, failing the overlay mount with cryptic errors. The
+        # layer-count cap is checked here (zero side effects); the exact-byte
+        # backstop runs once state_dir is known (below). See
+        # layers.preflight_overlay_layers.
+        preflight_overlay_layers(layers)
+
+        # detect_cloudinit() does filesystem I/O over every layer. ``layers`` is
+        # resolved once and never reassigned (OCI), so probe once and reuse the
+        # boolean at all three decision sites below (cloudinit-mode
+        # precondition, the root-ssh advisory, and the effective config-mode
+        # selection).
+        has_cloudinit = detect_cloudinit(layers)
 
     # F7 + F11: hold the cross-process kento lock across the entire
     # allocate-and-commit sequence. Two concurrent `kento create` processes
@@ -1030,9 +1106,35 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
     ]
 
     try:
-        from kento.layers import create_image_hold, remove_image_hold
-        create_image_hold(image, name)
-        undos.append(("image-hold", lambda: remove_image_hold(name)))
+        # OCI-store image hold pins the source image against pruning. A URL
+        # rootfs is self-contained (fetched+extracted into the instance dir, no
+        # store entry) — there is nothing to pin, so SKIP the hold for URL. The
+        # container-dir rmtree undo (registered first, above) still reaps the
+        # extracted tree on any later failure.
+        if not rootfs_is_url:
+            from kento.layers import create_image_hold, remove_image_hold
+            create_image_hold(image, name)
+            undos.append(("image-hold", lambda: remove_image_hold(name)))
+
+        # URL rootfs (B3b): fetch the .txz and extract it into
+        # container_dir/rootfs-base (the single overlay lowerdir), inside the
+        # try so a fetch/extract failure is caught by ``except BaseException``
+        # below and the container-dir rmtree undo reaps the partial .txz +
+        # rootfs-base (both live under container_dir). ``.unwrap()`` turns a
+        # PREDICTABLE fetch/extract Error (SIZE_EXCEEDED / HTTP_ERROR /
+        # EXTRACT_FAILED / …) into a ResultError (a KentoError) → the rollback
+        # runs → it re-raises → the S5 classmethod boundary maps it. `layers` is
+        # then the single rootfs-base absolute path (a lone lowerdir that passes
+        # cleanly through to_overlay_lowerdir's degrade). A fragment-drop Warning
+        # in the Result is silently discarded here (Jei: URL boots are silent).
+        if rootfs_is_url:
+            from kento.urlvm import fetch_and_extract_rootfs
+            fetch_and_extract_rootfs(
+                rootfs_ref,
+                container_dir / "rootfs.txz",
+                container_dir / "rootfs-base",
+            ).unwrap()
+            layers = str(container_dir / "rootfs-base")
 
         # Compute state_dir — upper/work may be outside container_dir for sudo users
         state_dir = upper_base(container_id, base_dir if mode in ("vm", "pve-vm") else None)
@@ -1053,15 +1155,21 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         # the undos registered above. See preflight_overlay_layers.
         preflight_overlay_layers(layers, state_dir)
 
-        # Write image reference, layer paths, state dir, mode, and name
+        # Write image reference, layer paths, state dir, mode, and name.
+        # kento-image is the raw source string verbatim — an OCI ref OR the URL
+        # (UNCHANGED write; the URL round-trips for info/diagnose).
         (container_dir / "kento-image").write_text(image + "\n")
         # Record the resolved content-ID alongside the (floating) tag so a
         # later scrub/diagnose can detect when the tag has moved to a new
         # image. Skip if it can't be resolved (older podman) — drift detection
-        # simply degrades to a no-op for that guest.
-        _img_id = resolve_image_id(image)
-        if _img_id:
-            (container_dir / "kento-image-id").write_text(_img_id + "\n")
+        # simply degrades to a no-op for that guest. SKIP entirely for a URL
+        # rootfs: it has no podman content digest (resolve_image_id is a store
+        # op), so no kento-image-id marker is written — its only reader
+        # (diagnose) guards on the file's presence and tolerates absence.
+        if not rootfs_is_url:
+            _img_id = resolve_image_id(image)
+            if _img_id:
+                (container_dir / "kento-image-id").write_text(_img_id + "\n")
         (container_dir / "kento-layers").write_text(layers + "\n")
         (container_dir / "kento-state").write_text(str(state_dir) + "\n")
         (container_dir / "kento-mode").write_text(mode + "\n")
@@ -1215,22 +1323,34 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
             (container_dir / "kento-nesting").write_text(
                 "1\n" if nesting else "0\n")
 
-            # Boot-source override (§8 Phase A): COPY each supplied kernel/
-            # initramfs into the instance dir and record the IN-DIR path as
-            # kento-kernel/kento-initramfs (mirroring kento-mac). Self-contained
-            # — survives the caller deleting their source file — and reaped with
-            # the instance on destroy (shutil.rmtree(container_dir)). Each side
-            # is independent; an unspecified side leaves no marker, so vm.py's
-            # resolver falls back to the in-image path for it. Already validated
-            # (exists + is-file, VM-only) above, before any state mutation.
+            # Boot-source override (§8 Phase A; URL sides B3b): materialize each
+            # supplied kernel/initramfs into the instance dir and record the
+            # IN-DIR path as kento-kernel/kento-initramfs (mirroring kento-mac).
+            # A LOCAL side is COPIED (shutil.copyfile, Phase A — UNCHANGED); a
+            # URL side is FETCHED (fetch_url(...).unwrap()) to the same in-dir
+            # path. Either way the marker holds a LOCAL in-dir path, so
+            # vm.resolve_boot_sources is unchanged (it always reads a local
+            # path). Self-contained — reaped with the instance on destroy — and
+            # each side is independent; an unspecified side leaves no marker
+            # (in-image fallback). URL fetch is in-try so a failure rolls back
+            # via the container-dir undo. Already validated (VM-only; local side
+            # exists + is-file) above, before any state mutation.
             if kernel is not None:
                 kernel_dst = container_dir / "kernel"
-                shutil.copyfile(kernel, kernel_dst)
+                if kernel_url_ref is not None:
+                    from kento.fetch import fetch_url
+                    fetch_url(kernel_url_ref, kernel_dst).unwrap()
+                else:
+                    shutil.copyfile(kernel, kernel_dst)
                 (container_dir / "kento-kernel").write_text(
                     str(kernel_dst) + "\n")
             if initramfs is not None:
                 initramfs_dst = container_dir / "initramfs.img"
-                shutil.copyfile(initramfs, initramfs_dst)
+                if initramfs_url_ref is not None:
+                    from kento.fetch import fetch_url
+                    fetch_url(initramfs_url_ref, initramfs_dst).unwrap()
+                else:
+                    shutil.copyfile(initramfs, initramfs_dst)
                 (container_dir / "kento-initramfs").write_text(
                     str(initramfs_dst) + "\n")
 
