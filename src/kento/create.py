@@ -906,8 +906,8 @@ def create(image: str, *, name: str | None = None, bridge: str | None = None,
         _snippets_info = find_snippets_dir()
 
     # Resolve network configuration
-    from kento import resolve_network
-    network = resolve_network(net_type, bridge, mode, port)
+    from kento import _resolve_network
+    network = _resolve_network(net_type, bridge, mode, port)
     bridge = network["bridge"]
     port = network["port"]
 
