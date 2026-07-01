@@ -9,10 +9,11 @@ It follows the SAME **boundary-conversion discipline** the fetcher established
 (design-doc §2 principle 5, ``result-type-design.md`` §4/§5):
 
 * A **predictable** archive failure — a corrupt/truncated xz stream, a payload
-  that is not a tar, OR a **hostile member** (path traversal, an absolute path,
-  a link whose target escapes the destination, a device/fifo) — is CAUGHT and
-  converted to an ``Error(EXTRACT_FAILED)`` (the ``Result`` channel). A rejected
-  hostile archive is a caller-handleable "this archive is unsafe", not a bug.
+  that is not a tar, OR a **hostile member** that would WRITE outside
+  ``dest_dir`` (a ``..`` traversal name, an absolute member NAME, or a link
+  whose target ESCAPES the destination) — is CAUGHT and converted to an
+  ``Error(EXTRACT_FAILED)`` (the ``Result`` channel). A rejected hostile archive
+  is a caller-handleable "this archive is unsafe", not a bug.
 * The **unexpected** failure — a local-disk ``OSError`` while writing under
   ``dest_dir`` (disk-full, permission-denied) — is NOT caught. It is an
   environmental/system fault, not part of the extract contract, so it PROPAGATES
@@ -23,13 +24,26 @@ It follows the SAME **boundary-conversion discipline** the fetcher established
 
 **Safety is the heart of this block.** The archive bytes are UNTRUSTED and
 extraction happens on the HOST filesystem BEFORE the KVM boundary, so a hostile
-tarball MUST NOT be able to write outside ``dest_dir``. We do NOT hand-roll the
-tar-slip defense — hand-rolled symlink-aware extraction safety is a known CVE
-source. We extract with the PEP 706 stdlib **data filter**
-(``tarfile.data_filter``), the vetted, maintained defense against traversal,
-absolute paths, escaping links, and special files. If the data filter is
-unavailable (Python 3.11.0–3.11.3 lack it) we REFUSE to extract untrusted bytes
-unsafely and RAISE (fail-closed panic) rather than silently degrade.
+tarball MUST NOT be able to WRITE outside ``dest_dir``. That WRITE-containment is
+the only threat that matters here, because the destination is never a live host
+tree: it is an ephemeral rootfs mounted as the guest's ``/`` inside a KVM VM (via
+virtiofs), and its symlinks are only ever dereferenced INSIDE the guest, never on
+the host. We do NOT hand-roll the tar-slip defense — hand-rolled symlink-aware
+extraction safety is a known CVE source. We extract with the PEP 706 stdlib
+**tar filter** (``tarfile.tar_filter``, ``for_data=False``), the vetted,
+maintained filter INTENDED for Unix/system tar archives (filesystem IMAGES, not
+untrusted data archives). It STILL blocks every traversal-write outside
+``dest_dir`` — a ``..`` name, an absolute member NAME (leading slash stripped so
+it lands inside dest), and a link whose target escapes the destination all raise.
+But it DELIBERATELY PERMITS absolute symlink TARGETS (e.g.
+``/usr/lib/ssl/certs -> /etc/ssl/certs``) and special files (device nodes,
+fifos), which are CORRECT-BY-CONSTRUCTION in a real OS rootfs — a gemet rootfs
+carries hundreds of them — and are never a host-side hazard, since the host never
+follows them. Using the stricter ``data_filter`` here is WRONG: it raises
+``AbsoluteLinkError`` on legitimate rootfs symlinks (it is built for untrusted
+DATA archives, not filesystem images). If ``tar_filter`` is unavailable (Python
+3.11.0–3.11.3 lack the PEP 706 filters) we REFUSE to extract without the vetted
+tar-slip defense and RAISE (fail-closed panic) rather than silently degrade.
 
 stdlib only (``tarfile``, ``lzma``, ``logging``, ``pathlib``). Zero pip deps.
 This module is an INTERNAL I/O helper (like ``fetch.py``/``layers.py``): not
@@ -72,9 +86,11 @@ def extract_txz(archive: Path, dest_dir: Path) -> Result[Path]:
       stripping, no layer flatten (single-tree format — OPTION 2 LOCKED).
     * ``Error`` carrying one ERROR ``EXTRACT_FAILED`` condition — a PREDICTABLE
       failure converted at this boundary: a corrupt/truncated xz stream, a
-      not-a-tar payload, OR a hostile member the data filter rejected (traversal,
-      absolute path, escaping link, special file). The context carries the
-      ``archive`` path (and, for a filter rejection, the offending ``member``).
+      not-a-tar payload, OR a hostile member the tar filter rejected as a
+      traversal-write outside ``dest_dir`` (a ``..`` name, an absolute member
+      NAME, or a link whose target escapes the destination). The context carries
+      the ``archive`` path (and, for a filter rejection, the offending
+      ``member``).
 
     An UNEXPECTED failure — a local-disk ``OSError`` while writing under
     ``dest_dir`` — is deliberately NOT caught: it propagates as a panic (an
@@ -91,15 +107,17 @@ def extract_txz(archive: Path, dest_dir: Path) -> Result[Path]:
     this fails closed on a non-xz stream rather than silently accepting, say, a
     ``.tar.gz``.
     """
-    # Fail CLOSED if the PEP 706 data filter is unavailable (Python 3.11.0–3.11.3
-    # lack it; ``requires-python = ">=3.11"`` technically permits those). We
-    # REFUSE to extract untrusted bytes without the vetted tar-slip defense rather
-    # than silently degrade to an unsafe unfiltered extraction. This is a panic (a
+    # Fail CLOSED if the PEP 706 tar filter is unavailable (Python 3.11.0–3.11.3
+    # lack the filters; ``requires-python = ">=3.11"`` technically permits those).
+    # We name the filter we actually USE (``tar_filter``, not ``data_filter``) so
+    # the guard guards what we depend on; both ship together, so this is behavior-
+    # neutral. We REFUSE to extract without the vetted tar-slip defense rather than
+    # silently degrade to an unsafe unfiltered extraction. This is a panic (a
     # bug/environment fault), NOT a caller-handleable outcome — hence a raise, not
     # an Error. Checked BEFORE any filesystem work so nothing is written.
-    if not hasattr(tarfile, "data_filter"):
+    if not hasattr(tarfile, "tar_filter"):
         raise RuntimeError(
-            "safe tar extraction requires the tarfile data filter "
+            "safe tar extraction requires the tarfile tar filter "
             "(Python 3.11.4+); refusing to extract an untrusted archive "
             "without it"
         )
@@ -109,21 +127,23 @@ def extract_txz(archive: Path, dest_dir: Path) -> Result[Path]:
     # extraction write path below and ``fetch.py``'s write-OSError rule.
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.debug("extract: %s -> %s (r:xz, data_filter)", archive, dest_dir)
+    logger.debug("extract: %s -> %s (r:xz, tar_filter)", archive, dest_dir)
 
     # --- The boundary. Catch ONLY the predictable archive failures and convert
     # them to an Error; let everything else propagate (panic).
     #
     # ``tarfile.ReadError`` ⊆ ``tarfile.TarError`` covers corrupt / not-a-tar, and
-    # ``tarfile.FilterError`` ⊆ ``tarfile.TarError`` covers the data filter's
-    # traversal / absolute-path / escaping-link / special-file rejections — so this
+    # ``tarfile.FilterError`` ⊆ ``tarfile.TarError`` covers the tar filter's
+    # traversal-write rejections (``OutsideDestinationError`` for a ``..``/absolute
+    # member name, ``LinkOutsideDestinationError`` for an escaping link) — so this
     # ONE except clause spans both corruption and hostility. ``lzma.LZMAError`` and
     # ``EOFError`` cover a corrupt/truncated xz container that ``r:xz`` cannot even
     # begin to read. A disk ``OSError`` is DELIBERATELY absent from the tuple → it
-    # panics (the fetch.py boundary).
+    # panics (the fetch.py boundary); this includes a special-file ``mknod`` EPERM,
+    # which is an environmental fault (VM create runs as root), not a bad archive.
     try:
         with tarfile.open(archive, mode="r:xz") as tar:
-            tar.extractall(dest_dir, filter=tarfile.data_filter)
+            tar.extractall(dest_dir, filter=tarfile.tar_filter)
     except (tarfile.TarError, lzma.LZMAError, EOFError) as exc:
         return _extract_error(archive, exc)
 
@@ -146,7 +166,7 @@ def _extract_error(archive: Path, exc: Exception) -> Error:
     context: dict[str, object] = {"archive": str(archive)}
     # ``FilterError`` may be absent on an unfilterable stdlib; ``getattr`` with the
     # empty tuple makes ``isinstance`` cleanly False in that case. (We only reach
-    # here on Python that HAS ``data_filter``, so ``FilterError`` is present, but
+    # here on Python that HAS ``tar_filter``, so ``FilterError`` is present, but
     # the guard is defensive and free.)
     filter_error = getattr(tarfile, "FilterError", ())
     if isinstance(exc, filter_error):
