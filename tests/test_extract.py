@@ -3,18 +3,26 @@
 Block B2-extract — the second I/O boundary-conversion site (sibling of
 ``test_fetch.py``). SAFETY is the heart: the archive bytes are untrusted and
 extraction lands on the HOST filesystem before the KVM boundary, so a hostile
-tarball must NOT be able to write outside ``dest_dir``. Asserts:
+tarball must NOT be able to WRITE outside ``dest_dir``. We extract a real OS
+rootfs (a filesystem IMAGE, not a data archive) with the PEP 706
+``tarfile.tar_filter`` (``for_data=False``): it blocks every traversal-write
+outside ``dest_dir`` but DELIBERATELY permits absolute symlink TARGETS and
+special files, which are correct-by-construction in a rootfs and only ever
+dereferenced inside the guest VM, never on the host. Asserts:
 
 * happy path: a normal tree (incl. a legitimate rootfs relative symlink) →
   ``Ok(dest_dir)`` with exact bytes and the benign symlink preserved.
-* the tar-slip guard (PEP 706 data filter): ``../evil`` traversal, an absolute
-  ``/etc/...`` path, and the link-then-write-through symlink escape each →
-  ``Error(EXTRACT_FAILED)`` AND nothing is written at the escape target.
+* the real-rootfs regression (run-41 E2E): a symlink whose TARGET is an ABSOLUTE
+  path (e.g. ``sitecustomize.py -> /etc/python3.13/…``) now EXTRACTS cleanly —
+  ``data_filter`` wrongly rejected these with ``AbsoluteLinkError``.
+* the tar-slip guard (PEP 706 tar filter): ``../evil`` traversal, an absolute
+  member NAME, and the link-then-write-through symlink escape each →
+  ``Error(EXTRACT_FAILED)`` AND nothing is written outside ``dest_dir``.
 * corruption: a truncated/garbage ``.txz`` and a valid-xz-of-non-tar payload →
   ``Error(EXTRACT_FAILED)``.
 * the PANIC boundary: a disk ``OSError`` during extraction is NOT converted — it
   propagates (mirrors ``fetch.py``).
-* the fail-closed panic: if ``tarfile.data_filter`` is absent, ``extract_txz``
+* the fail-closed panic: if ``tarfile.tar_filter`` is absent, ``extract_txz``
   RAISES ``RuntimeError`` and does NOT extract.
 
 All ``.txz`` fixtures are BUILT IN-TEST with the stdlib ``tarfile`` writer — no
@@ -113,13 +121,53 @@ def test_dest_dir_is_created(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# tar-slip: path traversal, absolute path, symlink escape → Error, no host write.
-# Mutation guard: dropping `filter=tarfile.data_filter` reddens these.
+# real-rootfs regression (run-41 E2E): an ABSOLUTE-target symlink extracts.
+# This is the whole point of the data_filter -> tar_filter switch. A real OS
+# rootfs is full of legitimate absolute symlinks (gemet's bifrost-1.7.3.txz has
+# 593); ``data_filter`` raised ``AbsoluteLinkError`` on every one of them and the
+# URL-VM E2E failed at extract. ``tar_filter`` permits them: they are never
+# dereferenced on the host, only inside the guest where the target resolves.
+# Mutation guard: reverting to ``tarfile.data_filter`` reddens this.
+# --------------------------------------------------------------------------- #
+
+
+def test_absolute_symlink_target_extracts_cleanly(tmp_path):
+    def build(tar):
+        _add_file(tar, "./etc/hostname", b"gemet\n")
+        # The exact shape that broke the E2E: a member whose symlink TARGET is an
+        # absolute path pointing at a location that only exists inside the guest.
+        _add_symlink(
+            tar, "./usr/lib/python3.13/sitecustomize.py",
+            "/etc/python3.13/sitecustomize.py",
+        )
+        # And a masked-unit style ``-> /dev/null`` absolute link.
+        _add_symlink(tar, "./etc/systemd/system/foo.service", "/dev/null")
+
+    archive = _make_txz(tmp_path / "rootfs.txz", build)
+    dest = tmp_path / "root"
+
+    result = extract_txz(archive, dest)
+
+    assert isinstance(result, Ok)
+    assert result.unwrap() == dest
+    link = dest / "usr" / "lib" / "python3.13" / "sitecustomize.py"
+    assert link.is_symlink()
+    # the absolute target is preserved verbatim (NOT rewritten/rejected)
+    assert Path(link.readlink()) == Path("/etc/python3.13/sitecustomize.py")
+    masked = dest / "etc" / "systemd" / "system" / "foo.service"
+    assert masked.is_symlink()
+    assert Path(masked.readlink()) == Path("/dev/null")
+
+
+# --------------------------------------------------------------------------- #
+# tar-slip: path traversal, absolute NAME, symlink escape → Error, no host write.
+# Mutation guard: dropping `filter=tarfile.tar_filter` reddens these.
 # --------------------------------------------------------------------------- #
 
 
 def test_path_traversal_rejected(tmp_path):
-    # A member climbing out of dest_dir with ``..``. The data filter rejects it.
+    # A member climbing out of dest_dir with ``..``. The tar filter rejects it
+    # (``OutsideDestinationError`` ⊆ ``FilterError`` ⊆ ``TarError``).
     escape_target = tmp_path / "evil"  # the parent of dest_dir
 
     def build(tar):
@@ -138,13 +186,13 @@ def test_path_traversal_rejected(tmp_path):
 
 
 def test_absolute_path_contained_not_escaped(tmp_path):
-    # An absolute member name ``/etc/kento-pwned``. The PEP 706 data filter's
+    # An absolute member NAME ``/etc/kento-pwned``. The PEP 706 tar filter's
     # documented handling is to STRIP the leading slash and extract it SAFELY
     # INSIDE dest_dir (root/etc/kento-pwned) — it does NOT raise, because the
-    # result never leaves the destination. That is the vetted stdlib behavior we
-    # defer to (the brief's "absolute → Error" is superseded by the actual
-    # data_filter contract; SAFETY — no host write outside dest_dir — is met
-    # either way). We assert the safe outcome, not a rejection.
+    # result never leaves the destination. (This is an absolute member NAME, NOT
+    # an absolute symlink TARGET — tar_filter contains the former and permits the
+    # latter; see test_absolute_symlink_target_extracts_cleanly.) SAFETY — no host
+    # write outside dest_dir — is met. We assert the safe outcome, not a rejection.
     host_target = Path("/etc/kento-pwned")  # must never be touched
     assert not host_target.exists()
 
@@ -168,7 +216,9 @@ def test_absolute_path_contained_not_escaped(tmp_path):
 def test_symlink_escape_rejected(tmp_path):
     # Classic link-then-write-through: a symlink ``evil`` -> an absolute dir,
     # followed by a member ``evil/x`` that would write THROUGH the link outside
-    # dest_dir. The data filter rejects the escaping link.
+    # dest_dir. The tar filter rejects the escaping link (a link whose target
+    # escapes the destination), even though it permits non-escaping absolute
+    # symlink targets — the escape is the write-outside-dest threat.
     outside = tmp_path / "outside"
     outside.mkdir()
     sentinel = outside / "x"
@@ -319,12 +369,12 @@ def test_missing_archive_propagates_as_panic(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# fail-closed panic — no data filter → RuntimeError, and NO extraction attempted.
+# fail-closed panic — no tar filter → RuntimeError, and NO extraction attempted.
 # Mutation guard: dropping the hasattr guard would let this reach extractall.
 # --------------------------------------------------------------------------- #
 
 
-def test_data_filter_absent_fails_closed(monkeypatch, tmp_path):
+def test_tar_filter_absent_fails_closed(monkeypatch, tmp_path):
     def build(tar):
         _add_file(tar, "./etc/hostname", b"x\n")
 
@@ -333,12 +383,12 @@ def test_data_filter_absent_fails_closed(monkeypatch, tmp_path):
 
     # Assert extractall is NEVER reached: patch it to fail loudly.
     def _must_not_run(self, *a, **k):
-        raise AssertionError("extractall called despite absent data filter")
+        raise AssertionError("extractall called despite absent tar filter")
 
     monkeypatch.setattr(tarfile.TarFile, "extractall", _must_not_run)
-    monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    monkeypatch.delattr(tarfile, "tar_filter", raising=False)
 
-    with pytest.raises(RuntimeError, match="data filter"):
+    with pytest.raises(RuntimeError, match="tar filter"):
         extract_txz(archive, dest)
 
     # and it must NOT return an Error, and dest_dir must not have been created
