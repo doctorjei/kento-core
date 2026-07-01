@@ -396,8 +396,20 @@ and its writable layer. Errors if the instance is running unless
 └── rootfs/                     # Overlayfs mount point
 ```
 
+## Environment overrides
+
+- `KENTO_STATE_DIR` — base directory for the writable overlay layer (sidesteps
+  overlay-on-overlay when the default location sits on an overlayfs).
+- `KENTO_URL_MAX_BYTES` — size cap for a URL fetch (VM URL-source rootfs /
+  kernel / initramfs). Default **2 GiB**; a fetch exceeding the cap fails.
+- `KENTO_APPARMOR_PROFILE` — override the emitted plain-LXC AppArmor profile
+  (default `generated`).
+
 ## Documentation
 
+- [Library Guide](docs/library-guide.md) — using `kento-core` as an importable
+  Python library (`import kento`): the typed object model, `Result` handling,
+  and URL-VM from code. Start here if you are a library consumer.
 - [Getting Started](docs/getting-started.md) — install, first instance walkthrough
 - [Modes](docs/modes.md) — lxc vs pve-lxc vs vm vs pve-vm, auto-detection, defaults
 - [VM Mode](docs/vm-mode.md) — image requirements, SSH access, port forwarding
