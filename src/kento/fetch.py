@@ -314,28 +314,20 @@ def _stream_to_file(
     failures raise out of this function to ``fetch_url``'s boundary; a disk
     ``OSError`` while writing also propagates (panic) — it is NOT converted here.
 
-    The redirect-observing ``opener`` is installed as urllib's default so the
-    ``urlopen`` call routes its redirect handling through ``observer`` (which
-    records any cleartext hop). The previous default opener is restored in a
-    ``finally`` so this call has no lasting global effect. An INSECURE_REDIRECT
-    ``Warning`` is appended to ``conditions`` ONLY on a clean read — never on the
-    SIZE_EXCEEDED Error, and never on a network failure (those raise before the
-    append), honouring "the warning rides only on Ok→Warning".
+    The connection is opened through ``opener`` (which carries ``observer``), so
+    urllib's redirect chain flows through ``observer`` and any cleartext hop is
+    recorded — with NO global state touched (a scoped opener, not
+    ``install_opener``). An INSECURE_REDIRECT ``Warning`` is appended to
+    ``conditions`` ONLY on a clean read — never on the SIZE_EXCEEDED Error, and
+    never on a network failure (those raise before the append), honouring "the
+    warning rides only on Ok→Warning".
     """
-    # ``urlopen`` opens the connection (may raise URLError/HTTPError/timeout — the
-    # boundary catches it) using the installed ``opener``, so redirects flow
-    # through ``observer``. Save/restore the prior default opener around the call
-    # (private ``_opener`` global; ``install_opener`` is the public setter) so we
-    # never leak the redirect handler into a caller's later ``urlopen`` use. The
-    # ``with`` on the response closes the socket on every exit path. No cache
-    # (no-cache: a fresh GET each call).
-    previous_opener = urllib.request._opener
-    urllib.request.install_opener(opener)
-    try:
-        resp_cm = urllib.request.urlopen(wire, timeout=timeout)
-    finally:
-        urllib.request.install_opener(previous_opener)
-    with resp_cm as resp:
+    # ``opener.open`` opens the connection (may raise URLError/HTTPError/timeout —
+    # the boundary catches it) and follows redirects through ``observer``. It is
+    # the scoped equivalent of ``urlopen`` (which is just the module-default
+    # opener), so we hold NO global state. The ``with`` on the response closes the
+    # socket on every exit path. No cache (no-cache: a fresh GET each call).
+    with opener.open(wire, timeout=timeout) as resp:
         total = 0
         exceeded = False
         # The destination file handle is opened in the SAME ``with`` as the

@@ -69,21 +69,54 @@ def _ref(url: str) -> UrlReference:
     return UrlReference.parse(url).unwrap()
 
 
-def _patch_urlopen(monkeypatch, fn):
-    """Patch the symbol the fetcher actually calls (``urllib.request.urlopen``).
+def _patch_urlopen(monkeypatch, fn, *, redirect_hops=None):
+    """Patch the fetcher's opener seam so ``opener.open`` is driven by ``fn``.
 
-    The fetcher imports the module and calls ``urllib.request.urlopen`` by
-    attribute, so we patch it on the module. ``fn`` receives ``(url, *,
-    timeout=...)`` and returns a response (or raises).
+    The fetcher opens the connection via ``opener.open(wire, timeout=...)`` where
+    ``opener, observer = _redirect_opener()``. We patch ``_redirect_opener`` to
+    return a fake opener whose ``.open`` records the URL and calls ``fn`` (which
+    returns a response or raises) — the drop-in replacement for the old
+    ``urlopen`` patch, so ``fn``'s contract is unchanged.
+
+    Crucially the fake opener drives the REAL ``observer`` through its own
+    ``redirect_request`` for each URL in ``redirect_hops`` BEFORE returning the
+    response. That exercises the genuine wiring (fetcher-created observer →
+    ``opener.open`` → ``observer.redirect_request`` → ``insecure_hops`` → the
+    Condition), so a mutation that drops the observer from the opener, or ignores
+    ``observer.insecure_hops``, reddens. ``redirect_hops`` are raw ``newurl``
+    strings (may be http:// or https://); the observer records only the cleartext
+    ones, exactly as in production.
+
+    Returns the list of URLs ``.open`` was called with.
     """
     calls = []
+    hops = list(redirect_hops or [])
 
-    def wrapper(url, *args, **kwargs):
-        calls.append(url)
-        return fn(url, *args, **kwargs)
+    class _FakeOpener:
+        def __init__(self, observer):
+            self._observer = observer
 
-    monkeypatch.setattr(urllib.request, "urlopen", wrapper)
+        def open(self, url, *args, **kwargs):
+            calls.append(url)
+            # Drive the real observer through the same redirect_request path
+            # urllib would use, so a genuine http:// hop is recorded via the
+            # wiring (not preloaded). A 302 GET is a followed redirect.
+            for newurl in hops:
+                req = urllib.request.Request(url)
+                self._observer.redirect_request(
+                    req, None, 302, "Found", email.message.Message(), newurl
+                )
+            return fn(url, *args, **kwargs)
+
+    def _fake_redirect_opener():
+        observer = _RedirectObserver()
+        return _FakeOpener(observer), observer
+
+    monkeypatch.setattr(fetch_mod, "_redirect_opener", _fake_redirect_opener)
     return calls
+
+
+import email.message  # noqa: E402  (used by _patch_urlopen's redirect driving)
 
 
 # --------------------------------------------------------------------------- #
@@ -395,31 +428,9 @@ def test_env_unset_uses_default(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-import email.message  # noqa: E402  (test-local: minimal headers for the handler)
-
-
 def _hdrs() -> email.message.Message:
     """A minimal ``headers`` mapping for calling ``redirect_request`` directly."""
     return email.message.Message()
-
-
-def _preload_observer(monkeypatch, hops):
-    """Patch ``_redirect_opener`` so the observer ends the stream with ``hops``.
-
-    Returns an observer already carrying ``hops`` in ``insecure_hops`` (simulating
-    what urllib's redirect chain would have recorded), paired with the real
-    opener. This is the ``build_opener``/opener seam the brief calls for; the body
-    itself still streams through the patched ``urlopen``.
-    """
-    observer = _RedirectObserver()
-    observer.insecure_hops = list(hops)
-    opener = urllib.request.build_opener(observer)
-
-    def _fake_opener():
-        return opener, observer
-
-    monkeypatch.setattr(fetch_mod, "_redirect_opener", _fake_opener)
-    return observer
 
 
 # --- handler unit: records an http:// hop, still follows; ignores https://. ---
@@ -464,13 +475,119 @@ def test_observer_records_nothing_when_super_refuses(monkeypatch):
     assert obs.insecure_hops == []
 
 
+# --- REAL WIRING: the PRODUCTION _redirect_opener drives the observer through
+# urllib's genuine redirect machinery (only the transport is faked). This is the
+# mutation-G guard: if _redirect_opener stops attaching the observer to the
+# opener (build_opener() vs build_opener(observer)), urllib never calls the
+# observer → insecure_hops stays empty → these two tests redden. ------------- #
+
+
+class _FakeHTTPResponse(io.BytesIO):
+    """A minimal ``HTTPResponse`` stand-in for driving urllib's redirect handler.
+
+    Carries ``status``/``code``/``msg`` + ``info()`` headers so urllib's real
+    ``HTTPRedirectHandler.http_error_30x`` fires (and calls the observer's
+    ``redirect_request``). Streams ``body`` via ``BytesIO``.
+    """
+
+    def __init__(self, code, headers, url, body=b""):
+        super().__init__(body)
+        self.status = code
+        self.code = code
+        self.msg = "Found" if code in (301, 302, 303, 307, 308) else "OK"
+        self._headers = headers
+        self.url = url
+
+    def info(self):
+        return self._headers
+
+    def geturl(self):
+        return self.url
+
+
+def _fake_transport(location):
+    """A handler that answers the first hop with a 302→``location``, then a 200.
+
+    Installed as BOTH the http and https transport of the PRODUCTION opener, so
+    urllib's redirect chain (and thus the real observer) runs with no network.
+    ``location`` is the redirect target (http:// or https://).
+    """
+
+    class _T(urllib.request.BaseHandler):
+        def _open(self, req):
+            url = req.full_url
+            h = email.message.Message()
+            if url.startswith("https://start"):
+                h["Location"] = location
+                return _FakeHTTPResponse(302, h, url)
+            return _FakeHTTPResponse(200, h, url, b"REAL-WIRING-BODY")
+
+        https_open = _open
+        http_open = _open
+
+    return _T()
+
+
+def _install_fake_transport(monkeypatch, location):
+    """Wrap the production ``_redirect_opener`` so its opener uses ``_fake_transport``.
+
+    The observer is the REAL one the production factory attaches — untouched — so
+    what populates ``insecure_hops`` is urllib's genuine dispatch, not the test.
+    """
+    real = fetch_mod._redirect_opener
+
+    def _wrapped():
+        opener, observer = real()
+        transport = _fake_transport(location)
+        opener.handle_open["https"] = [transport]
+        opener.handle_open["http"] = [transport]
+        return opener, observer
+
+    monkeypatch.setattr(fetch_mod, "_redirect_opener", _wrapped)
+
+
+def test_real_wiring_records_cleartext_hop_through_urllib(monkeypatch, tmp_path):
+    # End-to-end through the PRODUCTION opener + real HTTPRedirectHandler dispatch
+    # (transport faked). Proves the observer is actually wired into the opener.
+    ref = _ref("https://start/rootfs.txz")
+    _install_fake_transport(monkeypatch, "http://evil.example/y?token=SECRET")
+
+    dest = tmp_path / "out.bin"
+    result = fetch_url(ref, dest)
+
+    assert isinstance(result, Warning)
+    assert dest.read_bytes() == b"REAL-WIRING-BODY"
+    cond = result.conditions[0]
+    assert cond.kind is ConditionKind.INSECURE_REDIRECT
+    assert cond.context["insecure_hop_host"] == "evil.example"
+    # secret from the real Location query must not leak
+    blob = cond.message + repr(dict(cond.context))
+    assert "SECRET" not in blob and "token" not in blob
+
+
+def test_real_wiring_https_redirect_stays_ok(monkeypatch, tmp_path):
+    # Same real dispatch, but the hop is https:// → observer records nothing → Ok.
+    ref = _ref("https://start/rootfs.txz")
+    _install_fake_transport(monkeypatch, "https://cdn.example/y")
+
+    result = fetch_url(ref, tmp_path / "out.bin")
+    assert isinstance(result, Ok)
+    assert result.conditions == ()
+
+
 # --- fetch-level: insecure hop on a clean fetch → Warning(INSECURE_REDIRECT). ---
 
 
 def test_insecure_hop_on_clean_fetch_is_warning(monkeypatch, tmp_path):
     ref = _ref("https://host/path/rootfs.txz")
-    _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResponse(b"good body"))
-    _preload_observer(monkeypatch, ["http://evil.example/redir?token=abc"])
+    # The redirect is driven through the REAL observer via the opener wiring
+    # (redirect_hops), not preloaded — so a mutation dropping the observer from
+    # the opener, or ignoring observer.insecure_hops, reddens this.
+    _patch_urlopen(
+        monkeypatch,
+        lambda *a, **k: _FakeResponse(b"good body"),
+        redirect_hops=["http://evil.example/redir?token=abc"],
+    )
 
     dest = tmp_path / "out.bin"
     result = fetch_url(ref, dest)
@@ -491,9 +608,10 @@ def test_insecure_hop_does_not_leak_secret(monkeypatch, tmp_path):
     # The recorded hop carries a presigned token in its query; it must appear
     # NOWHERE in the Condition. Mutation guard: dumping newurl raw reddens this.
     ref = _ref("https://host/x")
-    _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResponse(b"x"))
-    _preload_observer(
-        monkeypatch, ["http://evil.example/p?token=SECRET&sig=DEADBEEF"]
+    _patch_urlopen(
+        monkeypatch,
+        lambda *a, **k: _FakeResponse(b"x"),
+        redirect_hops=["http://evil.example/p?token=SECRET&sig=DEADBEEF"],
     )
 
     result = fetch_url(ref, tmp_path / "out.bin")
@@ -508,10 +626,13 @@ def test_insecure_hop_does_not_leak_secret(monkeypatch, tmp_path):
 
 def test_multiple_insecure_hops_collapse_to_one_condition(monkeypatch, tmp_path):
     ref = _ref("https://host/x")
-    _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResponse(b"x"))
-    _preload_observer(
+    _patch_urlopen(
         monkeypatch,
-        ["http://first.example/a", "http://last.example/b?token=T"],
+        lambda *a, **k: _FakeResponse(b"x"),
+        redirect_hops=[
+            "http://first.example/a",
+            "http://last.example/b?token=T",
+        ],
     )
 
     result = fetch_url(ref, tmp_path / "out.bin")
@@ -525,10 +646,15 @@ def test_multiple_insecure_hops_collapse_to_one_condition(monkeypatch, tmp_path)
 
 
 def test_clean_https_redirect_is_plain_ok(monkeypatch, tmp_path):
-    # An https→https redirect (observer records nothing) → Ok, no warning.
+    # An https→https redirect is driven through the real observer; it records
+    # nothing (secure hop) → Ok, no warning. Exercises the http-only guard via
+    # the wiring, not a preload.
     ref = _ref("https://host/x")
-    _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResponse(b"body"))
-    _preload_observer(monkeypatch, [])  # no insecure hop recorded
+    _patch_urlopen(
+        monkeypatch,
+        lambda *a, **k: _FakeResponse(b"body"),
+        redirect_hops=["https://cdn.example/y"],
+    )
 
     result = fetch_url(ref, tmp_path / "out.bin")
     assert isinstance(result, Ok)
@@ -539,8 +665,11 @@ def test_fragment_and_insecure_hop_ride_together(monkeypatch, tmp_path):
     # Both a dropped fragment AND a cleartext hop on a clean fetch → ONE Warning
     # carrying BOTH conditions.
     ref = _ref("https://host/path/rootfs.txz#section-2")
-    _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResponse(b"body"))
-    _preload_observer(monkeypatch, ["http://evil.example/y"])
+    _patch_urlopen(
+        monkeypatch,
+        lambda *a, **k: _FakeResponse(b"body"),
+        redirect_hops=["http://evil.example/y"],
+    )
 
     result = fetch_url(ref, tmp_path / "out.bin")
     assert isinstance(result, Warning)
@@ -563,8 +692,7 @@ def test_insecure_hop_then_failure_is_error_not_warning(monkeypatch, tmp_path):
             hdrs=None, fp=None,
         )
 
-    _patch_urlopen(monkeypatch, _raise)
-    _preload_observer(monkeypatch, ["http://evil.example/y"])
+    _patch_urlopen(monkeypatch, _raise, redirect_hops=["http://evil.example/y"])
 
     result = fetch_url(ref, tmp_path / "out.bin")
     assert isinstance(result, Error)
@@ -580,9 +708,10 @@ def test_insecure_hop_then_size_exceeded_is_error_not_warning(
     # SIZE_EXCEEDED Error; the redirect warning does not ride on it.
     ref = _ref("https://host/big.txz")
     _patch_urlopen(
-        monkeypatch, lambda *a, **k: _FakeResponse(b"A" * 4096)
+        monkeypatch,
+        lambda *a, **k: _FakeResponse(b"A" * 4096),
+        redirect_hops=["http://evil.example/y"],
     )
-    _preload_observer(monkeypatch, ["http://evil.example/y"])
 
     dest = tmp_path / "big.bin"
     result = fetch_url(ref, dest, max_bytes=16)
@@ -607,17 +736,22 @@ def test_initial_non_https_still_errors_no_network(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_opener_default_restored_after_fetch(monkeypatch, tmp_path):
-    # The redirect opener is installed only for the duration of the urlopen call;
-    # the previous global default opener must be restored afterward (no leak into
-    # a caller's later urllib use).
+def test_fetch_does_not_mutate_global_opener(monkeypatch, tmp_path):
+    # The fetcher uses a SCOPED opener (opener.open), never install_opener, so a
+    # caller's global default opener is left untouched — no process-global
+    # foot-gun. Install a sentinel, fetch, assert it is still the default.
     sentinel = urllib.request.build_opener()
     urllib.request.install_opener(sentinel)
     try:
         ref = _ref("https://host/x")
-        _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResponse(b"x"))
-        fetch_url(ref, tmp_path / "out.bin")
-        assert urllib.request._opener is sentinel
+        _patch_urlopen(
+            monkeypatch,
+            lambda *a, **k: _FakeResponse(b"x"),
+            redirect_hops=["http://evil.example/y"],
+        )
+        result = fetch_url(ref, tmp_path / "out.bin")
+        assert isinstance(result, Warning)  # the fetch really ran the wiring
+        assert urllib.request._opener is sentinel  # global untouched
     finally:
         urllib.request.install_opener(None)
 
