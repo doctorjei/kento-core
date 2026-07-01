@@ -385,9 +385,17 @@ class Instance(ABC):
         An explicit I/O HANDLE METHOD — NOT a property — because resolution
         queries the backing store (§2 principle 2, §4.5: "resolution + prepare
         are explicit handle actions, not properties"). Resolves the FIRST
-        (rootfs) boot source — 1.0 is a single ``oci://`` source (§3.8/§4) — via
-        ``OciImage.resolve`` against the local store (no network); propagates
-        ``ImageNotFoundError`` if the content is gone (no fabricated handle).
+        (rootfs) boot source by its scheme:
+
+        * an ``oci://`` source → ``OciImage`` via ``OciImage._resolve`` against
+          the local store (no network); propagates ``ImageNotFoundError`` if the
+          content is gone (no fabricated handle).
+        * an ``http(s)://`` source (URL-VM, OPTION 2) → ``LocalDirectoryImage``
+          via its CHEAP ``resolve`` (no fetch — the ``.txz`` fetch+extract is
+          ``prepare``'s job at start; this keeps ``info`` / ``image()`` honest for
+          a URL instance without touching the boot path).
+        * any other scheme (a future ``file://``) has no resolver yet →
+          ``InstanceNotFoundError`` (surface honestly rather than guess).
 
         Boot-source override echo (§8 Phase A): when this instance carries a
         persisted ``kento-kernel`` / ``kento-initramfs`` (a VM with ``--kernel`` /
@@ -398,26 +406,35 @@ class Instance(ABC):
         with NO override resolves with both ``None`` (unchanged §4.1 default).
         """
         from dataclasses import replace
-        from kento._images import OciImage
+        from kento._images import LocalDirectoryImage, OciImage
+        from kento._references import UrlReference
 
         if not self._sources:
             raise InstanceNotFoundError(
                 f"{self._name}: no boot source recorded (kento-image missing)"
             )
         rootfs_source = self._sources[0]
-        if not isinstance(rootfs_source, OciReference):
-            # 1.0 resolves only oci:// sources; a reserved scheme (file/http)
-            # has no resolver yet. Surface honestly rather than guess (§2 p5).
+        if isinstance(rootfs_source, OciReference):
+            # Use the RAISING ``_resolve`` (not the public Result-returning
+            # ``resolve``): ``Instance.image()`` is still a raising method
+            # (converted in S3), so an ``ImageNotFoundError`` must propagate UP to
+            # ``image()``'s own future boundary with its real kind, not collapse to
+            # ``INTERNAL`` via an intermediate ``.unwrap()`` (the KIND-FIDELITY
+            # rule, Result sweep S2).
+            img: Image = OciImage._resolve(rootfs_source)
+        elif isinstance(rootfs_source, UrlReference):
+            # URL-VM (OPTION 2): an ``https://…/rootfs.txz`` boot source resolves
+            # to a ``LocalDirectoryImage``. ``resolve`` is CHEAP (no fetch — the
+            # heavy fetch/extract is ``prepare``'s job, at start), so ``info`` /
+            # ``image()`` are honest for a URL instance with no boot-path change.
+            img = LocalDirectoryImage.resolve(rootfs_source)
+        else:
+            # A reserved scheme with no resolver yet (e.g. a future ``file://``
+            # FileReference). Surface honestly rather than guess (§2 p5).
             raise InstanceNotFoundError(
-                f"{self._name}: boot source {rootfs_source!r} is not an "
-                f"OCI reference (only oci:// is resolvable in 1.0)."
+                f"{self._name}: boot source {rootfs_source!r} is not resolvable "
+                f"in 1.0 (only oci:// and http(s):// sources are supported)."
             )
-        # Use the RAISING ``_resolve`` (not the public Result-returning
-        # ``resolve``): ``Instance.image()`` is still a raising method (converted
-        # in S3), so an ``ImageNotFoundError`` must propagate UP to ``image()``'s
-        # own future boundary with its real kind, not collapse to ``INTERNAL`` via
-        # an intermediate ``.unwrap()`` (the KIND-FIDELITY rule, Result sweep S2).
-        img = OciImage._resolve(rootfs_source)
 
         kernel_meta = _read_meta(self._dir, "kento-kernel")
         initramfs_meta = _read_meta(self._dir, "kento-initramfs")
@@ -3036,19 +3053,24 @@ def _load_snapshot(container_dir: Path, mode: str) -> Instance:
 def _load_sources(container_dir: Path) -> tuple[SourceReference, ...]:
     """Build the ``sources`` tuple from ``kento-image`` (§11.0, §3.8/§4).
 
-    1.0 is a single ``oci://`` boot source, so this is a 1-element tuple of one
-    ``OciReference`` parsed from the recorded ``kento-image`` ref. The image ref
-    is parsed FAITHFULLY (``OciReference.parse`` — §2 principle 3, never re-split
-    by hand). An absent ``kento-image`` would mean the dir is not a kento
-    instance, which the enumeration/resolution already excludes (every kento dir
-    has a ``kento-image``); if it is genuinely missing here we yield an empty
-    tuple rather than fabricate a ref. ``kento-image-id`` is the resolved content
-    pin, surfaced via the ``Image`` family (§4), not a second ``source``.
+    A 1-element tuple of the ONE boot source parsed from the recorded
+    ``kento-image`` ref, dispatched by scheme via ``SourceReference.parse``
+    (§2 principle 3 — faithful scheme-dispatch, never re-split by hand): a bare
+    or ``oci://`` ref → ``OciReference``; an ``http(s)://…/rootfs.txz`` ref (the
+    URL-VM boot source, OPTION 2) → ``UrlReference``. (Previously this called
+    ``OciReference.parse`` directly, which every URL ref failed; the family
+    dispatch is what lets a URL instance's ``sources`` / ``image()`` be honest.)
+
+    An absent ``kento-image`` would mean the dir is not a kento instance, which
+    the enumeration/resolution already excludes (every kento dir has a
+    ``kento-image``); if it is genuinely missing here we yield an empty tuple
+    rather than fabricate a ref. ``kento-image-id`` is the resolved content pin,
+    surfaced via the ``Image`` family (§4), not a second ``source``.
     """
     image = _read_meta(container_dir, "kento-image")
     if not image:
         return ()
-    return (OciReference.parse(image).unwrap(),)
+    return (SourceReference.parse(image).unwrap(),)
 
 
 def _load_storage(container_dir: Path) -> StorageMode:

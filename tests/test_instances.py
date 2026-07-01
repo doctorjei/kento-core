@@ -3133,3 +3133,75 @@ def test_image_initramfs_only_override(tmp_path):
         img = inst.image()
     assert img.kernel is None
     assert img.initramfs == icopy
+
+
+# --------------------------------------------------------------------------- #
+# B3a — Instance.image() resolves an http(s):// boot source to a
+# LocalDirectoryImage (URL-VM, OPTION 2), WITHOUT any create/boot change.
+# --------------------------------------------------------------------------- #
+
+_URL_IMG = "https://ex.com/img/rootfs.txz"
+
+
+def test_image_url_source_resolves_localdirimage(tmp_path):
+    from kento._references import UrlReference
+
+    d = _make_vm(tmp_path, **{"kento-image": _URL_IMG})
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    # the URL marker parsed to a UrlReference in _sources (family dispatch)
+    assert isinstance(inst.sources[0], UrlReference)
+    # resolve is CHEAP — no fetch happens at image() time.
+    with patch("kento.fetch.fetch_url") as mf:
+        img = inst.image()
+    mf.assert_not_called()
+    # Assert the concrete type by NAME, not isinstance: a sibling test
+    # (test_images_types.test_module_import_has_no_subprocess_at_import) reloads
+    # kento._images, which rebinds the class object, so a cross-module isinstance
+    # is order-fragile. The name + source round-trip is the honest, stable check.
+    assert type(img).__name__ == "LocalDirectoryImage"
+    # the source round-trips the recorded URL.
+    assert img.source.render() == _URL_IMG
+    assert img.kernel is None
+    assert img.initramfs is None
+
+
+def test_image_url_source_echoes_kernel_override(tmp_path):
+    """The generic kernel/initramfs echo path works for a URL image too."""
+    kcopy = tmp_path / "vm" / "myvm" / "kernel"
+    d = _make_vm(tmp_path, **{"kento-image": _URL_IMG,
+                              "kento-kernel": str(kcopy)})
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    with patch("kento.fetch.fetch_url"):
+        img = inst.image()
+
+    assert type(img).__name__ == "LocalDirectoryImage"
+    assert img.kernel == kcopy
+    assert img.initramfs is None
+
+
+def test_image_oci_source_unchanged_regression(tmp_path):
+    """An OCI instance still resolves via OciImage._resolve — no regression."""
+    d = _make_vm(tmp_path)  # default kento-image = droste-hair:latest
+    with patch("kento.is_running", return_value=False):
+        inst = _instances._load_snapshot(d, "vm")
+    base = _fake_oci_image()
+    with patch("kento._images.OciImage._resolve", return_value=base) as mres:
+        img = inst.image()
+    mres.assert_called_once_with(OciReference.parse("droste-hair:latest").unwrap())
+    assert img is base
+
+
+def test_image_file_scheme_source_still_unresolvable(tmp_path):
+    """A file:// (unbuilt) boot source is a PANIC (NotImplementedError), unchanged.
+
+    SourceReference.parse routes ``file://`` to a NotImplementedError (an unbuilt
+    feature, not malformed input), so _load_sources panics on load — a file
+    source is genuinely not supported. This asserts B3a did NOT accidentally make
+    a non-URL, non-OCI scheme resolvable.
+    """
+    d = _make_vm(tmp_path, **{"kento-image": "file:///srv/rootfs"})
+    with patch("kento.is_running", return_value=False):
+        with pytest.raises(NotImplementedError):
+            _instances._load_snapshot(d, "vm")
